@@ -9,11 +9,11 @@ plugins {
 
 // TODO: Configure your extension here (please change the defaults!)
 qupathExtension {
-    name = "qupath-extension-template"
+    name = "AnnoTools"
     group = "io.github.qupath"
-    version = "0.1.0-SNAPSHOT"
-    description = "A simple QuPath extension"
-    automaticModule = "io.github.qupath.extension.template"
+    version = "0.1.0"
+    description = "A simple QuPath extension to easily modify annotations across a project"
+    automaticModule = "qupath.ext.annotools"
 }
 
 // TODO: Define your dependencies here
