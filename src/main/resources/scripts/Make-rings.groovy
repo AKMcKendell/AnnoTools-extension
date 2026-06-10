@@ -45,25 +45,47 @@ def createProgressWindow( String title, int totalImages ) {
         def stage = new Stage()
         stage.setTitle( title )
         
-        def imageLabel = new Label( "Starting... " )
-        def stepLabel = new Label( "" )
-        def progressLabel = new Label( "0 / ${totalImages}" )
+        def imageLabel = new Label( "Image:" )
+        def imageName = new Label( "Starting..." )
+        def imageRow = new HBox( 5, imageLabel, imageName )
+        
         def bar = new ProgressBar( 0.0 )
         bar.setPrefWidth( 350 )
+        def progressLabel = new Label( "0 / ${totalImages}" )
+        def barRow = new HBox( 10, bar, progressLabel )
+        
+        def stepLabel = new Label( "Step:" )
+        def stepUpdate = new Label()
+        def stepProgress = new Label()
+        def stepRow = new HBox( 5, stepLabel, stepUpdate, stepProgress )
         
         def cancelBtn = new Button( "Cancel" )
         cancelBtn.setDisable( false )
-        
-        def timerLabel = new Label( "Elapsed: 00:00:00" )
         def spacer = new Region()
         HBox.setHgrow( spacer, Priority.ALWAYS )
-        
+        def timerLabel = new Label( "Elapsed: 00:00:00" )       
         def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
-        def vbox = new VBox( 10, imageLabel, stepLabel, progressLabel, bar, bottomRow )
+        List rows = [imageRow, barRow, stepRow, bottomRow]
+        
+        def vbox = new VBox( 10 )
+        vbox.getChildren().addAll( rows )
         vbox.setPadding( new Insets( 10 ) )
         vbox.setAlignment( Pos.CENTER_LEFT )
+        
+        // Sizing to fit all rows
+        def updateMinWidth = {
+            double preferred = rows.collect { it.getWidth() }.max() + vbox.getPadding().getLeft() + vbox.getPadding().getRight()
+            if ( preferred > stage.getWidth() ) {
+                stage.setWidth( preferred )
+            }
+        }
+        
+        // Attaching the width update as a listener
+        rows.each { node ->
+            node.widthProperty().addListener { obs, old, nw -> updateMinWidth() }
+        }
         
         def scene = new Scene( vbox )
         stage.setScene( scene )
@@ -98,7 +120,12 @@ def createProgressWindow( String title, int totalImages ) {
         
         // Signal to cancel script
         def cancelFlag = new java.util.concurrent.atomic.AtomicBoolean( false )
+        def cancelUpdateLabel = new Label( "Cancelling after image..." )
+        cancelUpdateLabel.setPadding( new Insets( 4 ) )
         cancelBtn.setOnAction {
+            bottomRow.getChildren().set(
+                bottomRow.getChildren().indexOf( cancelBtn ), cancelUpdateLabel
+            )
             cancelFlag.set( true )
         }
         stage.setOnCloseRequest { evt ->
@@ -107,10 +134,11 @@ def createProgressWindow( String title, int totalImages ) {
         
         return [
             stage        : stage,
-            imageLabel   : imageLabel,
-            stepLabel    : stepLabel,
-            progressLabel: progressLabel,
+            imageName    : imageName,
             bar          : bar,
+            progressLabel: progressLabel,
+            stepUpdate   : stepUpdate,
+            stepProgress : stepProgress,
             cancelFlag   : cancelFlag,
             timeline     : timeline
         ]
@@ -603,9 +631,19 @@ def cancelFlag = progressUI.cancelFlag
 int processed = 0
 
 // Closure to show update on code progress
-def updateProgressStep = { String update ->
+def updateProgressWindow = { Map args = [:] ->
+    String image      = args.image
+    String stepUpdate = args.stepUpdate
+    String stepFrac   = args.stepFrac
+    double imageFrac  = args.imageFrac ?: 0
+    String imageStep  = args.imageStep
+
     Platform.runLater {
-        progressUI.stepLabel.setText( "Step: " + update )
+        if (image)      { progressUI.imageName.setText( image ) }
+        if (stepUpdate) { progressUI.stepUpdate.setText( stepUpdate ) }
+        if (stepFrac)   { progressUI.stepProgress.setText( stepFrac ) }
+        if (imageFrac)  { progressUI.bar.setProgress( imageFrac ) }
+        if (imageStep)  { progressUI.progressLabel.setText( imageStep ) }
     }
 }
 
@@ -617,14 +655,15 @@ for (image in imagesToRun) {
     }
     
     // Reporting current image
-    Platform.runLater {
-        progressUI.imageLabel.setText( "Image: ${image}" )
-    }
+    updateProgressWindow( image: image.toString() )
     
     // If working on current image, modifying respective image data
     def imageData = image == currentEntry ? currentImageData : image.readImageData()
     
     def hierarchy = imageData.getHierarchy()
+    
+    int netSteps = (codePreferences.objectClasses.size() * (codePreferences.expansionsMicrons.size() + 1))
+    int step = 1
     
     
     pathclassLoop:
@@ -662,7 +701,7 @@ for (image in imagesToRun) {
         
         // --- RING GENERATION ---
         // Getting map with central object and relevant expansion geometries
-        updateProgressStep( "Generating expansion map for ${objectClass}" )
+        updateProgressWindow( stepUpdate: "Generating expansion map for ${objectClass}", stepFrac: "(0%)" )
         def expansionsMap = expandAnnos( baseObjs, codePreferences.expansionsMicrons, codePreferences.expandOnlyOutward, 0.0 )
         
         // Prep each group: geometries are already normalized by expandAnnos so no re-cleaning needed.
@@ -680,7 +719,8 @@ for (image in imagesToRun) {
         expansionClasses.eachWithIndex { expClass, level ->
             
             // Reporting current step
-            updateProgressStep( "Working on ${expClass}" )
+            int percentDone = ( step / netSteps ) * 100
+            updateProgressWindow( stepUpdate: "Working on ${expClass}", stepFrac: "(${percentDone}%)" )
             
             // Union all objects' geometries at the inner level into a single mask to subtract.
             // This ensures each ring does not overlap any lower-level zone from any object —
@@ -721,6 +761,9 @@ for (image in imagesToRun) {
                     ringObj.setLocked( true )
                 }
             }
+            percentDone = ( step / netSteps ) * 100
+            updateProgressWindow( stepUpdate: "Working on ${expClass}", stepFrac: "(${percentDone}%)" )
+            step ++
         }
     }
     
@@ -754,15 +797,8 @@ for (image in imagesToRun) {
     
     // - Reporting progress -
     processed++
-    double frac = processed / total
-    double percent = Math.round(frac * 1000) / 10.0   // 0.1% resolution
-    
-    Platform.runLater {
-        progressUI.progressLabel.setText( "${processed}/${total}  (${percent}%)" )
-        progressUI.bar.setProgress( frac )
-    }
-    
-    print "\n"
+    double frac = processed / total 
+    updateProgressWindow( imageFrac: frac, imageStep: "${processed}/${total}" )
 }
 
 // Closing progress bar window

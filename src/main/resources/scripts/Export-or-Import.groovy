@@ -45,24 +45,47 @@ def createProgressWindow( String title, int totalImages ) {
         def stage = new Stage()
         stage.setTitle( title )
         
-        def imageLabel = new Label( "Starting... " )
-        def progressLabel = new Label("0 / ${totalImages}")
+        def imageLabel = new Label( "Image:" )
+        def imageName = new Label( "Starting..." )
+        def imageRow = new HBox( 5, imageLabel, imageName )
+        
         def bar = new ProgressBar( 0.0 )
         bar.setPrefWidth( 350 )
+        def progressLabel = new Label( "0 / ${totalImages}" )
+        def barRow = new HBox( 10, bar, progressLabel )
+        
+        def stepLabel = new Label( "Step:" )
+        def stepUpdate = new Label()
+        def stepProgress = new Label()
+        def stepRow = new HBox( 5, stepLabel, stepUpdate, stepProgress )
         
         def cancelBtn = new Button( "Cancel" )
         cancelBtn.setDisable( false )
-        
-        def timerLabel = new Label( "Elapsed: 00:00:00" )
         def spacer = new Region()
         HBox.setHgrow( spacer, Priority.ALWAYS )
-        
+        def timerLabel = new Label( "Elapsed: 00:00:00" )       
         def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
-        def vbox = new VBox( 10, imageLabel, progressLabel, bar, bottomRow )
+        List rows = [imageRow, barRow, stepRow, bottomRow]
+        
+        def vbox = new VBox( 10 )
+        vbox.getChildren().addAll( rows )
         vbox.setPadding( new Insets( 10 ) )
         vbox.setAlignment( Pos.CENTER_LEFT )
+        
+        // Sizing to fit all rows
+        def updateMinWidth = {
+            double preferred = rows.collect { it.getWidth() }.max() + vbox.getPadding().getLeft() + vbox.getPadding().getRight()
+            if ( preferred > stage.getWidth() ) {
+                stage.setWidth( preferred )
+            }
+        }
+        
+        // Attaching the width update as a listener
+        rows.each { node ->
+            node.widthProperty().addListener { obs, old, nw -> updateMinWidth() }
+        }
         
         def scene = new Scene( vbox )
         stage.setScene( scene )
@@ -97,7 +120,12 @@ def createProgressWindow( String title, int totalImages ) {
         
         // Signal to cancel script
         def cancelFlag = new java.util.concurrent.atomic.AtomicBoolean( false )
+        def cancelUpdateLabel = new Label( "Cancelling after image..." )
+        cancelUpdateLabel.setPadding( new Insets( 4 ) )
         cancelBtn.setOnAction {
+            bottomRow.getChildren().set(
+                bottomRow.getChildren().indexOf( cancelBtn ), cancelUpdateLabel
+            )
             cancelFlag.set( true )
         }
         stage.setOnCloseRequest { evt ->
@@ -106,9 +134,11 @@ def createProgressWindow( String title, int totalImages ) {
         
         return [
             stage        : stage,
-            imageLabel   : imageLabel,
-            progressLabel: progressLabel,
+            imageName    : imageName,
             bar          : bar,
+            progressLabel: progressLabel,
+            stepUpdate   : stepUpdate,
+            stepProgress : stepProgress,
             cancelFlag   : cancelFlag,
             timeline     : timeline
         ]
@@ -753,6 +783,23 @@ def progressUI = createProgressWindow(
 def cancelFlag = progressUI.cancelFlag
 int processed = 0
 
+// Closure to show update on code progress
+def updateProgressWindow = { Map args = [:] ->
+    String image      = args.image
+    String stepUpdate = args.stepUpdate
+    String stepFrac   = args.stepFrac
+    double imageFrac  = args.imageFrac ?: 0
+    String imageStep  = args.imageStep
+
+    Platform.runLater {
+        if (image)      { progressUI.imageName.setText( image ) }
+        if (stepUpdate) { progressUI.stepUpdate.setText( stepUpdate ) }
+        if (stepFrac)   { progressUI.stepProgress.setText( stepFrac ) }
+        if (imageFrac)  { progressUI.bar.setProgress( imageFrac ) }
+        if (imageStep)  { progressUI.progressLabel.setText( imageStep ) }
+    }
+}
+
 // Checks on removing current objs
 boolean removeObjs = false
 boolean confirmRemoveObjsChoice = false
@@ -775,12 +822,9 @@ for (image in imagesToRun) {
     def makeFileName = {        
         return imageName
     }
-    print "Image: " + makeFileName()
     
     // Reporting current image
-    Platform.runLater {
-        progressUI.imageLabel.setText( "Image: ${makeFileName()}" )
-    }
+    updateProgressWindow( image: image.toString() )
     
     
     // --- Execution ---
@@ -792,10 +836,13 @@ for (image in imagesToRun) {
     
     // Fixing hierarchy if desired
     if (codePreferences.mode == "resolveHierarchy") {
+        updateProgressWindow( stepUpdate: "Resolving hierarchy" )
         def objectsToresolve = hierarchy.getAnnotationObjects()
         resolveHierarchy( objectsToresolve, hierarchy, image )
         
     } else if (codePreferences.mode == "export") {
+        
+        updateProgressWindow( stepUpdate: "Exporting" )
         
         // If file exists, giving warning and option to skip/overwrite/exit
         if (file.exists()) {
@@ -876,7 +923,9 @@ for (image in imagesToRun) {
         
     } else if (codePreferences.mode == "import") {
         
-        // If cannot locate file, asking if user wants to manually locate 
+        updateProgressWindow( stepUpdate: "Importing" )
+        
+        // If cannot locate file, asking if user wants to manually locate
         if (!file.exists()) {
             
             searchLoop:
@@ -1033,15 +1082,8 @@ for (image in imagesToRun) {
     
     // - Reporting progress -
     processed++
-    double frac = processed / total
-    double percent = Math.round(frac * 1000) / 10.0   // 0.1% resolution
-    
-    Platform.runLater {
-        progressUI.progressLabel.setText( "${processed}/${total}  (${percent}%)" )
-        progressUI.bar.setProgress( frac )
-    }
-    
-    print "\n"
+    double frac = processed / total 
+    updateProgressWindow( imageFrac: frac, imageStep: "${processed}/${total}" )
 }
 
 // Closing progress bar window
