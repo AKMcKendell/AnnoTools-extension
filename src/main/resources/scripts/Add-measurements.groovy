@@ -84,6 +84,7 @@ def createProgressWindow( String title, int totalImages ) {
         
         // Attaching the width update as a listener
         rows.each { node ->
+            node.setMinWidth( Region.USE_PREF_SIZE )
             node.widthProperty().addListener { obs, old, nw -> updateMinWidth() }
         }
         

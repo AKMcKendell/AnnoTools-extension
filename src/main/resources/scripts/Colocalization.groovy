@@ -63,10 +63,11 @@ def createProgressWindow( String title, int totalImages ) {
         def progressLabel = new Label( "0 / ${totalImages}" )
         def barRow = new HBox( 10, bar, progressLabel )
         
-        def stepLabel = new Label( "Step:" )
+        def stepLabel = new Label( "Step" )
+        def stepNum = new Label()
         def stepUpdate = new Label()
         def stepProgress = new Label()
-        def stepRow = new HBox( 5, stepLabel, stepUpdate, stepProgress )
+        def stepRow = new HBox( 5, stepLabel, stepNum, stepUpdate, stepProgress )
         
         def cancelBtn = new Button( "Cancel" )
         cancelBtn.setDisable( false )
@@ -93,6 +94,7 @@ def createProgressWindow( String title, int totalImages ) {
         
         // Attaching the width update as a listener
         rows.each { node ->
+            node.setMinWidth( Region.USE_PREF_SIZE )
             node.widthProperty().addListener { obs, old, nw -> updateMinWidth() }
         }
         
@@ -146,6 +148,7 @@ def createProgressWindow( String title, int totalImages ) {
             imageName    : imageName,
             bar          : bar,
             progressLabel: progressLabel,
+            stepNum      : stepNum,
             stepUpdate   : stepUpdate,
             stepProgress : stepProgress,
             cancelFlag   : cancelFlag,
@@ -541,6 +544,7 @@ int processed = 0
 // Closure to show update on code progress
 def updateProgressWindow = { Map args = [:] ->
     String image      = args.image
+    String stepNum    = args.stepNum
     String stepUpdate = args.stepUpdate
     String stepFrac   = args.stepFrac
     double imageFrac  = args.imageFrac ?: 0
@@ -548,6 +552,7 @@ def updateProgressWindow = { Map args = [:] ->
 
     Platform.runLater {
         if (image)      { progressUI.imageName.setText( image ) }
+        if (stepNum)    { progressUI.stepNum.setText( stepNum ) }
         if (stepUpdate) { progressUI.stepUpdate.setText( stepUpdate ) }
         if (stepFrac)   { progressUI.stepProgress.setText( stepFrac ) }
         if (imageFrac)  { progressUI.bar.setProgress( imageFrac ) }
@@ -579,7 +584,7 @@ for (image in imagesToRun) {
         for (class2 in codePreferences.objectClasses2) {
             
             String newClass = class1 + "-" + class2 
-            updateProgressWindow( stepUpdate: "Working on ${newClass}" )
+            updateProgressWindow( stepNum: "${step}/${netSteps}:", stepUpdate: "Working on ${newClass}" )
             
             // Adding the new class to the pathclass list if it is not already on it
             def availableClasses = getQuPath().getAvailablePathClasses()               
@@ -607,6 +612,9 @@ for (image in imagesToRun) {
             def class2Annos = annotations.findAll {
                 it.getPathClass()?.getName() == class2
             }
+            
+            int totalComps = class1Annos.size() * class2Annos.size()
+            int compNum = 1
             
             // Skipping the loop if either class has no objects
             if (class1Annos.isEmpty() || class2Annos.isEmpty()) continue
@@ -648,11 +656,13 @@ for (image in imagesToRun) {
                             hierarchy.addObjectBelowParent( parent, overlapObj, false )
                             overlapObj.setLocked( true )
                         }
-                    } 
+                    }
+                    
+                    int percentDone = (compNum / totalComps) * 100
+                    updateProgressWindow( stepFrac: "(${percentDone}%)" )
+                    compNum ++
                 }
             }
-            int percentDone = ( step / netSteps ) * 100
-            updateProgressWindow( stepFrac: "(${percentDone}%)" )
             step ++
         }
     }

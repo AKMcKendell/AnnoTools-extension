@@ -54,10 +54,11 @@ def createProgressWindow( String title, int totalImages ) {
         def progressLabel = new Label( "0 / ${totalImages}" )
         def barRow = new HBox( 10, bar, progressLabel )
         
-        def stepLabel = new Label( "Step:" )
+        def stepLabel = new Label( "Step" )
+        def stepNum = new Label()
         def stepUpdate = new Label()
         def stepProgress = new Label()
-        def stepRow = new HBox( 5, stepLabel, stepUpdate, stepProgress )
+        def stepRow = new HBox( 5, stepLabel, stepNum, stepUpdate, stepProgress )
         
         def cancelBtn = new Button( "Cancel" )
         cancelBtn.setDisable( false )
@@ -84,6 +85,7 @@ def createProgressWindow( String title, int totalImages ) {
         
         // Attaching the width update as a listener
         rows.each { node ->
+            node.setMinWidth( Region.USE_PREF_SIZE )
             node.widthProperty().addListener { obs, old, nw -> updateMinWidth() }
         }
         
@@ -137,47 +139,13 @@ def createProgressWindow( String title, int totalImages ) {
             imageName    : imageName,
             bar          : bar,
             progressLabel: progressLabel,
+            stepNum      : stepNum,
             stepUpdate   : stepUpdate,
             stepProgress : stepProgress,
             cancelFlag   : cancelFlag,
             timeline     : timeline
         ]
     }
-}
-
-// Function: Create expansion geometries around central objects and store them in a map linked to the original object
-def expandAnnos( List centralAnnos, List expansionsUm, boolean outwardOnly, double simplifyTolerance ) {
-    
-    def cal = getCurrentServer().getPixelCalibration()
-    double pixelSize = cal.getAveragedPixelSizeMicrons()
-    
-    def expandedObjectsMap = []
-    
-    centralAnnos.each { annoCentral ->
-        // Normalize to Polygon/MultiPolygon before buffering.
-        // Mask objects stored as GeometryCollections can produce unexpectedly wide
-        // expansions if passed to buffer() directly.
-        def geomCentral = toPolygonGeometry( annoCentral.getROI().getGeometry() )
-        
-        // Fill holes BEFORE buffering when expanding outward only.
-        // buffer() on a holey geometry also shrinks inner rings inward, making the
-        // resulting expansion appear wider than intended. Filling holes first ensures
-        // the buffer only travels outward from the exterior boundary.
-        if (outwardOnly) {
-            def filled = fillAnnoHoles( [geomCentral] )
-            geomCentral = toPolygonGeometry( filled[0] )
-        }
-        
-        def geomsAll = [geomCentral]
-        
-        expansionsUm.each { exp ->
-            double expandPixels = exp / pixelSize            
-            def geomExpanded = toPolygonGeometry( geomCentral.buffer( expandPixels ) )
-            geomsAll << geomExpanded
-        }
-        expandedObjectsMap << [centerObj: annoCentral, allGeoms: geomsAll]
-    }    
-    return expandedObjectsMap
 }
 
 // Function: Take a list of annotations and return a list of corresponding geometries with filled holes
@@ -633,6 +601,7 @@ int processed = 0
 // Closure to show update on code progress
 def updateProgressWindow = { Map args = [:] ->
     String image      = args.image
+    String stepNum    = args.stepNum
     String stepUpdate = args.stepUpdate
     String stepFrac   = args.stepFrac
     double imageFrac  = args.imageFrac ?: 0
@@ -640,6 +609,7 @@ def updateProgressWindow = { Map args = [:] ->
 
     Platform.runLater {
         if (image)      { progressUI.imageName.setText( image ) }
+        if (stepNum)    { progressUI.stepNum.setText( stepNum ) }
         if (stepUpdate) { progressUI.stepUpdate.setText( stepUpdate ) }
         if (stepFrac)   { progressUI.stepProgress.setText( stepFrac ) }
         if (imageFrac)  { progressUI.bar.setProgress( imageFrac ) }
@@ -701,10 +671,42 @@ for (image in imagesToRun) {
         
         // --- RING GENERATION ---
         // Getting map with central object and relevant expansion geometries
-        updateProgressWindow( stepUpdate: "Generating expansion map for ${objectClass}", stepFrac: "(0%)" )
-        def expansionsMap = expandAnnos( baseObjs, codePreferences.expansionsMicrons, codePreferences.expandOnlyOutward, 0.0 )
+        updateProgressWindow( stepNum: "${step}/${netSteps}:", stepUpdate: "Generating expansion map for ${objectClass}", stepFrac: "(0%)" )
+            
+        def cal = getCurrentServer().getPixelCalibration()
+        double pixelSize = cal.getAveragedPixelSizeMicrons()
         
-        // Prep each group: geometries are already normalized by expandAnnos so no re-cleaning needed.
+        def expansionsMap = []
+        
+        baseObjs.eachWithIndex { annoCentral, idx ->
+            // Normalize to Polygon/MultiPolygon before buffering.
+            // Mask objects stored as GeometryCollections can produce unexpectedly wide
+            // expansions if passed to buffer() directly.
+            def geomCentral = toPolygonGeometry( annoCentral.getROI().getGeometry() )
+            
+            // Fill holes BEFORE buffering when expanding outward only.
+            // buffer() on a holey geometry also shrinks inner rings inward, making the
+            // resulting expansion appear wider than intended. Filling holes first ensures
+            // the buffer only travels outward from the exterior boundary.
+            if (codePreferences.expandOnlyOutward) {
+                def filled = fillAnnoHoles( [geomCentral] )
+                geomCentral = toPolygonGeometry( filled[0] )
+            }
+            
+            def geomsAll = [geomCentral]
+            
+            codePreferences.expansionsMicrons.each { exp ->
+                double expandPixels = exp / pixelSize            
+                def geomExpanded = toPolygonGeometry( geomCentral.buffer( expandPixels ) )
+                geomsAll << geomExpanded
+            }
+            expansionsMap << [centerObj: annoCentral, allGeoms: geomsAll]
+            
+            int pDone = ((idx+1) / baseObjs.size()) * 100
+            updateProgressWindow( stepFrac: "(${pDone}%)" )
+        }
+        
+        // Prep each group: geometries are already normalized by above so no re-cleaning needed.
         // Parent geometry is cached here once so it isn't recomputed on every ring level below.
         expansionsMap.each { objGroup ->
             objGroup.cleanedAllGeoms = objGroup.allGeoms
@@ -719,8 +721,8 @@ for (image in imagesToRun) {
         expansionClasses.eachWithIndex { expClass, level ->
             
             // Reporting current step
-            int percentDone = ( step / netSteps ) * 100
-            updateProgressWindow( stepUpdate: "Working on ${expClass}", stepFrac: "(${percentDone}%)" )
+            step ++
+            updateProgressWindow( stepNum: "${step}/${netSteps}:", stepUpdate: "Working on ${expClass}", stepFrac: " " )
             
             // Union all objects' geometries at the inner level into a single mask to subtract.
             // This ensures each ring does not overlap any lower-level zone from any object —
@@ -733,7 +735,7 @@ for (image in imagesToRun) {
             expansionsMap.each { objGroup ->
                 def centerObj = objGroup.centerObj
                 
-                // cleanedAllGeoms entries are already normalized Polygon/MultiPolygon from expandAnnos
+                // cleanedAllGeoms entries are already normalized Polygon/MultiPolygon from above
                 def ringGeom = objGroup.cleanedAllGeoms[ level + 1 ]
                 
                 if (!combinedInnerMask.isEmpty() && ringGeom.intersects( combinedInnerMask )) {
@@ -761,13 +763,8 @@ for (image in imagesToRun) {
                     ringObj.setLocked( true )
                 }
             }
-            percentDone = ( step / netSteps ) * 100
-            updateProgressWindow( stepUpdate: "Working on ${expClass}", stepFrac: "(${percentDone}%)" )
-            step ++
         }
     }
-    
-    
     
     
     
