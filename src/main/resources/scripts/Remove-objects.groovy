@@ -363,7 +363,6 @@ def codePreferences = runOnFxThreadAndWait {
     List pathClassCBsMap = pathClassNamesAndNum.collect { [name: (it.num > 0 ? "${it.name} [${it.num}]" : it.name), data: it.name] }
     def pathClassBox = makeCheckboxBox( "Object classes", "classes", pathClassCBsMap, 275 )    
     pathClassBox.header.getChildren().addAll( pathClassBox.selectAll, pathClassBox.spacer, pathClassBox.clear )    
-    BorderPane.setMargin( pathClassBox.box, new Insets( 0, 15, 0, 0 ) )
     pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.objectClasses ) }
     
     root.right = pathClassBox.box

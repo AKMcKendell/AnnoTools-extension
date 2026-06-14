@@ -390,6 +390,7 @@ def codePreferences = runOnFxThreadAndWait {
     
     def intensityBoxes = new VBox( 10, intensityChannelsBox.box, intensityMeasurementsBox.box )
     def intensityPanel = new VBox( 10, addIntensityMeasurementsCB, intensityBoxes )
+    BorderPane.setMargin( imagesBox.box, new Insets( 0, 15, 0, 0 ) )
     
     intensityBoxes.disableProperty().bind(
         addIntensityMeasurementsCB.selectedProperty().not()
@@ -414,7 +415,7 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     // Adding all together
-    def allMeasurementsPanel = new HBox( 10, intensityPanel, morphologyPanel )
+    def allMeasurementsPanel = new HBox( 15, intensityPanel, morphologyPanel )
     root.right = allMeasurementsPanel
     
     

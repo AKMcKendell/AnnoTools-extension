@@ -501,7 +501,6 @@ def codePreferences = runOnFxThreadAndWait {
     List pathClassCBsMap = pathClassNamesAndNum.collect { [name: (it.num > 0 ? "${it.name} [${it.num}]" : it.name), data: it.name] }
     def pathClassBox = makeCheckboxBox( "Object classes", null, pathClassCBsMap, 200 )    
     pathClassBox.header.getChildren().addAll( pathClassBox.title, pathClassBox.spacer, pathClassBox.clear )    
-    BorderPane.setMargin( pathClassBox.box, new Insets( 0, 15, 0, 0 ) )
     pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.objectClasses ) }
     
     root.right = pathClassBox.box
@@ -627,8 +626,11 @@ for (image in imagesToRun) {
     // Reporting current image
     updateProgressWindow( image: image.toString() )
     
+    // Getting image-specific information
     // If working on current image, modifying respective image data
     def imageData = image == currentEntry ? currentImageData : image.readImageData()
+    def cal = imageData.getServer().getPixelCalibration()
+    double pixelSize = cal.getAveragedPixelSizeMicrons()
     
     def hierarchy = imageData.getHierarchy()
     
@@ -672,9 +674,6 @@ for (image in imagesToRun) {
         // --- RING GENERATION ---
         // Getting map with central object and relevant expansion geometries
         updateProgressWindow( stepNum: "${step}/${netSteps}:", stepUpdate: "Generating expansion map for ${objectClass}", stepFrac: "(0%)" )
-            
-        def cal = getCurrentServer().getPixelCalibration()
-        double pixelSize = cal.getAveragedPixelSizeMicrons()
         
         def expansionsMap = []
         
