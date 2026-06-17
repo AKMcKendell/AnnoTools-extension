@@ -45,19 +45,17 @@ def createProgressWindow( String title, int totalImages ) {
         def stage = new Stage()
         stage.setTitle( title )
         
-        def imageLabel = new Label( "Image:" )
-        def imageName = new Label( "Starting..." )
-        def imageRow = new HBox( 5, imageLabel, imageName )
+        def imageNum = new SimpleStringProperty( "1" )
+        def imageName = new SimpleStringProperty( "Starting..." )
+        def imageLabel = new Label()
+        imageLabel.textProperty().bind(
+            Bindings.concat( "Image ", imageNum, "/", totalImages, ": ", imageName )
+        )      
+        def imageRow = new HBox( 5, imageLabel )
         
         def bar = new ProgressBar( 0.0 )
         bar.setPrefWidth( 350 )
-        def progressLabel = new Label( "0 / ${totalImages}" )
-        def barRow = new HBox( 10, bar, progressLabel )
-        
-        def stepLabel = new Label( "Step:" )
-        def stepUpdate = new Label()
-        def stepProgress = new Label()
-        def stepRow = new HBox( 5, stepLabel, stepUpdate, stepProgress )
+        def barRow = new HBox( 10, bar )     
         
         def cancelBtn = new Button( "Cancel" )
         cancelBtn.setDisable( false )
@@ -67,7 +65,7 @@ def createProgressWindow( String title, int totalImages ) {
         def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
-        List rows = [imageRow, barRow, stepRow, bottomRow]
+        List rows = [imageRow, barRow, bottomRow]
         
         def vbox = new VBox( 10 )
         vbox.getChildren().addAll( rows )
@@ -135,14 +133,24 @@ def createProgressWindow( String title, int totalImages ) {
         
         return [
             stage        : stage,
+            imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            progressLabel: progressLabel,
-            stepUpdate   : stepUpdate,
-            stepProgress : stepProgress,
-            cancelFlag   : cancelFlag,
-            timeline     : timeline
+            cancelFlag   : cancelFlag
         ]
+    }
+}
+
+// Function: Update progress window
+def updateProgressWindow( UI, Map args = [:] ) {
+    String imageNum  = args.imageNum
+    String imageName = args.imageName
+    double imagePer  = args.imagePer ?: 0
+
+    Platform.runLater {
+        if (imageName) { UI.imageName.set( imageName ) }
+        if (imageNum)  { UI.imageNum.set( imageNum ) }
+        if (imagePer)  { UI.bar.setProgress( imagePer ) }
     }
 }
 
@@ -281,8 +289,8 @@ def currentEntry = currentImageData ? project.getEntry( currentImageData ) : nul
 def projectDirectory = project.getBaseDirectory()
 
 // Folder and file names of where preferences are stored in directory
-def scriptPrefsFolderName = "Scripts_Preferences"
-def scriptPrefsFileName   = "RemoveObjects_Preferences" + ".json"
+def scriptPrefsFolderName = "AnnoTools-Data"
+def scriptPrefsFileName   = "Remove-Annos_Preferences" + ".json"
 
 def prefsFolder = new File( projectDirectory, scriptPrefsFolderName )
 if (!prefsFolder.exists()) { prefsFolder.mkdirs() }
@@ -426,23 +434,6 @@ def cancelFlag = progressUI.cancelFlag
 int processed = 0
 
 // Closure to show update on code progress
-def updateProgressWindow = { Map args = [:] ->
-    String image      = args.image
-    String stepUpdate = args.stepUpdate
-    String stepFrac   = args.stepFrac
-    double imageFrac  = args.imageFrac ?: 0
-    String imageStep  = args.imageStep
-
-    Platform.runLater {
-        if (image)      { progressUI.imageName.setText( image ) }
-        if (stepUpdate) { progressUI.stepUpdate.setText( stepUpdate ) }
-        if (stepFrac)   { progressUI.stepProgress.setText( stepFrac ) }
-        if (imageFrac)  { progressUI.bar.setProgress( imageFrac ) }
-        if (imageStep)  { progressUI.progressLabel.setText( imageStep ) }
-    }
-}
-
-// Closure to show update on code progress
 def updateProgressStep = { String update ->
     Platform.runLater {
         progressUI.stepLabel.setText( "Step: " + update )
@@ -455,7 +446,7 @@ for (image in imagesToRun) {
     if (cancelFlag.get()) break
     
     // Reporting current image
-    updateProgressWindow( image: image.toString() )
+    updateProgressWindow( progressUI, [imageName: image] )
     
     // If working on current image, modifying respective image data
     def imageData = image == currentEntry ? currentImageData : image.readImageData()
@@ -463,18 +454,14 @@ for (image in imagesToRun) {
     
     
     // Area for execution
-    updateProgressWindow( stepUpdate: "Removing objects" )
     def objectsToRemove = hierarchy.getAnnotationObjects().findAll {
         it.getPathClass()?.getName() in codePreferences.objectClasses
     }
     hierarchy.removeObjects( objectsToRemove, false )
     
     
-    // Updating viewer and saving (when relevant)
-    // If only current image is imported to, will not automatically save so the import can be tested
-    if (imagesToRun.size() > 1 || image != currentEntry) {
-        image.saveImageData( imageData ) // Saving data
-    }
+    // Saving data
+    image.saveImageData( imageData )
     
     // Ensure current viewer updates its annotation list when working on the current image
     if (image == currentEntry) {
@@ -497,7 +484,7 @@ for (image in imagesToRun) {
     // - Reporting progress -
     processed++
     double frac = processed / total 
-    updateProgressWindow( imageFrac: frac, imageStep: "${processed}/${total}" )
+    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
 }
 
 // Closing progress bar window
@@ -509,6 +496,7 @@ Platform.runLater {
 import java.util.concurrent.CountDownLatch
 import javafx.animation.*
 import javafx.application.Platform
+import javafx.beans.property.SimpleStringProperty
 import javafx.geometry.Insets
 import javafx.geometry.Pos
 import javafx.scene.Scene

@@ -1,6 +1,6 @@
 /*
  * Author: Alec McKendell
- * Date: 2025.2.4
+ * Date: 2026.2.4
  * Description: Basic preferences popup with images to run code through
 */
 
@@ -45,19 +45,27 @@ def createProgressWindow( String title, int totalImages ) {
         def stage = new Stage()
         stage.setTitle( title )
         
-        def imageLabel = new Label( "Image:" )
-        def imageName = new Label( "Starting..." )
-        def imageRow = new HBox( 5, imageLabel, imageName )
+        def stepLabel = new Label()
+        def stepNum = new SimpleStringProperty( "1" )
+        def stepMax = new SimpleStringProperty( "" )
+        def stepName = new SimpleStringProperty( "" )
+        def stepPer = new SimpleStringProperty( "0" )      
+        stepLabel.textProperty().bind(
+            Bindings.concat( "Step ", stepNum, "/", stepMax, ": ", stepName, " (", stepPer, "%)" )
+        )
+        def stepRow = new HBox( 5, stepLabel )
+        
+        def imageNum = new SimpleStringProperty( "1" )
+        def imageName = new SimpleStringProperty( "Starting..." )
+        def imageLabel = new Label()
+        imageLabel.textProperty().bind(
+            Bindings.concat( "Image ", imageNum, "/", totalImages, ": ", imageName )
+        )      
+        def imageRow = new HBox( 5, imageLabel )
         
         def bar = new ProgressBar( 0.0 )
         bar.setPrefWidth( 350 )
-        def progressLabel = new Label( "0 / ${totalImages}" )
-        def barRow = new HBox( 10, bar, progressLabel )
-        
-        def stepLabel = new Label( "Step:" )
-        def stepUpdate = new Label()
-        def stepProgress = new Label()
-        def stepRow = new HBox( 5, stepLabel, stepUpdate, stepProgress )
+        def barRow = new HBox( 10, bar )     
         
         def cancelBtn = new Button( "Cancel" )
         cancelBtn.setDisable( false )
@@ -67,7 +75,7 @@ def createProgressWindow( String title, int totalImages ) {
         def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
-        List rows = [imageRow, barRow, stepRow, bottomRow]
+        List rows = [stepRow, imageRow, barRow, bottomRow]
         
         def vbox = new VBox( 10 )
         vbox.getChildren().addAll( rows )
@@ -135,14 +143,37 @@ def createProgressWindow( String title, int totalImages ) {
         
         return [
             stage        : stage,
+            stepNum      : stepNum,
+            stepMax      : stepMax,
+            stepName     : stepName,
+            stepPer      : stepPer,
+            imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            progressLabel: progressLabel,
-            stepUpdate   : stepUpdate,
-            stepProgress : stepProgress,
-            cancelFlag   : cancelFlag,
-            timeline     : timeline
+            cancelFlag   : cancelFlag
         ]
+    }
+}
+
+// Function: Update progress window
+def updateProgressWindow( UI, Map args = [:] ) {
+    String stepNum   = args.stepNum
+    String stepMax   = args.stepMax
+    String stepName  = args.stepName
+    String stepPer   = args.stepPer
+    String imageNum  = args.imageNum
+    String imageName = args.imageName
+    double imagePer  = args.imagePer ?: 0
+
+    Platform.runLater {
+        if (stepNum)   { UI.stepNum.set( stepNum ) }
+        if (stepMax)   { UI.stepMax.set( stepMax ) }
+        if (stepName)  { UI.stepName.set( stepName ) }
+        if (stepPer)   { UI.stepPer.set( stepPer ) }
+        if (imageName) { UI.imageName.set( imageName ) }
+        if (imageNum)  { UI.imageNum.set( imageNum ) }
+        if (imagePer)  { UI.bar.setProgress( imagePer ) }
+        
     }
 }
 
@@ -501,23 +532,8 @@ def total = imagesToRun.size()
 def progressUI = createProgressWindow( "Processing", total )
 def cancelFlag = progressUI.cancelFlag
 int processed = 0
-
-// Closure to show update on code progress
-def updateProgressWindow = { Map args = [:] ->
-    String image      = args.image
-    String stepUpdate = args.stepUpdate
-    String stepFrac   = args.stepFrac
-    double imageFrac  = args.imageFrac ?: 0
-    String imageStep  = args.imageStep
-
-    Platform.runLater {
-        if (image)      { progressUI.imageName.setText( image ) }
-        if (stepUpdate) { progressUI.stepUpdate.setText( stepUpdate ) }
-        if (stepFrac)   { progressUI.stepProgress.setText( stepFrac ) }
-        if (imageFrac)  { progressUI.bar.setProgress( imageFrac ) }
-        if (imageStep)  { progressUI.progressLabel.setText( imageStep ) }
-    }
-}
+int netSteps = (codePreferences.addIntensityMeasurements ? 1 : 0) +
+               (codePreferences.addMorphologyMeasurements ? 1 : 0)
 
 imageLoop:
 for (image in imagesToRun) {
@@ -525,7 +541,7 @@ for (image in imagesToRun) {
     if (cancelFlag.get()) break
     
     // Reporting current image
-    updateProgressWindow( image: image.toString() )
+    updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image] )
     
     // If working on current image, modifying respective image data
     def imageData = image == currentEntry ? currentImageData : image.readImageData()
@@ -540,10 +556,11 @@ for (image in imagesToRun) {
         it.getPathClass()?.getName() in codePreferences.pathClasses
     }
     
+    int step = 1
     
     if (codePreferences.addIntensityMeasurements) {
         
-        updateProgressWindow( stepUpdate: "Adding intensity measurements", stepFrac: "(0%)" )
+        updateProgressWindow( progressUI, [stepNum: step, stepName: "Adding intensity measurements"] )
         
         // Create server with only the desired channels to reduce processing time (otherwise will do all channels)
         def modifiedChannelServer = new TransformedServerBuilder( server )
@@ -562,25 +579,26 @@ for (image in imagesToRun) {
             )
             
             int percentDone = ( (idx+1) / numAnnos ) * 100
-            updateProgressWindow( stepFrac: "(${percentDone}%)" )
+            updateProgressWindow( progressUI, [stepPer: percentDone] )
         }
+        
+        step++
     }
     
     // Adding morphology measurements
     if (codePreferences.addMorphologyMeasurements) {
         
-        updateProgressWindow( stepUpdate: "Adding morphology measurements", stepFrac: " " )
+        updateProgressWindow( progressUI, [stepNum: step, stepName: "Adding morphology measurements", stepPer: 0] )
         
         def pixelCalibration = server.getPixelCalibration()
         ObjectMeasurements.addShapeMeasurements( annotations, pixelCalibration, codePreferences.morphologyMeasurements )
+        
+        updateProgressWindow( progressUI, [stepName: "Adding morphology measurements", stepPer: 100] )
     }
     
     
-    // Updating viewer and saving (when relevant)
-    // If only current image is imported to, will not automatically save so the import can be tested
-    if (imagesToRun.size() > 1 || image != currentEntry) {
-        image.saveImageData( imageData ) // Saving data
-    }
+    // Saving data
+    image.saveImageData( imageData )
     
     // Ensure current viewer updates its annotation list when working on the current image
     if (image == currentEntry) {
@@ -603,7 +621,7 @@ for (image in imagesToRun) {
     // - Reporting progress -
     processed++
     double frac = processed / total  
-    updateProgressWindow( imageFrac: frac, imageStep: "${processed}/${total}" )
+    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
 }
 
 // Closing progress bar window
@@ -615,6 +633,7 @@ Platform.runLater {
 import java.util.concurrent.CountDownLatch
 import javafx.animation.*
 import javafx.application.Platform
+import javafx.beans.property.SimpleStringProperty
 import javafx.geometry.Insets
 import javafx.geometry.Pos
 import javafx.scene.Scene

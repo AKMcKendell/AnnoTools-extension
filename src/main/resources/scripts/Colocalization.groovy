@@ -54,20 +54,27 @@ def createProgressWindow( String title, int totalImages ) {
         def stage = new Stage()
         stage.setTitle( title )
         
-        def imageLabel = new Label( "Image:" )
-        def imageName = new Label( "Starting..." )
-        def imageRow = new HBox( 5, imageLabel, imageName )
+        def stepLabel = new Label()
+        def stepNum = new SimpleStringProperty( "1" )
+        def stepMax = new SimpleStringProperty( "" )
+        def stepName = new SimpleStringProperty( "" )
+        def stepPer = new SimpleStringProperty( "0" )      
+        stepLabel.textProperty().bind(
+            Bindings.concat( "Step ", stepNum, "/", stepMax, ": ", stepName, " (", stepPer, "%)" )
+        )
+        def stepRow = new HBox( 5, stepLabel )
+        
+        def imageNum = new SimpleStringProperty( "1" )
+        def imageName = new SimpleStringProperty( "Starting..." )
+        def imageLabel = new Label()
+        imageLabel.textProperty().bind(
+            Bindings.concat( "Image ", imageNum, "/", totalImages, ": ", imageName )
+        )      
+        def imageRow = new HBox( 5, imageLabel )
         
         def bar = new ProgressBar( 0.0 )
         bar.setPrefWidth( 350 )
-        def progressLabel = new Label( "0 / ${totalImages}" )
-        def barRow = new HBox( 10, bar, progressLabel )
-        
-        def stepLabel = new Label( "Step" )
-        def stepNum = new Label()
-        def stepUpdate = new Label()
-        def stepProgress = new Label()
-        def stepRow = new HBox( 5, stepLabel, stepNum, stepUpdate, stepProgress )
+        def barRow = new HBox( 10, bar )     
         
         def cancelBtn = new Button( "Cancel" )
         cancelBtn.setDisable( false )
@@ -77,7 +84,7 @@ def createProgressWindow( String title, int totalImages ) {
         def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
-        List rows = [imageRow, barRow, stepRow, bottomRow]
+        List rows = [stepRow, imageRow, barRow, bottomRow]
         
         def vbox = new VBox( 10 )
         vbox.getChildren().addAll( rows )
@@ -145,15 +152,37 @@ def createProgressWindow( String title, int totalImages ) {
         
         return [
             stage        : stage,
+            stepNum      : stepNum,
+            stepMax      : stepMax,
+            stepName     : stepName,
+            stepPer      : stepPer,
+            imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            progressLabel: progressLabel,
-            stepNum      : stepNum,
-            stepUpdate   : stepUpdate,
-            stepProgress : stepProgress,
-            cancelFlag   : cancelFlag,
-            timeline     : timeline
+            cancelFlag   : cancelFlag
         ]
+    }
+}
+
+// Function: Update progress window
+def updateProgressWindow( UI, Map args = [:] ) {
+    String stepNum   = args.stepNum
+    String stepMax   = args.stepMax
+    String stepName  = args.stepName
+    String stepPer   = args.stepPer
+    String imageNum  = args.imageNum
+    String imageName = args.imageName
+    double imagePer  = args.imagePer ?: 0
+
+    Platform.runLater {
+        if (stepNum)   { UI.stepNum.set( stepNum ) }
+        if (stepMax)   { UI.stepMax.set( stepMax ) }
+        if (stepName)  { UI.stepName.set( stepName ) }
+        if (stepPer)   { UI.stepPer.set( stepPer ) }
+        if (imageName) { UI.imageName.set( imageName ) }
+        if (imageNum)  { UI.imageNum.set( imageNum ) }
+        if (imagePer)  { UI.bar.setProgress( imagePer ) }
+        
     }
 }
 
@@ -313,8 +342,8 @@ def currentEntry = currentImageData ? project.getEntry( currentImageData ) : nul
 def projectDirectory = project.getBaseDirectory()
 
 // Folder and file names of where preferences are stored in directory
-def scriptPrefsFolderName = "Scripts_Preferences"
-def scriptPrefsFileName   = "ColocalizationTool_Preferences" + ".json"
+def scriptPrefsFolderName = "AnnoTools-Data"
+def scriptPrefsFileName   = "Get-Colocalization_Preferences" + ".json"
 
 def prefsFolder = new File( projectDirectory, scriptPrefsFolderName )
 if (!prefsFolder.exists()) { prefsFolder.mkdirs() }
@@ -399,24 +428,18 @@ def codePreferences = runOnFxThreadAndWait {
     // BOTTOM PANEL: Output class preview
     def bottomSpacer = new Region()
     HBox.setHgrow( bottomSpacer, Priority.ALWAYS )
-    def outputPreviewLabel = new Label( "Output class preview:" )
+    def outputPreviewLabel = new Label()
     outputPreviewLabel.setPadding( new Insets( 5 ) )
+    setTT( outputPreviewLabel, "Preview of output class name" )
     def class1Prev = new SimpleStringProperty( "Class1" )
     def class2Prev = new SimpleStringProperty( "Class2" )
-    def outputPreview = new Label( "${class1Prev.get()}-${class2Prev.get()}" )
-    outputPreview.setPadding( new Insets( 5 ) )
-    
-    class1Prev.addListener { obs, oldVal, newVal ->
-        outputPreview.setText( "${class1Prev.get()}-${class2Prev.get()}" )
-    }
-    
-    class2Prev.addListener { obs, oldVal, newVal ->
-        outputPreview.setText( "${class1Prev.get()}-${class2Prev.get()}" )
-    }
+    outputPreviewLabel.textProperty().bind(
+        Bindings.concat( "Output class preview: ", class1Prev, "-", class2Prev )
+    )
     
     def bottomRow = new HBox( 5 )
     bottomRow.setPadding( new Insets( 10 ) )
-    bottomRow.getChildren().addAll( bottomSpacer, outputPreviewLabel, outputPreview )
+    bottomRow.getChildren().addAll( bottomSpacer, outputPreviewLabel )
     
     root.bottom = bottomRow
     
@@ -540,25 +563,7 @@ def total = imagesToRun.size()
 def progressUI = createProgressWindow( "Processing", total )
 def cancelFlag = progressUI.cancelFlag
 int processed = 0
-
-// Closure to show update on code progress
-def updateProgressWindow = { Map args = [:] ->
-    String image      = args.image
-    String stepNum    = args.stepNum
-    String stepUpdate = args.stepUpdate
-    String stepFrac   = args.stepFrac
-    double imageFrac  = args.imageFrac ?: 0
-    String imageStep  = args.imageStep
-
-    Platform.runLater {
-        if (image)      { progressUI.imageName.setText( image ) }
-        if (stepNum)    { progressUI.stepNum.setText( stepNum ) }
-        if (stepUpdate) { progressUI.stepUpdate.setText( stepUpdate ) }
-        if (stepFrac)   { progressUI.stepProgress.setText( stepFrac ) }
-        if (imageFrac)  { progressUI.bar.setProgress( imageFrac ) }
-        if (imageStep)  { progressUI.progressLabel.setText( imageStep ) }
-    }
-}
+int netSteps = codePreferences.objectClasses1.size() * codePreferences.objectClasses2.size()
 
 imageLoop:
 for (image in imagesToRun) {
@@ -566,14 +571,13 @@ for (image in imagesToRun) {
     if (cancelFlag.get()) break
     
     // Reporting current image
-    updateProgressWindow( image: image.toString(), stepFrac: "(0%)" )
+    updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image] )
     
     // If working on current image, modifying respective image data
     def imageData = image == currentEntry ? currentImageData : image.readImageData()
     def hierarchy = imageData.getHierarchy()
     def annotations = hierarchy.getAnnotationObjects()
     
-    int netSteps = codePreferences.objectClasses1.size() * codePreferences.objectClasses2.size()
     int step = 1
     
     // --- EXECUTION ---
@@ -584,7 +588,7 @@ for (image in imagesToRun) {
         for (class2 in codePreferences.objectClasses2) {
             
             String newClass = class1 + "-" + class2 
-            updateProgressWindow( stepNum: "${step}/${netSteps}:", stepUpdate: "Working on ${newClass}" )
+            updateProgressWindow( progressUI, [stepNum: step, stepName: "Working on ${newClass}"] )
             
             // Adding the new class to the pathclass list if it is not already on it
             def availableClasses = getQuPath().getAvailablePathClasses()               
@@ -659,7 +663,7 @@ for (image in imagesToRun) {
                     }
                     
                     int percentDone = (compNum / totalComps) * 100
-                    updateProgressWindow( stepFrac: "(${percentDone}%)" )
+                    updateProgressWindow( progressUI, [stepPer: percentDone] )
                     compNum ++
                 }
             }
@@ -668,11 +672,8 @@ for (image in imagesToRun) {
     }
     
     
-    // Updating viewer and saving (when relevant)
-    // If only current image is imported to, will not automatically save so the import can be tested
-    if (imagesToRun.size() > 1 || image != currentEntry) {
-        image.saveImageData( imageData ) // Saving data
-    }
+    // Saving data
+    image.saveImageData( imageData )
     
     // Ensure current viewer updates its annotation list when working on the current image
     if (image == currentEntry) {
@@ -695,7 +696,7 @@ for (image in imagesToRun) {
     // - Reporting progress -
     processed++
     double frac = processed / total 
-    updateProgressWindow( imageFrac: frac, imageStep: "${processed}/${total}" )
+    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
 }
 
 // Closing progress bar window

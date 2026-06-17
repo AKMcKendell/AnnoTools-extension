@@ -72,7 +72,7 @@ class AnnoToolsExtension implements QuPathExtension {
             def menuButton = new MenuButton()
             menuButton.getProperties().put( markerKey, true )
             menuButton.setFocusTraversable( false )
-            menuButton.setTooltip( new Tooltip( 'Select an annotation-modifying tool to run' ) )
+            menuButton.setTooltip( new Tooltip( 'AnnoTools' ) )
 
             // Icon for button
             def glyph_font = FontAwesome.Glyph.CUBES

@@ -1,9 +1,8 @@
-
-// --- CONFIGURATION (USER INPUT) ---
-def classifiers = ["Alec", "Sofia"] // List of intitial users/classifiers
-def reviewers = ["Merina", "Miguel"] // List of reviewers (following classifiers)
-
-
+/*
+ * Author: Alec McKendell
+ * Date: 2026.2.4
+ * Description: Manually classify many objects
+*/
 
 // --- Parameters ---
 def dialogOffsetX = 25
@@ -77,8 +76,6 @@ class ViewerSessionVars {
 }
 
 def session = new ViewerSessionVars(
-    classifiers : classifiers,
-    reviewers   : reviewers,
     currentAnnoColorsMap : [:],
     highlightStatesAndColorsMap : []
 )
@@ -974,8 +971,8 @@ def getCodePreferences( ViewerSessionVars session ) {
     // Make/get prefs folder as needed
     def projectDirectory = project.getBaseDirectory()
     def projectFolderNames = projectDirectory.listFiles().collect { it.getName() }
-    def scriptPrefsFolderName = "Scripts_Preferences"
-    def scriptPrefsFileName = "ManualClassifications_Preferences" + ".json"
+    def scriptPrefsFolderName = "AnnoTools-Data"
+    def scriptPrefsFileName = "Manually-Classify_Preferences" + ".json"
     def prefsFolder = new File( projectDirectory, scriptPrefsFolderName )
     if (!prefsFolder.exists()) {
         // Create a subfolder inside that folder
@@ -1068,22 +1065,183 @@ def getCodePreferences( ViewerSessionVars session ) {
         topRow.setMinWidth( Region.USE_PREF_SIZE )
         root.top = topRow
         
+        
         // --- LEFT: dropdown (user box) + text fields ---
         def userLabel = new Label( "User:" )
-        userLabel.setPadding( new Insets( 0, 0, -5, 0 ) )
-        def users = new ComboBox()
-        users.setEditable( true )
-        users.setPromptText( "Type or select" )
-        setTT( [userLabel, users], "Select current user (new users can be added at top of script)" )
+        def userChangeConfirmation = new Label()
+        userChangeConfirmation.getStyleClass().add( "remove-user-feedback" )
+        userChangeConfirmation.setVisible( false )
+        userChangeConfirmation.setManaged( false )
         
-        def classifierOptions = FXCollections.observableArrayList( session.classifiers )
-        def reviewerOptions   = FXCollections.observableArrayList( session.reviewers )
+        def userLabelRow = new HBox( 2, userLabel, userChangeConfirmation )
+        userChangeConfirmation.setPadding( new Insets( 0, 0, 0, 10 ) )
+        userLabelRow.setPadding( new Insets( 10, 0, 0, 0 ) )
+        
+        def users = new ComboBox()
+        users.setPrefWidth( 150 )
+        def userInputField = new TextField()
+        userInputField.setPrefWidth( 150 )
+        userInputField.setPromptText( "Add with ENTER" )
+        setTT( [userLabel, users], classifierModeBtn.isSelected() ? "Select a classifier" : "Select a reviewer" )
+        def addUserBtn    = new Button( "+" )
+        setTT( addUserBtn, classifierModeBtn.isSelected() ? "Add a new classifier" : "Add a new reviewer" )
+        def removeUserBtn = new Button( "−" )
+        setTT( removeUserBtn, "Remove a user" )
+        def removeUserDropdown = new ComboBox()
+        removeUserDropdown.setPrefWidth( 150 )
+        
+        def userRow = new HBox( 5, users, addUserBtn, removeUserBtn )
+        
+        
+        removeUserDropdown.setCellFactory {
+            new ListCell() {
+                @Override
+                protected void updateItem( Object item, boolean empty ) {
+                    super.updateItem( item, empty )
+                    
+                    def nameLabel = new Label( item.toString() )
+                    nameLabel.setPadding( new Insets( 0, 0, 0, 0 ) )
+                    nameLabel.setStyle( "-fx-text-fill: white;" )
+                    
+                    def removeUserSpacer = new Region()
+                    HBox.setHgrow( removeUserSpacer, Priority.ALWAYS )
+                    
+                    def xLabel = new Label( "✖  " )
+                    xLabel.setStyle( "-fx-text-fill: white;" )
+                    
+                    def cellBox = new HBox( nameLabel, removeUserSpacer, xLabel )
+                    cellBox.setAlignment( Pos.CENTER_LEFT )
+                    
+                    setGraphic( cellBox )
+                    setText( null )
+                    
+                    setStyle( "-fx-background-color: rgba(255, 0, 0, 0.08);" )
+                }
+            }
+        }
+        
+        
+        modeButtons.selectedToggleProperty().addListener { obs, oldToggle, newToggle ->
+            setTT( addUserBtn, newToggle == classifierModeBtn ? "Add a new classifier" : "Add a new reviewer")
+            setTT( removeUserBtn, newToggle == classifierModeBtn ? "Remove a classifier" : "Remove a reviewer")
+            setTT( [userLabel, users], classifierModeBtn.isSelected() ? "Select a classifier" : "Select a reviewer" )
+        }
+        
+        
+        
+        def classifierOptions = FXCollections.observableArrayList( prePrefsMap.classifiers ?: [] )
+        def reviewerOptions   = FXCollections.observableArrayList( prePrefsMap.reviewers ?: [] )
+        
+        def showFadeOutMessage = {
+            userChangeConfirmation.setOpacity( 0.7 )
+            userChangeConfirmation.setVisible( true )
+            userChangeConfirmation.setManaged( true )
+            
+            def fadeOut = new FadeTransition( Duration.millis( 800 ), userChangeConfirmation )
+            fadeOut.setDelay( Duration.millis( 700 ) )
+            fadeOut.setToValue( 0.0 )
+            fadeOut.setOnFinished {
+                userChangeConfirmation.setVisible( false )
+                userChangeConfirmation.setManaged( false )
+            }
+            fadeOut.play()
+        }
+        
+        boolean addedUser = false
+        
+        userInputField.setOnAction {
+            String newUser = userInputField.getText().trim()?.capitalize()
+            
+            if (newUser) {
+                if (modeButtons.getSelectedToggle() == classifierModeBtn && newUser !in classifierOptions) {
+                    classifierOptions << newUser
+                } else if (newUser !in reviewerOptions) {
+                    reviewerOptions << newUser
+                } else {
+                    return
+                }
+                
+                userChangeConfirmation.setStyle( "-fx-text-fill: #5cb85c;" )
+                userChangeConfirmation.setText( "*Added ${newUser}*" )              
+                showFadeOutMessage()
+                
+                userRow.getChildren().set( 0, users )
+                
+                userInputField.clear()
+                addUserBtn.setDisabled( false )
+                users.setValue( newUser )
+                addedUser = true
+            }
+        }
+        
+        addUserBtn.setOnAction {
+            userRow.getChildren().set( 0, userInputField )
+            userInputField.requestFocus()
+            addUserBtn.setDisabled( true )
+            addedUser = false
+        }
+        
+        userInputField.focusedProperty().addListener { obs, oldVal, newVal ->
+            if (!newVal && !addedUser) {
+                addUserBtn.setDisabled( false )
+                userRow.getChildren().set( 0, users )
+            }
+        }
+        
+        boolean removedUser = false
+        
+        def removeUserListener      
+        removeUserListener = { obs, oldVal, newVal ->
+            if (oldVal != newVal) {
+                if (modeButtons.getSelectedToggle() == classifierModeBtn) {
+                    classifierOptions.remove( newVal )
+                } else {
+                    reviewerOptions.remove( newVal )
+                }
+                
+                userChangeConfirmation.setStyle( "-fx-text-fill: #ff6b6b;" )
+                userChangeConfirmation.setText( "*Removed ${newVal}*" )           
+                showFadeOutMessage()
+                removedUser = true
+            }
+            
+            removeUserDropdown.valueProperty().removeListener( removeUserListener )
+            userRow.getChildren().set( 0, users )
+            users.show()
+        }
+        
+        String prevSelectedUser
+        removeUserBtn.setOnAction {
+            removedUser = false
+            
+            prevSelectedUser = users.getValue()
+            userRow.getChildren().set( 0, removeUserDropdown )
+            
+            def currentOptions = modeButtons.getSelectedToggle() == classifierModeBtn ? classifierOptions : reviewerOptions
+            removeUserDropdown.setItems( FXCollections.observableArrayList( currentOptions ) )
+            
+            removeUserDropdown.valueProperty().addListener( removeUserListener )
+        
+            userRow.applyCss()
+            userRow.layout()
+            
+            removeUserDropdown.show()
+        }
+        
+        removeUserDropdown.showingProperty().addListener { obs, wasShowing, isShowing ->
+            if (wasShowing && !isShowing && !removedUser) {
+                removeUserDropdown.valueProperty().removeListener( removeUserListener )
+                userRow.getChildren().set( 0, users )
+            }
+        }
+        
+        
         
         // New text fields
         def annoClassLabel       = new Label( "Annotation class:" )
-        annoClassLabel.setPadding( new Insets( 5, 0, -5, 0 ) )
+        annoClassLabel.setPadding( new Insets( 10, 0, 0, 0 ) )
         def annoClassField       = new ComboBox()
-        setTT( [annoClassLabel, annoClassField], "Class of annotations to be used. \n If missing, add to QuPath class list." )
+        setTT( [annoClassLabel, annoClassField], "Class of annotations to be classified. \n If missing, add to QuPath class list." )
         def projectPathClasses = project.getPathClasses().findAll { it?.getName() }
         
         def currentImageAnnos = currentImageData ? getAnnotationObjects() : []
@@ -1111,7 +1269,7 @@ def getCodePreferences( ViewerSessionVars session ) {
                     } else {
                         def pc = item.name
                         def num = item.num
-                        setText(num > 0 ? "${pc} [${num}]" : "${pc}")
+                        setText( num > 0 ? "${pc} [${num}]" : "${pc}" )
                     }
                 }
             }
@@ -1134,13 +1292,15 @@ def getCodePreferences( ViewerSessionVars session ) {
         annoClassField.setItems( FXCollections.observableArrayList( pathClassEntries ) )
         
         def classifyingNameLabel = new Label( "Classifying name:" )
-        classifyingNameLabel.setPadding( new Insets( 5, 0, -5, 0 ) )
+        classifyingNameLabel.setPadding( new Insets( 10, 0, 0, 0 ) )
         def classifyingNameField = new TextField()
+        classifyingNameField.setPromptText( "Classification key (e.g. CAA)" )
         setTT( [classifyingNameLabel, classifyingNameField], "Simple key for what is being classified to be stored in metadata (e.g. CAA)" )
         
         def gridSizeLabel        = new Label( "Grid size (µm):" )
-        gridSizeLabel.setPadding( new Insets( 25, 0, -5, 0 ) )
+        gridSizeLabel.setPadding( new Insets( 25, 0, 0, 0 ) )
         def gridSizeField        = new TextField()
+        gridSizeField.setPromptText( "Size of grouping grid (µm)" )
         setTT( [gridSizeLabel, gridSizeField], "Size of grouping grid (µm). Increasing this reduces the number of groups per image but increases objects per group." )
         
         // Enforce integer-only input for grid size
@@ -1150,16 +1310,28 @@ def getCodePreferences( ViewerSessionVars session ) {
             }
         }
         
+        // Can't leave the field without restoring value
+        String oldGridSize = gridSizeField.getText()
+        gridSizeField.focusedProperty().addListener { obs, oldVal, newVal ->
+            if (newVal) {
+                oldGridSize = gridSizeField.getText()
+            } else if (gridSizeField.getText().isEmpty()) {
+                gridSizeField.setText( oldGridSize )
+            }
+        }
+        
         // Create bounding box, add children and set onto UI
         def leftBox = new VBox( 10 )
         leftBox.setPadding( new Insets( 10 ) )
+        leftBox.setPrefWidth( 250 )
         leftBox.getChildren().addAll(
-            userLabel, users,
+            userLabelRow, userRow,
             annoClassLabel, annoClassField,
             classifyingNameLabel, classifyingNameField,
             gridSizeLabel, gridSizeField
         )
         root.left = leftBox
+        
         
         
         // --- BOTTOM: checkbox for filled classified annos ---
@@ -1185,6 +1357,8 @@ def getCodePreferences( ViewerSessionVars session ) {
             
             okBtn.setText( inClassifierMode ? "Begin classifying" : "Begin reviewing" )
         }
+        
+        
         
         // --- CENTER: scrollable list of channels (max 3 allowed) ---
         // Create all channel checkboxes
@@ -2328,7 +2502,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         // Closure to collect current preferences and make map
         def collectCurrentPrefs = {
-            def userName          = users.getValue()
+            def userName          = users.getValue().capitalize()
             def mode              = modeButtons.getSelectedToggle() == classifierModeBtn ? ActionStrings.CLASSIFIER_MODE : ActionStrings.REVIEWER_MODE
             def checkingWork      = checkingWorkCheckbox.isSelected()
             def selectedChannels  = channelCheckboxes.findAll { it.isSelected() }
@@ -2353,6 +2527,8 @@ def getCodePreferences( ViewerSessionVars session ) {
             }
             
             def prefMap = [
+                "classifiers"         : classifierOptions,
+                "reviewers"           : reviewerOptions,
                 "userName"            : userName,
                 "mode"                : mode,
                 "checkingWork"        : checkingWork,
@@ -2422,7 +2598,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         )
         okBtn.disableProperty().bind(
             classifyingNameField.textProperty().isEmpty()
-            .or( users.getEditor().textProperty().isEmpty() )
+            .or( users.valueProperty().isNull() )
             .or( gridSizeField.textProperty().isEmpty() )
             .or( anySelectedChannel.not() )
         )
@@ -2465,6 +2641,8 @@ while (true) {
     
     
     // --- Storing selected preferences for use in script ---
+    session.classifiers         = codePreferences.classifiers
+    session.reviewers           = codePreferences.reviewers
     session.userName            = codePreferences.userName
     session.classifyingName     = codePreferences.classifyingName
     session.userKey             = session.userName + "_${session.classifyingName}"
@@ -2948,7 +3126,6 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                     def result = runOnFxThreadAndWait {
                         
                         def alert = new Alert( AlertType.NONE )
-                        print session.freeView
                         alert.setTitle( !session.freeView ? 
                             "Group ${binIndex + 1} of ${sortedBins.size()} — ${session.userName}" :
                             "Free View" )
@@ -3468,6 +3645,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 import javafx.animation.PauseTransition
+import javafx.animation.FadeTransition
 import javafx.util.Duration
 import javafx.application.Platform
 import javafx.beans.property.SimpleBooleanProperty

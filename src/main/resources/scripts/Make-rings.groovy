@@ -45,20 +45,27 @@ def createProgressWindow( String title, int totalImages ) {
         def stage = new Stage()
         stage.setTitle( title )
         
-        def imageLabel = new Label( "Image:" )
-        def imageName = new Label( "Starting..." )
-        def imageRow = new HBox( 5, imageLabel, imageName )
+        def stepLabel = new Label()
+        def stepNum = new SimpleStringProperty( "1" )
+        def stepMax = new SimpleStringProperty( "" )
+        def stepName = new SimpleStringProperty( "" )
+        def stepPer = new SimpleStringProperty( "0" )      
+        stepLabel.textProperty().bind(
+            Bindings.concat( "Step ", stepNum, "/", stepMax, ": ", stepName, " (", stepPer, "%)" )
+        )
+        def stepRow = new HBox( 5, stepLabel )
+        
+        def imageNum = new SimpleStringProperty( "1" )
+        def imageName = new SimpleStringProperty( "Starting..." )
+        def imageLabel = new Label()
+        imageLabel.textProperty().bind(
+            Bindings.concat( "Image ", imageNum, "/", totalImages, ": ", imageName )
+        )      
+        def imageRow = new HBox( 5, imageLabel )
         
         def bar = new ProgressBar( 0.0 )
         bar.setPrefWidth( 350 )
-        def progressLabel = new Label( "0 / ${totalImages}" )
-        def barRow = new HBox( 10, bar, progressLabel )
-        
-        def stepLabel = new Label( "Step" )
-        def stepNum = new Label()
-        def stepUpdate = new Label()
-        def stepProgress = new Label()
-        def stepRow = new HBox( 5, stepLabel, stepNum, stepUpdate, stepProgress )
+        def barRow = new HBox( 10, bar )     
         
         def cancelBtn = new Button( "Cancel" )
         cancelBtn.setDisable( false )
@@ -68,7 +75,7 @@ def createProgressWindow( String title, int totalImages ) {
         def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
-        List rows = [imageRow, barRow, stepRow, bottomRow]
+        List rows = [stepRow, imageRow, barRow, bottomRow]
         
         def vbox = new VBox( 10 )
         vbox.getChildren().addAll( rows )
@@ -136,15 +143,37 @@ def createProgressWindow( String title, int totalImages ) {
         
         return [
             stage        : stage,
+            stepNum      : stepNum,
+            stepMax      : stepMax,
+            stepName     : stepName,
+            stepPer      : stepPer,
+            imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            progressLabel: progressLabel,
-            stepNum      : stepNum,
-            stepUpdate   : stepUpdate,
-            stepProgress : stepProgress,
-            cancelFlag   : cancelFlag,
-            timeline     : timeline
+            cancelFlag   : cancelFlag
         ]
+    }
+}
+
+// Function: Update progress window
+def updateProgressWindow( UI, Map args = [:] ) {
+    String stepNum   = args.stepNum
+    String stepMax   = args.stepMax
+    String stepName  = args.stepName
+    String stepPer   = args.stepPer
+    String imageNum  = args.imageNum
+    String imageName = args.imageName
+    double imagePer  = args.imagePer ?: 0
+
+    Platform.runLater {
+        if (stepNum)   { UI.stepNum.set( stepNum ) }
+        if (stepMax)   { UI.stepMax.set( stepMax ) }
+        if (stepName)  { UI.stepName.set( stepName ) }
+        if (stepPer)   { UI.stepPer.set( stepPer ) }
+        if (imageName) { UI.imageName.set( imageName ) }
+        if (imageNum)  { UI.imageNum.set( imageNum ) }
+        if (imagePer)  { UI.bar.setProgress( imagePer ) }
+        
     }
 }
 
@@ -349,8 +378,8 @@ def currentEntry = currentImageData ? project.getEntry( currentImageData ) : nul
 def projectDirectory = project.getBaseDirectory()
 
 // Folder and file names of where preferences are stored in directory
-def scriptPrefsFolderName = "Scripts_Preferences"
-def scriptPrefsFileName   = "MakingRings_Preferences" + ".json"
+def scriptPrefsFolderName = "AnnoTools-Data"
+def scriptPrefsFileName   = "Make-Rings_Preferences" + ".json"
 
 def prefsFolder = new File( projectDirectory, scriptPrefsFolderName )
 if (!prefsFolder.exists()) { prefsFolder.mkdirs() }
@@ -384,6 +413,7 @@ def codePreferences = runOnFxThreadAndWait {
     
     // TOP ROW: Expansion distances
     int maxExpansions = 5
+    List<Integer> expansions = []
     
     // Parse comma-separated integers
     def parseIntegerList = { String text ->    
@@ -402,28 +432,59 @@ def codePreferences = runOnFxThreadAndWait {
     expansionField.setPromptText( "e.g. \"6,16,31\"" )
     setTT( [expansionLabel, expansionField], "Radii of expansion rings using numbers and commas only (max ${maxExpansions})." )
     
+    def topSpacer = new Region()
+    HBox.setHgrow( topSpacer, Priority.ALWAYS )
+    def outputClassPreview = new Label()
+    setTT( outputClassPreview, "Preview of output class name(s)" )
+    def classPrev = new SimpleStringProperty( "Class" )
+    
+    // Rebuilds the preview text from the current class + up to 3 expansions
+    def updateClassPreview = {
+        def cls = classPrev.get()
+        if (expansions.isEmpty()) {
+            outputClassPreview.setText( "Output classes preview:  ${cls}_Exp" )
+            return
+        }
+        def examples = expansions.take( 3 ).collect { "${cls}_${it}" }
+        if (expansions.size() > 3) {
+            examples << "..."
+        }
+        outputClassPreview.setText( "Output classes preview:  " + examples.join( ", " ) )
+    }
+    
+    updateClassPreview()
+    
     def previewLabel = new Label( "=" )  
     def expansionsPreview = new Label( "[]" )
     setTT( [previewLabel, expansionsPreview], "Preview of final expansions.")
     
-    List<Integer> expansions = []
+    
+    
     
     expansionField.textProperty().addListener { obs, oldVal, newVal ->
         
-        // Allow only digits and commas (no double commas)
-        if (!newVal.matches( "[\\d,]*" ) || newVal.contains( ",," )) {
+        // Allow only digits and commas (no double commas, no leading comma)
+        if (!newVal.matches( "[\\d,]*" ) || newVal.contains( ",," ) || newVal.startsWith( "," )) {
+            expansionField.setText( oldVal )
+            return
+        }
+        
+        // Enforce max 4 digits per number, no leading zeros
+        if (newVal.split( "," ).any { it.length() > 4 || it.startsWith( "0" ) }) {
             expansionField.setText( oldVal )
             return
         }
         
         // Capped at 5 expansions
         List<Integer> newExpansions = parseIntegerList( newVal ).unique().sort()
-        if (newExpansions.size() >= maxExpansions && newVal.endsWith( "," ) || newVal.startsWith( "," )) {
+        if (newExpansions.size() > maxExpansions ||
+                (newExpansions.size() == maxExpansions && newVal.endsWith( "," ))) {
             expansionField.setText( oldVal )
             return
         }
         
         expansions = newExpansions
+        updateClassPreview()
         expansionsPreview.setText( expansions.toString() )
     }
     
@@ -436,18 +497,15 @@ def codePreferences = runOnFxThreadAndWait {
         ""
     )
     
-    def expansionRow = new HBox( 8 )
-    expansionRow.setPadding( new Insets( 10 ) )
+    def expansionRow = new HBox( 8, expansionLabel, expansionField, previewLabel, expansionsPreview, topSpacer )
     expansionRow.setAlignment( Pos.CENTER_LEFT )
-    expansionRow.getChildren().addAll(
-        expansionLabel,
-        expansionField,
-        previewLabel,
-        expansionsPreview
-    )
+    def classPrevRow = new HBox( 8, outputClassPreview ) 
+    def topBox = new VBox( 5, expansionRow, classPrevRow )
+    topBox.setPadding( new Insets( 10 ) )
+    topBox.setAlignment( Pos.CENTER_LEFT )
     
     // Add it to your existing layout
-    root.top = expansionRow
+    root.top = topBox
     
     
     
@@ -503,6 +561,18 @@ def codePreferences = runOnFxThreadAndWait {
     pathClassBox.header.getChildren().addAll( pathClassBox.title, pathClassBox.spacer, pathClassBox.clear )    
     pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.objectClasses ) }
     
+    // Adding listeners to stop same class from being selected twice and updating class preview
+    pathClassBox.CBs.each { cb ->
+        cb.selectedProperty().addListener { obs, oldVal, selected ->
+            def firstSelected = pathClassBox.CBs.find { it.isSelected() }
+            classPrev.set( selected ? cb.getUserData() : firstSelected ? firstSelected.getUserData() : "Class" )
+            updateClassPreview()
+        }
+        
+        cb.setSelected( !cb.isSelected() )
+        cb.setSelected( !cb.isSelected() )
+    }
+    
     root.right = pathClassBox.box
     
     
@@ -540,11 +610,16 @@ def codePreferences = runOnFxThreadAndWait {
         { !parseIntegerList( expansionField.getText() ).isEmpty() },
         expansionField.textProperty()
     )
+    def onlyZero = Bindings.createBooleanBinding(
+        { parseIntegerList( expansionField.getText() ) == [0] },
+        expansionField.textProperty()
+    )
     
     okBtn.disableProperty().bind(
         anySelectedImage.not()
             .or( anySelectedPathClass.not() )
             .or( hasExpansions.not() )
+            .or( onlyZero )
     )
     
     
@@ -597,25 +672,6 @@ def progressUI = createProgressWindow( "Processing", total )
 def cancelFlag = progressUI.cancelFlag
 int processed = 0
 
-// Closure to show update on code progress
-def updateProgressWindow = { Map args = [:] ->
-    String image      = args.image
-    String stepNum    = args.stepNum
-    String stepUpdate = args.stepUpdate
-    String stepFrac   = args.stepFrac
-    double imageFrac  = args.imageFrac ?: 0
-    String imageStep  = args.imageStep
-
-    Platform.runLater {
-        if (image)      { progressUI.imageName.setText( image ) }
-        if (stepNum)    { progressUI.stepNum.setText( stepNum ) }
-        if (stepUpdate) { progressUI.stepUpdate.setText( stepUpdate ) }
-        if (stepFrac)   { progressUI.stepProgress.setText( stepFrac ) }
-        if (imageFrac)  { progressUI.bar.setProgress( imageFrac ) }
-        if (imageStep)  { progressUI.progressLabel.setText( imageStep ) }
-    }
-}
-
 imageLoop:
 for (image in imagesToRun) {
     
@@ -624,7 +680,7 @@ for (image in imagesToRun) {
     }
     
     // Reporting current image
-    updateProgressWindow( image: image.toString() )
+    updateProgressWindow( progressUI, [imageName: image] )
     
     // Getting image-specific information
     // If working on current image, modifying respective image data
@@ -635,6 +691,7 @@ for (image in imagesToRun) {
     def hierarchy = imageData.getHierarchy()
     
     int netSteps = (codePreferences.objectClasses.size() * (codePreferences.expansionsMicrons.size() + 1))
+    updateProgressWindow( progressUI, [stepMax: netSteps] )
     int step = 1
     
     
@@ -673,10 +730,11 @@ for (image in imagesToRun) {
         
         // --- RING GENERATION ---
         // Getting map with central object and relevant expansion geometries
-        updateProgressWindow( stepNum: "${step}/${netSteps}:", stepUpdate: "Generating expansion map for ${objectClass}", stepFrac: "(0%)" )
+        updateProgressWindow( progressUI, [stepNum: step, stepName: "Generating expansion map for ${objectClass}"] )
         
         def expansionsMap = []
         
+        int numBaseObjs = baseObjs.size()
         baseObjs.eachWithIndex { annoCentral, idx ->
             // Normalize to Polygon/MultiPolygon before buffering.
             // Mask objects stored as GeometryCollections can produce unexpectedly wide
@@ -701,8 +759,8 @@ for (image in imagesToRun) {
             }
             expansionsMap << [centerObj: annoCentral, allGeoms: geomsAll]
             
-            int pDone = ((idx+1) / baseObjs.size()) * 100
-            updateProgressWindow( stepFrac: "(${pDone}%)" )
+            int pDone = ((idx+1) / numBaseObjs) * 100
+            updateProgressWindow( progressUI, [stepPer: pDone] )
         }
         
         // Prep each group: geometries are already normalized by above so no re-cleaning needed.
@@ -721,7 +779,7 @@ for (image in imagesToRun) {
             
             // Reporting current step
             step ++
-            updateProgressWindow( stepNum: "${step}/${netSteps}:", stepUpdate: "Working on ${expClass}", stepFrac: " " )
+            updateProgressWindow( progressUI, [stepNum: step, stepName: "Working on ${expClass}", stepPer: 0] )
             
             // Union all objects' geometries at the inner level into a single mask to subtract.
             // This ensures each ring does not overlap any lower-level zone from any object —
@@ -731,7 +789,8 @@ for (image in imagesToRun) {
             def combinedInnerMask = cleanForROI( UnaryUnionOp.union( innerGeomsAtLevel ) )
             
             // Getting each outer level geometry and subtracting the combined inner mask to form rings
-            expansionsMap.each { objGroup ->
+            int numExpMapVals = expansionsMap.size()
+            expansionsMap.eachWithIndex { objGroup, idx ->
                 def centerObj = objGroup.centerObj
                 
                 // cleanedAllGeoms entries are already normalized Polygon/MultiPolygon from above
@@ -761,17 +820,17 @@ for (image in imagesToRun) {
                     objGroup.ringObjs << ringObj
                     ringObj.setLocked( true )
                 }
+                
+                int pDone = ((idx+1) / numExpMapVals) * 100
+                updateProgressWindow( progressUI, [stepPer: pDone] )
             }
         }
     }
     
     
     
-    // Updating viewer and saving (when relevant)
-    // If only current image is imported to, will not automatically save so the import can be tested
-    if (imagesToRun.size() > 1 || image != currentEntry) {
-        image.saveImageData( imageData ) // Saving data
-    }
+    // Saving data
+    image.saveImageData( imageData )
     
     // Ensure current viewer updates its annotation list when working on the current image
     if (image == currentEntry) {
@@ -794,7 +853,7 @@ for (image in imagesToRun) {
     // - Reporting progress -
     processed++
     double frac = processed / total 
-    updateProgressWindow( imageFrac: frac, imageStep: "${processed}/${total}" )
+    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
 }
 
 // Closing progress bar window
@@ -806,6 +865,7 @@ Platform.runLater {
 import java.util.concurrent.CountDownLatch
 import javafx.animation.*
 import javafx.application.Platform
+import javafx.beans.property.SimpleStringProperty
 import javafx.geometry.Insets
 import javafx.geometry.Pos
 import javafx.scene.Scene

@@ -40,25 +40,22 @@ def setTT( objs, String tooltip ) {
 }
 
 // Function: Create window showing script progress
-def createProgressWindow( String title, int totalImages, boolean simplify = false ) {
+def createProgressWindow( String title, int totalImages, boolean simplify = false, Stage ownerStage = null ) {
     return runOnFxThreadAndWait {
         def stage = new Stage()
         stage.setTitle( title )
         
-        def imageLabel = new Label( "Image:" )
-        def imageName = new Label( "Starting..." )
-        def imageRow = new HBox( 5, imageLabel, imageName )
+        def imageNum = new SimpleStringProperty( "1" )
+        def imageName = new SimpleStringProperty( "Starting..." )
+        def imageLabel = new Label()
+        imageLabel.textProperty().bind(
+            Bindings.concat( "Image ", imageNum, "/", totalImages, ": ", imageName )
+        )      
+        def imageRow = new HBox( 5, imageLabel )
         
         def bar = new ProgressBar( 0.0 )
         bar.setPrefWidth( 350 )
-        def progressLabel = new Label( "0 / ${totalImages}" )
-        def barRow = new HBox( 10, bar, progressLabel )
-        
-        def stepLabel = new Label( "Step" )
-        def stepNum = new Label()
-        def stepUpdate = new Label()
-        def stepProgress = new Label()
-        def stepRow = new HBox( 5, stepLabel, stepNum, stepUpdate, stepProgress )
+        def barRow = new HBox( 10, bar )     
         
         def cancelBtn = new Button( "Cancel" )
         cancelBtn.setDisable( false )
@@ -68,15 +65,15 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
-        List rows = [imageRow, barRow, stepRow, bottomRow]
+        List rows = [imageRow, barRow, bottomRow]
         
         if (simplify) {
-            rows.removeAll( imageRow, stepRow, bottomRow )
+            rows.removeAll( imageRow, bottomRow )
         }
         
         def vbox = new VBox( 10 )
         vbox.getChildren().addAll( rows )
-        vbox.setPadding( new Insets( 5 ) )
+        vbox.setPadding( new Insets( 10 ) )
         vbox.setAlignment( Pos.CENTER_LEFT )
         
         // Sizing to fit all rows
@@ -97,9 +94,7 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         stage.setScene( scene )
         
         def gui = QuPathGUI.getInstance()
-        if (gui != null) {
-            stage.initOwner( gui.getStage() )
-        }
+        stage.initOwner( ownerStage ?: gui?.getStage() )  // use passed owner, fallback to QuPath
         stage.initModality( Modality.WINDOW_MODAL )
         stage.show()
         
@@ -140,34 +135,24 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         
         return [
             stage        : stage,
+            imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            progressLabel: progressLabel,
-            stepNum      : stepNum,
-            stepUpdate   : stepUpdate,
-            stepProgress : stepProgress,
-            cancelFlag   : cancelFlag,
-            timeline     : timeline
+            cancelFlag   : cancelFlag
         ]
     }
 }
 
-// Function: Show update on code progress
-def updateProgressWindow( Map args = [:] ) {
-    String image      = args.image
-    String stepNum    = args.stepNum
-    String stepUpdate = args.stepUpdate
-    String stepFrac   = args.stepFrac
-    double imageFrac  = args.imageFrac ?: 0
-    String imageStep  = args.imageStep
+// Function: Update progress window
+def updateProgressWindow( UI, Map args = [:] ) {
+    String imageNum  = args.imageNum
+    String imageName = args.imageName
+    double imagePer  = args.imagePer ?: 0
 
     Platform.runLater {
-        if (image)      { args.UI.imageName.setText( image ) }
-        if (stepNum)    { args.UI.stepNum.setText( stepNum ) }
-        if (stepUpdate) { args.UI.stepUpdate.setText( stepUpdate ) }
-        if (stepFrac)   { args.UI.stepProgress.setText( stepFrac ) }
-        if (imageFrac)  { args.UI.bar.setProgress( imageFrac ) }
-        if (imageStep)  { args.UI.progressLabel.setText( imageStep ) }
+        if (imageName) { UI.imageName.set( imageName ) }
+        if (imageNum)  { UI.imageNum.set( imageNum ) }
+        if (imagePer)  { UI.bar.setProgress( imagePer ) }
     }
 }
 
@@ -242,7 +227,7 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     
     String TTword = keyWord ?: title
     selectAllCB.setText( "${title.capitalize()} [0]" )
-    setTT( selectAllCB, selectAllCB.isSelected() ? "Deselect all ${TTword.uncapitalize()}" : "Select all ${TTword.uncapitalize()}" )
+    setTT( selectAllCB, "Include all ${TTword.uncapitalize()}" )
     
     // Add listeners to checkboxes (for changing instructions/labels)
     checkboxes.each { cb ->
@@ -252,7 +237,6 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
             titleLabel.setText( "${title.capitalize()} [${selectedNow.size()}]" )
             
             selectAllCB.setText( "${title.capitalize()} [${selectedNow.size()}]" )
-            setTT( selectAllCB, selectAllCB.isSelected() ? "Deselect all ${TTword.uncapitalize()}" : "Select all ${TTword.uncapitalize()}" )
             
             String tooltipText = "Select ${TTword.uncapitalize()}"
             
@@ -331,10 +315,10 @@ def collectAllMetadata( objects ) {
 }
 
 // Function: Scan the entire project to collect annotation field availability by class
-def collectProjectAnnotationIndex( project ) {
+def collectProjectAnnotationIndex( project, Stage ownerStage = null ) {
     List projectImages = project.getImageList()
     
-    def collectingUI = createProgressWindow( "Getting project specifics", projectImages.size(), true )
+    def collectingUI = createProgressWindow( "Getting project specifics", projectImages.size(), true, ownerStage )
     int imagesScanned = 0
     
     def index = [
@@ -377,7 +361,7 @@ def collectProjectAnnotationIndex( project ) {
         // - Reporting progress -
         imagesScanned++
         double frac = imagesScanned / projectImages.size() 
-        updateProgressWindow( UI: collectingUI, imageFrac: frac, imageStep: "${imagesScanned}/${projectImages.size()}" )
+        updateProgressWindow( collectingUI, [imagePer: frac, imageNum: imagesScanned] )
     }
     
     // Closing progress bar window
@@ -399,9 +383,9 @@ def currentEntry = currentImageData ? project.getEntry( currentImageData ) : nul
 def projectDirectory = project.getBaseDirectory()
 
 // Folder and file names of where preferences are stored in directory
-def scriptPrefsFolderName = "Scripts_Preferences"
-def scriptPrefsFileName   = "ExportingAnnoDetails_Preferences" + ".json"
-def fieldCacheFileName    = "ExportingAnnoDetails_ProjectFieldCache" + ".json"
+def scriptPrefsFolderName = "AnnoTools-Data"
+def scriptPrefsFileName   = "Save-Anno-Data_Preferences" + ".json"
+def fieldCacheFileName    = "ProjectFieldCache" + ".json"
 
 def prefsFolder = new File( projectDirectory, scriptPrefsFolderName )
 if (!prefsFolder.exists()) { prefsFolder.mkdirs() }
@@ -429,7 +413,7 @@ def projectFingerprint = { proj ->
 
 // If chache with project fingerprint exists, gets measurement/metadata specifics from there
 // If not, regenerates by scanning the project
-def loadProjectCache = { proj, File cacheFile, boolean forceReload = false ->
+def loadProjectCache = { proj, File cacheFile, boolean forceReload = false, Stage ownerStage = null ->
     def currentFingerprint = projectFingerprint( proj )
     if (cacheFile.exists() && cacheFile.length() > 0L && !forceReload) {
         try {
@@ -442,7 +426,7 @@ def loadProjectCache = { proj, File cacheFile, boolean forceReload = false ->
         }
     }
 
-    def builtIndex = collectProjectAnnotationIndex( proj )
+    def builtIndex = collectProjectAnnotationIndex( proj, ownerStage )
     def timestamp = LocalDateTime.now().format(
         DateTimeFormatter.ofPattern( "yyyy-MM-dd HH:mm:ss" )
     )
@@ -477,7 +461,7 @@ def codePreferences = runOnFxThreadAndWait {
     
     // LEFT PANEL: Image Selection
     def imageNames = project.getImageList().collect { it.getImageName() }
-    def imagesBox = makeCheckboxBox( "select images", "images", imageNames.collect { [name: it] } )
+    def imagesBox = makeCheckboxBox( "Available images", "images", imageNames.collect { [name: it] } )
     def currentImageCB = new CheckBox( "Current Image" )
     imagesBox.header.getChildren().addAll( imagesBox.selectAll, imagesBox.spacer, currentImageCB )
     imagesBox.CBs.each { it.setSelected( it.getText() in prePrefsMap.selectedImages  ) }
@@ -508,56 +492,42 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     // CENTER PANEL: PathClass selection list
-    def countsByClass
-    def pathClassBox
+    def measurementsBox
+    def metadataBox
+    def bottomRightPanel = new HBox( 10 )
     
-    def setPcBox = {
+    def selectSpecificCBs = { CBs, List matches ->
+        CBs.each { it.setSelected( it.getUserData() in matches ) }
+    }
+    
+    def setRightBox = {
+        
         def projectPathClasses = project.getPathClasses().findAll { it?.getName() } // No null (those with a name)
         countsByClass = projectCache.index.classCounts ?: [:]
         
         // Organizing any pathclasses with objects in the project to the top of the list
-        def highCounts = []
-        def lowCounts = []
-        projectPathClasses.each { pc ->
-            def entry = [name: pc.getName(), num: countsByClass[ pc.getName() ] ?: 0]
-            (entry.num > 0 ? highCounts : lowCounts) << entry
-        }
-        highCounts.sort { -it.num } // Sort for descending abundance
-        def pathClassNamesAndNum = highCounts + lowCounts
-        List pathClassCBsMap = pathClassNamesAndNum.collect { [name: (it.num > 0 ? "${it.name} [${it.num as int}]" : it.name), data: it.name] }
-        pathClassBox = makeCheckboxBox( "Project object classes", null, pathClassCBsMap, 220 )    
-        pathClassBox.header.getChildren().addAll( pathClassBox.title, pathClassBox.spacer, pathClassBox.clear )    
-        pathClassBox.CBs.each { it.setSelected( it.getUserData() in (prePrefsMap.objectClasses ?: []) ) }
+        def classesWithObjects = projectPathClasses
+            .findAll { countsByClass[ it.getName()] > 0 }
+            .collect { [name: it.getName(), num: countsByClass[ it.getName() ]] }
+        classesWithObjects.sort { -it.num } // Sort for descending abundance
+        List pathClassCBsMap = classesWithObjects.collect { [name: "${it.name} [${it.num as int}]", data: it.name] }
+        pathClassBox = makeCheckboxBox( "Available classes", null, pathClassCBsMap, 220 )    
+        pathClassBox.header.getChildren().addAll( pathClassBox.selectAll )
         BorderPane.setMargin( pathClassBox.box, new Insets( 0, 15, 0, 0 ) )
         
-        root.center = pathClassBox.box
-    }
-    
-    setPcBox()
-    
-    
-    
-    
-    
-    // RIGHT PANEL:  
-    def measurementsBox
-    def metadataBox
-    
-    def setMmMdBox = {
+
         def measurementsByClass = projectCache.index.measurementsByClass ?: [:]
         LinkedHashSet allMeasurements = new LinkedHashSet( (measurementsByClass.values() ?: []).collectMany { it ?: [] } )
         def allMeasurementsMap = allMeasurements.collect { [name: it] }
-        measurementsBox = makeCheckboxBox( "Measurements to include", "annotation measurements in project", allMeasurementsMap, 350 )
+        measurementsBox = makeCheckboxBox( "Available measurements", "available measurements within objects of the selected classes", allMeasurementsMap, 350 )
         measurementsBox.header.getChildren().setAll( measurementsBox.selectAll )
-        measurementsBox.CBs.each { it.setSelected( it.getText() in (prePrefsMap.measurements ?: []) ) }
         measurementsBox.box.setMinWidth( Region.USE_PREF_SIZE )
         
         def metadataByClass = projectCache.index.metadataByClass ?: [:]
         LinkedHashSet allMetadata = new LinkedHashSet( (metadataByClass.values() ?: []).collectMany { it ?: [] } )
         def allMetadataMap = allMetadata.collect { [name: it] }
-        metadataBox = makeCheckboxBox( "Metadata to include", "annotation metadata in project", allMetadataMap, 250 )
+        metadataBox = makeCheckboxBox( "Available metadata", "available metadata within objects of the selected classes", allMetadataMap, 250 )
         metadataBox.header.getChildren().setAll( metadataBox.selectAll )
-        metadataBox.CBs.each { it.setSelected( it.getText() in (prePrefsMap.metadata ?: []) ) }
         metadataBox.box.setMinWidth( Region.USE_PREF_SIZE )
         
         pathClassBox.CBs.each { cb ->
@@ -581,37 +551,27 @@ def codePreferences = runOnFxThreadAndWait {
             cb.setSelected( !cb.isSelected() )
             cb.setSelected( !cb.isSelected() )
         }
+        
+        bottomRightPanel.getChildren().setAll( pathClassBox.box, measurementsBox.box, metadataBox.box )
+        
+        return [ pcCBs: pathClassBox.CBs,
+                 mmCBs: measurementsBox.CBs,
+                 mdCBs: metadataBox.CBs ]
     }
     
-    setMmMdBox()
+    def liveRightCBs = setRightBox()
+    selectSpecificCBs( liveRightCBs.pcCBs, prePrefsMap.objectClasses )
+    selectSpecificCBs( liveRightCBs.mmCBs, prePrefsMap.measurements )
+    selectSpecificCBs( liveRightCBs.mdCBs, prePrefsMap.metadata )
     
-    def MM_MD_Panel = new HBox( 10, measurementsBox.box, metadataBox.box )
     
-    def timeStamp = new Label( "Last scan: ${projectCache.timeStamp}" )
-    def rightSpacer = new Region()
-    HBox.setHgrow( rightSpacer, Priority.ALWAYS )
-    def refreshBtn = new Button( "Refresh" )
-    def topRow = new HBox( 10, timeStamp, rightSpacer, refreshBtn )
+    def timeStamp = new Label( "Last refresh: ${projectCache.timeStamp}" )
+    timeStamp.setPadding( new Insets( 5 ) )
+    def refreshBtn = new Button( "Refresh project data" )
+    setTT( refreshBtn, "Re-scan project to update available object classes, measurements, and metadata.")
+    def topRow = new HBox( 10, refreshBtn, timeStamp )
     
-    refreshBtn.setOnAction { e ->
-        refreshBtn.setDisable( true )
-    
-        Thread.startDaemon {
-            def newCache = loadProjectCache( project, fieldCacheFile, true ) // rebuild
-    
-            Platform.runLater {
-                projectCache = newCache
-                setPcBox()
-                setMmMdBox()
-                timeStamp.setText( "Last scan: ${projectCache.timeStamp}" )
-                refreshBtn.setDisable( false )
-            }
-        }
-    
-        e.consume()
-    }
-    
-    def rightPanel = new VBox( 10, topRow, MM_MD_Panel)
+    def rightPanel = new VBox( 10, topRow, bottomRightPanel)
     
     root.right = rightPanel
     
@@ -656,14 +616,49 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     // Disabling the "OK" button if not all inputs are met    
-    def anySelectedImage = Bindings.createBooleanBinding(
-        { imagesBox.CBs.any { it.isSelected() } },
-        *imagesBox.CBs.collect { it.selectedProperty() }
-    )
+    def rebindOkBtn = {
+        okBtn.disableProperty().unbind()
+        def anySelectedImage = Bindings.createBooleanBinding(
+            { imagesBox.CBs.any { it.isSelected() } },
+            *imagesBox.CBs.collect { it.selectedProperty() }
+        )
+        def anySelectedClass = Bindings.createBooleanBinding(
+            { liveRightCBs.pcCBs.any { it.isSelected() } },
+            *liveRightCBs.pcCBs.collect { it.selectedProperty() }
+        )
+        okBtn.disableProperty().bind(
+            anySelectedImage.not()
+            .or( anySelectedClass.not() )
+        )
+    }
     
-    okBtn.disableProperty().bind(
-        anySelectedImage.not()
-    )
+    // Initial bind
+    rebindOkBtn()
+    
+    
+    refreshBtn.setOnAction {
+        refreshBtn.setDisable( true )
+        def dialogStage = dialog.getDialogPane().getScene().getWindow() as Stage
+    
+        List classesSelected      = liveRightCBs.pcCBs.findResults { it.isSelected() ? it.getUserData() : null }
+        List measurementsSelected = liveRightCBs.mmCBs.findResults { it.isSelected() ? it.getText() : null }
+        List metadataSelected     = liveRightCBs.mdCBs.findResults { it.isSelected() ? it.getText() : null }
+        
+        Thread.startDaemon {
+            def newCache = loadProjectCache( project, fieldCacheFile, true, dialogStage )
+    
+            Platform.runLater {
+                projectCache = newCache
+                liveRightCBs = setRightBox()
+                selectSpecificCBs( liveRightCBs.pcCBs, classesSelected )
+                selectSpecificCBs( liveRightCBs.mmCBs, measurementsSelected )
+                selectSpecificCBs( liveRightCBs.mdCBs, metadataSelected )
+                timeStamp.setText( "Last refresh: ${projectCache.timeStamp}" )
+                refreshBtn.setDisable( true )
+                rebindOkBtn()
+            }
+        }
+    }
     
     
     // Attach root & show dialog
@@ -728,7 +723,7 @@ for (image in imagesToRun) {
     if (cancelFlag.get()) break
     
     // Reporting current image
-    updateProgressWindow( UI: progressUI, image: image.toString() )
+    updateProgressWindow( progressUI, [imageName: image] )
     
     
     // If working on current image, modifying respective image data
@@ -747,25 +742,28 @@ for (image in imagesToRun) {
     
     
     // Build rows: one row per annotation
-    annotations.each { obj ->
+    annotations.each { anno ->
+        def parent = anno.getParent()
         Map rowMap = [:]
         
-        rowMap[ "Image_Name" ] = imageName
-        rowMap[ "ID" ]         = obj.getID()
-        rowMap[ "Parent_ID" ]  = obj.getParent() ? obj.getParent().getID() : null
-        rowMap[ "Level" ]      = obj.getLevel()
-        rowMap[ "Name" ]       = obj.getName()
-        rowMap[ "Class" ]      = obj.getPathClass()?.getName()
-        rowMap[ "Area" ]       = obj.getROI()?.getScaledArea( pixelCalibration )
+        rowMap[ "Image" ]           = imageName
+        rowMap[ "Anno_Name" ]       = anno.getName()
+        rowMap[ "Anno_Class" ]      = anno.getPathClass()?.getName()
+        rowMap[ "Anno_ID" ]         = anno.getID()
+        rowMap[ "Parent_Name" ]     = parent?.getName()
+        rowMap[ "Parent_Class" ]    = parent?.getPathClass()?.getName()
+        rowMap[ "Parent_ID" ]       = parent?.getID()
+        rowMap[ "Hierarchy_Level" ] = anno.getLevel()
+        rowMap[ "Anno_Area_um" ]    = anno.getROI()?.getScaledArea( pixelCalibration )
         
-        def measurements = obj.getMeasurementList()
+        def MMs = anno.getMeasurementList()
         codePreferences.measurements.each { mmName ->
-            rowMap[ mmName ] = measurements.get( mmName ) ?: null
+            rowMap[ "Metadata_${mmName}" ] = MMs.containsKey( mmName ) ? MMs.get( mmName ) : null
         }
         
-        def metadata = obj.getMetadata()
+        def MD = anno.getMetadata()
         codePreferences.metadata.each { mdKey ->
-            rowMap[ mdKey ] = metadata.get( mdKey ) ?: null
+            rowMap[ "Measurements_${mdKey}" ] = MD.containsKey( mdKey ) ? MD.get( mdKey ) : null
         }
         
         headerRow = (headerRow + rowMap.keySet()).unique()
@@ -782,7 +780,7 @@ for (image in imagesToRun) {
     // - Reporting progress -
     processed++
     double frac = processed / total 
-    updateProgressWindow( UI: progressUI, imageFrac: frac, imageStep: "${processed}/${total}" )
+    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
 }
 
 
@@ -868,6 +866,7 @@ if (export) {
 import java.util.concurrent.CountDownLatch
 import javafx.animation.*
 import javafx.application.Platform
+import javafx.beans.property.SimpleStringProperty
 import javafx.event.ActionEvent
 import javafx.geometry.Insets
 import javafx.geometry.Pos
