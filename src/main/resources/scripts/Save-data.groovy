@@ -400,7 +400,10 @@ def prePrefsMap = [:]
 def inputGson = new Gson()
 def outputGson = new GsonBuilder().setPrettyPrinting().create()
 if (prefsFile.length() > 0L && prefsFile.getText() != "null") {
-    prePrefsMap = inputGson.fromJson( prefsFile.getText(), Map )
+    def readDataFile = inputGson.fromJson( prefsFile.getText(), Object )
+    if (readDataFile instanceof Map) {
+        prePrefsMap = readDataFile
+    }
 }
 
 // Build map of project specifics to cache
@@ -417,7 +420,7 @@ def loadProjectCache = { proj, File cacheFile, boolean forceReload = false, Stag
     def currentFingerprint = projectFingerprint( proj )
     if (cacheFile.exists() && cacheFile.length() > 0L && !forceReload) {
         try {
-            def cached = inputGson.fromJson( cacheFile.text, Map )
+            def cached = inputGson.fromJson( cacheFile.text, Object )
             if (cached?.fingerprint == currentFingerprint && cached?.index instanceof Map) {
                 return cached
             }

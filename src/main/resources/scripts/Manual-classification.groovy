@@ -951,10 +951,15 @@ def conditionallyFireMessage( ViewerSessionVars session ) {
 
 // Function to read in all rows of extenal project file into completeMatrix
 def readJSONtoPreferencesMap( jsonFile ) {
-    def inputGson = new Gson()
-    def prefsMap = inputGson.fromJson( jsonFile.text, Map )
-    
-    return prefsMap
+    if (jsonFile.length() > 0L && jsonFile.getText() != "null") {
+        def inputGson = new Gson()
+        def readDataFile = inputGson.fromJson( jsonFile.getText(), Object )
+        if (readDataFile instanceof Map) {
+            return readDataFile
+        } else {
+            return [:]
+        }
+    }
 }
 
 // Function to write preferences to .json file
@@ -985,7 +990,7 @@ def getCodePreferences( ViewerSessionVars session ) {
     }
     
     // Getting existing/previous preferences
-    def prePrefsMap = session.prefsFile.length() > 0L && session.prefsFile.getText() != "null" ? readJSONtoPreferencesMap( session.prefsFile ) : [:]
+    def prePrefsMap = readJSONtoPreferencesMap( session.prefsFile )
 
 
     // -- Open the UI with preference options --

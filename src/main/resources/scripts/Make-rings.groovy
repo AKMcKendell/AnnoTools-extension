@@ -390,9 +390,11 @@ if (!prefsFile.exists()) { prefsFile.createNewFile() }
 // Read previous preferences
 def prePrefsMap = [:]
 if (prefsFile.length() > 0L && prefsFile.getText() != "null") {
-    
     def inputGson = new Gson()
-    prePrefsMap = inputGson.fromJson( prefsFile.text, Map )
+    def readDataFile = inputGson.fromJson( prefsFile.getText(), Object )
+    if (readDataFile instanceof Map) {
+        prePrefsMap = readDataFile
+    }
 }
 
 

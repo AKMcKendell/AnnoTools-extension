@@ -302,7 +302,10 @@ if (!prefsFile.exists()) { prefsFile.createNewFile() }
 def prePrefsMap = [:]
 if (prefsFile.length() > 0L && prefsFile.getText() != "null") {
     def inputGson = new Gson()
-    prePrefsMap = inputGson.fromJson( prefsFile.getText(), Map )
+    def readDataFile = inputGson.fromJson( prefsFile.getText(), Object )
+    if (readDataFile instanceof Map) {
+        prePrefsMap = readDataFile
+    }
 }
 
 
@@ -382,11 +385,35 @@ def codePreferences = runOnFxThreadAndWait {
         { imagesBox.CBs.any { it.isSelected() } },
         *imagesBox.CBs.collect { it.selectedProperty() }
     )
+    def anySelectedPathClass = Bindings.createBooleanBinding(
+        { pathClassBox.CBs.any { it.isSelected() } },
+        *pathClassBox.CBs.collect { it.selectedProperty() }
+    )
     
     okBtn.disableProperty().bind(
         anySelectedImage.not()
+        .or( anySelectedPathClass.not() )
     )
     
+    
+    boolean confirmRemove = false
+    okBtn.addEventFilter( ActionEvent.ACTION ) { e ->
+        def confirmRemoveAlert = new Alert( Alert.AlertType.CONFIRMATION )
+        
+        confirmRemoveAlert.setTitle( "Confirm annotation removal" )  
+        confirmRemoveAlert.setHeaderText( null )
+        confirmRemoveAlert.setContentText( "Removed annotations and children cannot be recovered. Continue?" )
+        
+        def result = confirmRemoveAlert.showAndWait()
+        def selection = result.isPresent() && result.get() == ButtonType.OK
+        
+        if (!selection) {
+            e.consume()
+            return
+        }
+        
+        confirmRemove = true
+    }
     
     // Attach root & show dialog
     dialog.getDialogPane().content = root
@@ -394,7 +421,7 @@ def codePreferences = runOnFxThreadAndWait {
     def result = dialog.showAndWait()
     def button = result.get()
     
-    if (button == ButtonType.OK) {                
+    if (confirmRemove) {                
         def selectedImages = imagesBox.CBs
                 .findAll { it.isSelected() }
                 .collect { it.getText() }
@@ -497,6 +524,7 @@ import java.util.concurrent.CountDownLatch
 import javafx.animation.*
 import javafx.application.Platform
 import javafx.beans.property.SimpleStringProperty
+import javafx.event.ActionEvent
 import javafx.geometry.Insets
 import javafx.geometry.Pos
 import javafx.scene.Scene
