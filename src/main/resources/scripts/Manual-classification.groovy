@@ -20,6 +20,7 @@ class ViewerSessionVars {
     String       userName
     String       userKey
     String       classifyingName
+    List         recentClassifyingNames
     List<String> classifierKeys
     String       annoClass
     int          gridSize
@@ -855,6 +856,34 @@ def filterForUserKey( List annosToCheck, boolean shouldHaveKey, ViewerSessionVar
     }
 }
 
+// Function to generate classifier/reviewer key for metadata
+def generateMdKey( String user, String classKey ) {
+    String mdKey = "manual_${user}_${classKey}"
+    return mdKey
+}
+
+// Function to get user from key
+def getUserFromKey( String key ) {
+    String user = key.split( "_" )[1]
+    return user
+}
+
+// Function to show a temporary message that fades out
+def showFadeOutMessage( label ) {
+    label.setOpacity( 0.7 )
+    label.setVisible( true )
+    label.setManaged( true )
+    
+    def fadeOut = new FadeTransition( Duration.millis( 800 ), label )
+    fadeOut.setDelay( Duration.millis( 700 ) )
+    fadeOut.setToValue( 0.0 )
+    fadeOut.setOnFinished {
+        label.setVisible( false )
+        label.setManaged( false )
+    }
+    fadeOut.play()
+}
+
 // Function to color annotations based on color map (or create new color)
 def colorAnnosFromMap( ViewerSessionVars session, List mdKeys ) {
     session.allClassAnnos.each { anno ->
@@ -956,10 +985,10 @@ def readJSONtoPreferencesMap( jsonFile ) {
         def readDataFile = inputGson.fromJson( jsonFile.getText(), Object )
         if (readDataFile instanceof Map) {
             return readDataFile
-        } else {
-            return [:]
         }
     }
+    
+    return [:]
 }
 
 // Function to write preferences to .json file
@@ -1073,21 +1102,23 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         // --- LEFT: dropdown (user box) + text fields ---
         def userLabel = new Label( "User:" )
-        def userChangeConfirmation = new Label()
-        userChangeConfirmation.getStyleClass().add( "remove-user-feedback" )
-        userChangeConfirmation.setVisible( false )
-        userChangeConfirmation.setManaged( false )
+        def userFieldNotice = new Label()
+        userFieldNotice.setVisible( false )
+        userFieldNotice.setManaged( false )
         
-        def userLabelRow = new HBox( 2, userLabel, userChangeConfirmation )
-        userChangeConfirmation.setPadding( new Insets( 0, 0, 0, 10 ) )
+        def userLabelRow = new HBox( 2, userLabel, userFieldNotice )
+        userFieldNotice.setPadding( new Insets( 0, 0, 0, 10 ) )
         userLabelRow.setPadding( new Insets( 10, 0, 0, 0 ) )
         
         def users = new ComboBox()
         users.setPrefWidth( 150 )
+        setTT( [userLabel, users], classifierModeBtn.isSelected() ? "Select a classifier" : "Select a reviewer" )
+        
         def userInputField = new TextField()
         userInputField.setPrefWidth( 150 )
         userInputField.setPromptText( "Add with ENTER" )
-        setTT( [userLabel, users], classifierModeBtn.isSelected() ? "Select a classifier" : "Select a reviewer" )
+        setTT( userInputField, (classifierModeBtn.isSelected() ? "Type a new classifier" : "Type a new reviewer") + " + press enter to add" )
+        
         def addUserBtn    = new Button( "+" )
         setTT( addUserBtn, classifierModeBtn.isSelected() ? "Add a new classifier" : "Add a new reviewer" )
         def removeUserBtn = new Button( "−" )
@@ -1097,78 +1128,84 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         def userRow = new HBox( 5, users, addUserBtn, removeUserBtn )
         
-        
+        // Set remove user option cells style
         removeUserDropdown.setCellFactory {
             new ListCell() {
+        
+                {
+                    styleProperty().bind(
+                        Bindings.when( hoverProperty() )
+                            .then( "-fx-background-color: rgba(255,255,255,0.20);" )
+                            .otherwise( "-fx-background-color: rgba(255,0,0,0.08);" )
+                    )
+                }
+        
                 @Override
-                protected void updateItem( Object item, boolean empty ) {
+                protected void updateItem(Object item, boolean empty) {
                     super.updateItem( item, empty )
-                    
+        
+                    if (empty || item == null) {
+                        setText( null )
+                        setGraphic( null )
+                        return
+                    }
+        
                     def nameLabel = new Label( item.toString() )
                     nameLabel.setPadding( new Insets( 0, 0, 0, 0 ) )
                     nameLabel.setStyle( "-fx-text-fill: white;" )
-                    
+        
                     def removeUserSpacer = new Region()
                     HBox.setHgrow( removeUserSpacer, Priority.ALWAYS )
-                    
-                    def xLabel = new Label( "✖  " )
-                    xLabel.setStyle( "-fx-text-fill: white;" )
-                    
+        
+                    def xLabel = new Label("✖  ")
+                    xLabel.setStyle("-fx-text-fill: white;")
+        
                     def cellBox = new HBox( nameLabel, removeUserSpacer, xLabel )
                     cellBox.setAlignment( Pos.CENTER_LEFT )
-                    
+        
                     setGraphic( cellBox )
                     setText( null )
-                    
-                    setStyle( "-fx-background-color: rgba(255, 0, 0, 0.08);" )
                 }
             }
         }
         
-        
+        // Set mode boolean variable and tip for add/remove user based on classifier/reviewer mode
         modeButtons.selectedToggleProperty().addListener { obs, oldToggle, newToggle ->
-            setTT( addUserBtn, newToggle == classifierModeBtn ? "Add a new classifier" : "Add a new reviewer")
-            setTT( removeUserBtn, newToggle == classifierModeBtn ? "Remove a classifier" : "Remove a reviewer")
-            setTT( [userLabel, users], classifierModeBtn.isSelected() ? "Select a classifier" : "Select a reviewer" )
-        }
-        
-        
-        
-        def classifierOptions = FXCollections.observableArrayList( prePrefsMap.classifiers ?: [] )
-        def reviewerOptions   = FXCollections.observableArrayList( prePrefsMap.reviewers ?: [] )
-        
-        def showFadeOutMessage = {
-            userChangeConfirmation.setOpacity( 0.7 )
-            userChangeConfirmation.setVisible( true )
-            userChangeConfirmation.setManaged( true )
+            session.classifierMode = (newToggle == classifierModeBtn)
             
-            def fadeOut = new FadeTransition( Duration.millis( 800 ), userChangeConfirmation )
-            fadeOut.setDelay( Duration.millis( 700 ) )
-            fadeOut.setToValue( 0.0 )
-            fadeOut.setOnFinished {
-                userChangeConfirmation.setVisible( false )
-                userChangeConfirmation.setManaged( false )
-            }
-            fadeOut.play()
+            setTT( addUserBtn, session.classifierMode ? "Add a new classifier" : "Add a new reviewer")
+            setTT( userInputField, (session.classifierMode ? "Type a new classifier" : "Type a new reviewer") + " + press enter to add" )
+            setTT( removeUserBtn, session.classifierMode ? "Remove a classifier" : "Remove a reviewer")
+            setTT( [userLabel, users], session.classifierMode ? "Select a classifier" : "Select a reviewer" )
         }
+        
+        
+        
+        def classifierOptions
+        def reviewerOptions   
         
         boolean addedUser = false
         
+        // When enter is pressed, add the new user
         userInputField.setOnAction {
             String newUser = userInputField.getText().trim()?.capitalize()
             
             if (newUser) {
-                if (modeButtons.getSelectedToggle() == classifierModeBtn && newUser !in classifierOptions) {
+                if (session.classifierMode && newUser !in classifierOptions) {
                     classifierOptions << newUser
-                } else if (newUser !in reviewerOptions) {
+                } else if (session.reviewerMode && newUser !in reviewerOptions) {
                     reviewerOptions << newUser
                 } else {
+                    userInputField.clear()
+                    userFieldNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                    userFieldNotice.setText( "*User exists*" )  
+                    showFadeOutMessage( userFieldNotice )
                     return
                 }
                 
-                userChangeConfirmation.setStyle( "-fx-text-fill: #5cb85c;" )
-                userChangeConfirmation.setText( "*Added ${newUser}*" )              
-                showFadeOutMessage()
+                userFieldNotice.setStyle( "-fx-text-fill: #5cb85c;" )
+                userFieldNotice.setText( "*Added ${newUser}*" )              
+                showFadeOutMessage( userFieldNotice )
                 
                 userRow.getChildren().set( 0, users )
                 
@@ -1179,6 +1216,18 @@ def getCodePreferences( ViewerSessionVars session ) {
             }
         }
         
+        // Forcing new users to only have letters/numbers and showing warning if not
+        userInputField.textProperty().addListener { obs, oldVal, newVal ->
+            if (!newVal.matches( "[A-Za-z0-9]*" )) {
+                userInputField.setText( oldVal )
+                
+                userFieldNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                userFieldNotice.setText( "*Letters/numbers*" )           
+                showFadeOutMessage( userFieldNotice )
+            }
+        }
+        
+        // Set field to add a user when button clicked
         addUserBtn.setOnAction {
             userRow.getChildren().set( 0, userInputField )
             userInputField.requestFocus()
@@ -1186,6 +1235,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             addedUser = false
         }
         
+        // If adding a user and focus is changed, cancelling add
         userInputField.focusedProperty().addListener { obs, oldVal, newVal ->
             if (!newVal && !addedUser) {
                 addUserBtn.setDisabled( false )
@@ -1195,18 +1245,19 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         boolean removedUser = false
         
+        // Listener for which user is clicked when removing
         def removeUserListener      
         removeUserListener = { obs, oldVal, newVal ->
             if (oldVal != newVal) {
-                if (modeButtons.getSelectedToggle() == classifierModeBtn) {
+                if (session.classifierMode) {
                     classifierOptions.remove( newVal )
                 } else {
                     reviewerOptions.remove( newVal )
                 }
                 
-                userChangeConfirmation.setStyle( "-fx-text-fill: #ff6b6b;" )
-                userChangeConfirmation.setText( "*Removed ${newVal}*" )           
-                showFadeOutMessage()
+                userFieldNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                userFieldNotice.setText( "*Removed ${newVal}*" )           
+                showFadeOutMessage( userFieldNotice )
                 removedUser = true
             }
             
@@ -1215,6 +1266,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             users.show()
         }
         
+        // Action when remove user button is clicked
         String prevSelectedUser
         removeUserBtn.setOnAction {
             removedUser = false
@@ -1222,7 +1274,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             prevSelectedUser = users.getValue()
             userRow.getChildren().set( 0, removeUserDropdown )
             
-            def currentOptions = modeButtons.getSelectedToggle() == classifierModeBtn ? classifierOptions : reviewerOptions
+            def currentOptions = session.classifierMode ? classifierOptions : reviewerOptions
             removeUserDropdown.setItems( FXCollections.observableArrayList( currentOptions ) )
             
             removeUserDropdown.valueProperty().addListener( removeUserListener )
@@ -1233,6 +1285,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             removeUserDropdown.show()
         }
         
+        // If removing a user and focus is changed, cancelling add
         removeUserDropdown.showingProperty().addListener { obs, wasShowing, isShowing ->
             if (wasShowing && !isShowing && !removedUser) {
                 removeUserDropdown.valueProperty().removeListener( removeUserListener )
@@ -1243,9 +1296,9 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         
         // New text fields
-        def annoClassLabel       = new Label( "Annotation class:" )
+        def annoClassLabel = new Label( "Annotation class:" )
         annoClassLabel.setPadding( new Insets( 10, 0, 0, 0 ) )
-        def annoClassField       = new ComboBox()
+        def annoClassField = new ComboBox()
         setTT( [annoClassLabel, annoClassField], "Class of annotations to be classified. \n If missing, add to QuPath class list." )
         def projectPathClasses = project.getPathClasses().findAll { it?.getName() }
         
@@ -1296,22 +1349,55 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         annoClassField.setItems( FXCollections.observableArrayList( pathClassEntries ) )
         
-        def classifyingNameLabel = new Label( "Classifying name:" )
-        classifyingNameLabel.setPadding( new Insets( 10, 0, 0, 0 ) )
-        def classifyingNameField = new TextField()
-        classifyingNameField.setPromptText( "Classification key (e.g. CAA)" )
-        setTT( [classifyingNameLabel, classifyingNameField], "Simple key for what is being classified to be stored in metadata (e.g. CAA)" )
         
-        def gridSizeLabel        = new Label( "Grid size (µm):" )
-        gridSizeLabel.setPadding( new Insets( 25, 0, 0, 0 ) )
-        def gridSizeField        = new TextField()
+        def classifyingNameOptions
+        
+        def classifyingNameLabel = new Label( "Classifying name:" )
+        
+        def classifyingNameField = new ComboBox()
+        classifyingNameField.setEditable( true )
+        classifyingNameField.setPromptText( "e.g. CAA" )
+        setTT( [classifyingNameLabel, classifyingNameField], "Simple key for what is being classified to be stored in metadata (e.g. CAA). \nLast 5 are stored." )
+        
+        def classifyingNameNotice = new Label( "*Letters/numbers*" )
+        classifyingNameNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+        classifyingNameNotice.setPadding( new Insets( 0, 0, 0, 10 ) )
+        classifyingNameNotice.setVisible( false )
+        classifyingNameNotice.setManaged( false )
+        
+        def classifyingNameRow = new HBox( 2, classifyingNameLabel, classifyingNameNotice )      
+        classifyingNameRow.setPadding( new Insets( 10, 0, 0, 0 ) )
+        
+        // Forcing classifying name to only have letters/numbers and showing warning if not
+        classifyingNameField.getEditor().textProperty().addListener { obs, oldVal, newVal ->
+            if (!newVal.matches( "[A-Za-z0-9]*" )) {
+                classifyingNameField.getEditor().setText( oldVal )
+                        
+                showFadeOutMessage( classifyingNameNotice )
+            }
+        }
+        
+        def gridSizeLabel = new Label( "Grid size (µm):" )
+        
+        def gridSizeField = new TextField()
         gridSizeField.setPromptText( "Size of grouping grid (µm)" )
         setTT( [gridSizeLabel, gridSizeField], "Size of grouping grid (µm). Increasing this reduces the number of groups per image but increases objects per group." )
         
-        // Enforce integer-only input for grid size
+        def gridSizeNotice = new Label( "*Numbers only*" )
+        gridSizeNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+        gridSizeNotice.setPadding( new Insets( 0, 0, 0, 10 ) )
+        gridSizeNotice.setVisible( false )
+        gridSizeNotice.setManaged( false )
+        
+        gridSizeRow = new HBox( 2, gridSizeLabel, gridSizeNotice )  
+        gridSizeRow.setPadding( new Insets( 25, 0, 0, 0 ) )
+        
+        // Enforce integer-only input for grid size and show warning
         gridSizeField.textProperty().addListener { obs, oldVal, newVal ->
             if (!newVal.matches( "\\d*" )) {
                 gridSizeField.setText( oldVal )
+                
+                showFadeOutMessage( gridSizeNotice )
             }
         }
         
@@ -1332,8 +1418,8 @@ def getCodePreferences( ViewerSessionVars session ) {
         leftBox.getChildren().addAll(
             userLabelRow, userRow,
             annoClassLabel, annoClassField,
-            classifyingNameLabel, classifyingNameField,
-            gridSizeLabel, gridSizeField
+            classifyingNameRow, classifyingNameField,
+            gridSizeRow, gridSizeField
         )
         root.left = leftBox
         
@@ -1358,7 +1444,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             def userOptions = inClassifierMode ? classifierOptions : reviewerOptions
             users.setItems( userOptions )
             
-            prePrefsMap.userName in userOptions ? users.setValue( prePrefsMap.userName ) : users.getSelectionModel().selectFirst()
+            users.getSelectionModel().selectFirst()
             
             okBtn.setText( inClassifierMode ? "Begin classifying" : "Begin reviewing" )
         }
@@ -2380,56 +2466,86 @@ def getCodePreferences( ViewerSessionVars session ) {
             def nonUpdatedPrefs = []
             
             def updatePrefsOrLog = { check, primaryAction, fallbackAction, String prefName ->
-                check ? primaryAction.each { it() } : fallbackAction.each { it() }
+                check ? primaryAction() : fallbackAction()
                 if (!check) { nonUpdatedPrefs << prefName }
             }
             
+            boolean classifierMode = pMap.mode != ActionStrings.REVIEWER_MODE // default = classifier
+            
             updatePrefsOrLog(
-                pMap.mode in [ActionStrings.CLASSIFIER_MODE, ActionStrings.REVIEWER_MODE],
-                { [pMap.mode == ActionStrings.CLASSIFIER_MODE ? classifierModeBtn.setSelected( true ) : reviewerModeBtn.setSelected( true )] },
-                { [classifierModeBtn.setSelected( true )] },
+                pMap.mode in [ActionStrings.CLASSIFIER_MODE, ActionStrings.REVIEWER_MODE],     
+                { classifierMode ? classifierModeBtn.setSelected( true ) : reviewerModeBtn.setSelected( true ) },
+                { classifierModeBtn.setSelected( true ) },
                 "Mode"
             )
             
             updatePrefsOrLog(
-                pMap.userName instanceof String,
-                { [users.setValue( pMap.userName )] },
-                { [users.getItems()[0]] },
-                "Username"
+                pMap.classifiers instanceof List && pMap.classifiers.every { it instanceof String },
+                { classifierOptions = FXCollections.observableArrayList( pMap.classifiers ) },
+                { classifierOptions = classifierOptions ?: FXCollections.observableArrayList() },
+                "Classifier options"
             )
             
             updatePrefsOrLog(
+                pMap.reviewers instanceof List && pMap.reviewers.every { it instanceof String },
+                { reviewerOptions = FXCollections.observableArrayList( pMap.reviewers ) },
+                { reviewerOptions = reviewerOptions ?: FXCollections.observableArrayList() },
+                "Reviewer options"
+            )
+            
+            def userOptions = classifierMode ? classifierOptions : reviewerOptions
+            
+            updatePrefsOrLog(
+                pMap.userName instanceof String,
+                { pMap.userName in userOptions ?: userOptions.addFirst( pMap.userName );
+                  users.setValue( pMap.userName ) },
+                { users.setValue( users.getItems()?.first() ) },
+                "Username"
+            )
+            
+            users.setItems( classifierMode ? classifierOptions : reviewerOptions )
+            
+            updatePrefsOrLog(
                 annoClassField.getItems().find { it.name == pMap.annoClass },
-                { [annoClassField.setValue( annoClassField.getItems().find { it.name == pMap.annoClass } )] },
-                { [annoClassField.setValue( annoClassField.getItems()[0] )] },
+                { annoClassField.setValue( annoClassField.getItems().find { it.name == pMap.annoClass } ) },
+                { annoClassField.setValue( annoClassField.getItems()[0] ) },
                 "Annotation class"
             )
             
             updatePrefsOrLog(
                 pMap.classifyingName instanceof String,
-                { [classifyingNameField.setText( pMap.classifyingName.toString() )] },
-                { [classifyingNameField.setText( "" )] },
+                { classifyingNameField.setValue( pMap.classifyingName.toString() ) },
+                { classifyingNameField.setValue( "" ) },
                 "Classifying name"
             )
             
             updatePrefsOrLog(
+                pMap.recentClassifyingNames instanceof List && pMap.recentClassifyingNames.every { it instanceof String },
+                { classifyingNameOptions = FXCollections.observableArrayList( pMap.recentClassifyingNames?.unique() );
+                  classifyingNameField.setItems( classifyingNameOptions ) },
+                { classifyingNameOptions = classifyingNameOptions ?: FXCollections.observableArrayList() },
+                "Classifying name options"
+            )
+            
+            updatePrefsOrLog(
                 pMap.gridSize instanceof Number,
-                { [gridSizeField.setText( pMap.gridSize.intValue().toString() )] },
-                { [gridSizeField.setText( "500" )] },
+                { gridSizeField.setText( pMap.gridSize.intValue().toString() ) },
+                { gridSizeField.setText( "500" ) },
                 "Grid size"
             )
             
             updatePrefsOrLog(
                 pMap.fillClassifiedAnnos instanceof Boolean,
-                { [filledAnnosCheckbox.setSelected( pMap.fillClassifiedAnnos )] },
-                { [filledAnnosCheckbox.setSelected( true )] },
+                { filledAnnosCheckbox.setSelected( pMap.fillClassifiedAnnos ) },
+                { filledAnnosCheckbox.setSelected( true ) },
                 "Fill classified annos checkbox"
             )
             
             updatePrefsOrLog(
                 pMap.selectedChannels instanceof List && channelCheckboxes.collect { it.getText() }.containsAll( pMap.selectedChannels ),
-                { [channelCheckboxes.each { it.setSelected( false ) }, channelCheckboxes.each { it.setSelected( it.getText() in pMap.selectedChannels ) }] },
-                { [channelCheckboxes.each { it.setSelected( false ) }] },
+                { channelCheckboxes.each { it.setSelected( false ) }; 
+                  channelCheckboxes.each { it.setSelected( it.getText() in pMap.selectedChannels ) } },
+                { channelCheckboxes.each { it.setSelected( false ) } },
                 "Selected channels"
             )
             
@@ -2508,17 +2624,18 @@ def getCodePreferences( ViewerSessionVars session ) {
         // Closure to collect current preferences and make map
         def collectCurrentPrefs = {
             def userName          = users.getValue().capitalize()
-            def mode              = modeButtons.getSelectedToggle() == classifierModeBtn ? ActionStrings.CLASSIFIER_MODE : ActionStrings.REVIEWER_MODE
+            def mode              = session.classifierMode ? ActionStrings.CLASSIFIER_MODE : ActionStrings.REVIEWER_MODE
             def checkingWork      = checkingWorkCheckbox.isSelected()
             def selectedChannels  = channelCheckboxes.findAll { it.isSelected() }
                                         .collect { it.getText() }
             
-            def annoClass           = annoClassField.getValue().name
-            def classifyingName     = classifyingNameField.getText()?.trim()
-            def gridSizeText        = gridSizeField.getText().trim()
-            def gridSize            = Integer.parseInt( gridSizeText )
-            def fillClassifiedAnnos = filledAnnosCheckbox.isSelected()
-            boolean instructions    = prePrefsMap.instructions
+            def annoClass               = annoClassField.getValue().name
+            def classifyingName         = classifyingNameField.getValue()?.trim()
+            List recentClassifyingNames = classifyingNameOptions = ([classifyingName] + classifyingNameOptions).unique().take( 5 )
+            def gridSizeText            = gridSizeField.getText().trim()
+            def gridSize                = Integer.parseInt( gridSizeText )
+            def fillClassifiedAnnos     = filledAnnosCheckbox.isSelected()
+            boolean instructions        = prePrefsMap.instructions
             
             // Reviewer annotation preferences
             def reviewStateFreqs = []
@@ -2532,20 +2649,21 @@ def getCodePreferences( ViewerSessionVars session ) {
             }
             
             def prefMap = [
-                "classifiers"         : classifierOptions,
-                "reviewers"           : reviewerOptions,
-                "userName"            : userName,
-                "mode"                : mode,
-                "checkingWork"        : checkingWork,
-                "selectedChannels"    : selectedChannels,
-                "annoClass"           : annoClass,
-                "classifyingName"     : classifyingName,
-                "gridSize"            : gridSize,
-                "fillClassifiedAnnos" : fillClassifiedAnnos,
-                "statesAndColors"     : stateColorMap,
-                "reviewStateFreqs"    : reviewStateFreqs,
-                "reviewStates"        : reviewStates,
-                "instructions"        : instructions
+                "userName"               : userName,
+                "classifiers"            : classifierOptions,
+                "reviewers"              : reviewerOptions,
+                "mode"                   : mode,
+                "checkingWork"           : checkingWork,
+                "selectedChannels"       : selectedChannels,
+                "annoClass"              : annoClass,
+                "classifyingName"        : classifyingName,
+                "recentClassifyingNames" : classifyingNameOptions,
+                "gridSize"               : gridSize,
+                "fillClassifiedAnnos"    : fillClassifiedAnnos,
+                "statesAndColors"        : stateColorMap,
+                "reviewStateFreqs"       : reviewStateFreqs,
+                "reviewStates"           : reviewStates,
+                "instructions"           : instructions
             ]
             
             return prefMap
@@ -2553,7 +2671,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         // Exporting current preferences to file
         exportPrefsBtn.addEventFilter( ActionEvent.ACTION ) { e ->
-            e.consume()   // prevent dialog closing
+            e.consume() // prevent dialog closing
             
             def fileChooser = new FileChooser()
             fileChooser.setTitle( "Export preferences file" )
@@ -2563,7 +2681,9 @@ def getCodePreferences( ViewerSessionVars session ) {
                 new FileChooser.ExtensionFilter( "JSON files", "*.json" )
             )
             
-            def newPrefsFile = fileChooser.showSaveDialog( QuPathGUI.getInstance().getStage() )
+            def owner  = preferencesDialog.getDialogPane().getScene()?.getWindow()
+            def newPrefsFile = fileChooser.showSaveDialog( owner )
+            
             if (newPrefsFile != null) {
                 def choiceFileName = newPrefsFile.getName()
                 
@@ -2577,7 +2697,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         // Importing saved preferences file
         importPrefsBtn.addEventFilter( ActionEvent.ACTION ) { e ->
-            e.consume()   // prevent dialog closing
+            e.consume() // prevent dialog closing
             
             def fileChooser = new FileChooser()
             fileChooser.setTitle( "Select file to import preferences from:" )
@@ -2585,8 +2705,9 @@ def getCodePreferences( ViewerSessionVars session ) {
             fileChooser.getExtensionFilters().add(
                 new FileChooser.ExtensionFilter( "JSON Files", "*.json" )
             )
+            def owner  = preferencesDialog.getDialogPane().getScene()?.getWindow()
+            def fileChoice = fileChooser.showOpenDialog( owner )
             
-            def fileChoice = fileChooser.showOpenDialog( QuPathGUI.getInstance().getStage() )
             if (fileChoice != null) {
                 def newPreferencesMap = readJSONtoPreferencesMap( fileChoice )
                 setPreferencesFromMap( newPreferencesMap )           
@@ -2602,7 +2723,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             *channelCheckboxes.collect { it.selectedProperty() }
         )
         okBtn.disableProperty().bind(
-            classifyingNameField.textProperty().isEmpty()
+            classifyingNameField.getEditor().textProperty().isEmpty()
             .or( users.valueProperty().isNull() )
             .or( gridSizeField.textProperty().isEmpty() )
             .or( anySelectedChannel.not() )
@@ -2646,13 +2767,12 @@ while (true) {
     
     
     // --- Storing selected preferences for use in script ---
+    session.userName            = codePreferences.userName
     session.classifiers         = codePreferences.classifiers
     session.reviewers           = codePreferences.reviewers
-    session.userName            = codePreferences.userName
-    session.classifyingName     = codePreferences.classifyingName
-    session.userKey             = session.userName + "_${session.classifyingName}"
-    session.classifierKeys      = session.classifiers.collect { "${it}_${session.classifyingName}".toString() } // Name of disease/marker being classified (for metadata)
-    session.classifierMode      = codePreferences.mode == ActionStrings.CLASSIFIER_MODE // Setting this automatically makes reviewerMode the other false
+    session.classifyingName     = codePreferences.classifyingName // Name of disease/marker being classified (for metadata)
+    session.userKey             = generateMdKey( session.userName, session.classifyingName )
+    session.classifierKeys      = session.classifiers.collect { generateMdKey( it, session.classifyingName ) } 
     session.checkingWork        = codePreferences.checkingWork // Set if the user is going back over their completed classifications
     session.toggleChannels      = codePreferences.selectedChannels // Channels to toggle for analysis (keep number of channels low)
     session.annoClass           = codePreferences.annoClass // Class of annotations to review
@@ -2701,36 +2821,54 @@ while (true) {
     def userIncompleteImages = []
     def userCompleteImages = []
     def imagesWithoutAnnos = []
-    def imagesWithNoReviewableAnnos = []
+    def imagesWithNoReviewableAnnos = []  
+    def usersWithIncompleteClassifications = [] as LinkedHashSet
+    def incompleteUsersByImage = [:].withDefault { [] as LinkedHashSet }
     
     for (image in imageOrder) {
         
-        // Getting all annotations in image with class of interest
         def imageAnnos = image.readImageData()
             .getHierarchy()
             .getAnnotationObjects()
             .findAll { it.getPathClass()?.getName() == session.annoClass }
         
-        // Getting images with no annotations of interest
         if (imageAnnos.isEmpty()) {
             imagesWithoutAnnos << image
             continue
         }
         
-        // Getting annotations not completely classified (if in reviewer mode)
-        boolean anyMissingClassifierKeys = session.reviewerMode &&
-            imageAnnos.any { anno ->
-                session.classifierKeys.any { !anno.getMetadata().containsKey( it ) }
-            }
+        // Collect which users are missing classifications in reviewer mode
+        def annosMissingClassifierKeys = session.reviewerMode ? imageAnnos.findAll { anno ->
+            session.classifierKeys.any { key -> !anno.getMetadata().containsKey( key ) }
+        } : []
         
-        // Getting annotations that should be checked by user that have not
+        annosMissingClassifierKeys.each { anno ->
+            def missingUsers = session.classifierKeys.findAll { key ->
+                !anno.getMetadata().containsKey( key )
+            
+            }.collect { getUserFromKey( it ) }
+            
+            usersWithIncompleteClassifications.addAll( missingUsers )
+            incompleteUsersByImage[ image.getImageName() ].addAll( missingUsers )
+        }
+        
+        boolean anyMissingClassifierKeys = session.reviewerMode && !annosMissingClassifierKeys.isEmpty()
+        
         boolean anyMissingUserKey = imageAnnos.any { anno ->
             if (session.reviewerMode) {
-                matchesMdClassification( anno, session.reviewerCriteria.all, session.reviewerCriteria.any, session.reviewerCriteria.different, session ) && !containsUserKey( anno, session )
+                matchesMdClassification(
+                    anno,
+                    session.reviewerCriteria.all,
+                    session.reviewerCriteria.any,
+                    session.reviewerCriteria.different,
+                    session
+                ) && !containsUserKey( anno, session )
             } else {
                 !containsUserKey( anno, session )
             }
         }
+        
+        boolean anyUserKey = imageAnnos.any { containsUserKey( it, session ) }
         
         boolean anyAnnosToCheck = session.reviewerMode ?
             findAnnosByMdClassification(
@@ -2740,21 +2878,27 @@ while (true) {
                 diff    = session.reviewerCriteria.different,
                 session = session
             ) : true
-        
+            
         if (session.reviewerMode) {
             (anyMissingClassifierKeys ? notFullyClassifiedImages : fullyClassifiedImages) << image
         }
         
         if (anyAnnosToCheck) {
-            (anyMissingUserKey ? userIncompleteImages : userCompleteImages) << image
-        
+            if (anyMissingUserKey) {
+                userIncompleteImages << image
+            } else {
+                userCompleteImages << [
+                    image     : image,
+                    userInput : anyUserKey
+                ]
+            }
         } else {
             imagesWithNoReviewableAnnos << image
         }
     }
     
     // --- Collecting images to process ---
-    session.imagesToProcess = session.checkingWork ? new ArrayList( userCompleteImages ) : new ArrayList( userIncompleteImages )
+    session.imagesToProcess = session.checkingWork ? new ArrayList( userCompleteImages.image ) : new ArrayList( userIncompleteImages )
     
     // Setting current image first if needs classification
     if (currentEntry && !session.imagesToProcess.isEmpty()) {
@@ -2781,6 +2925,10 @@ while (true) {
         }
     }
     
+    List generalCriteria = ["User: ${session.userName}", 
+                            "Object class: ${session.annoClass}", 
+                            "Classifying name: ${session.classifyingName}"]
+    
     // - Creating specific checks + warnings -
     // User completion warnings
     addWarningCheck( [session.reviewerMode, session.checkingWork, userCompleteImages.isEmpty(), !imagesWithNoReviewableAnnos.isEmpty()],
@@ -2792,16 +2940,19 @@ while (true) {
     addWarningCheck( [session.checkingWork, (userIncompleteImages.size() !in [0, imageList.size()])],
         "${userIncompleteImages.size()} image(s) have not been completed by user and cannot be checked.",
         "User Completion", userIncompleteImages )
-    addWarningCheck( [!session.checkingWork, userIncompleteImages.isEmpty()],
-        "User has completed all viable images.",
-        "User Completion" )
+    addWarningCheck( [session.classifierMode, !session.checkingWork, userIncompleteImages.isEmpty()],
+        "User has classified all viable images.",
+        "User Completion", generalCriteria )
+    addWarningCheck( [session.reviewerMode, session.classifierMode, !session.checkingWork, userIncompleteImages.isEmpty()],
+        "User has reviewed all viable images.",
+        "User Completion", reviewerCriteriaList )
     
     // Classification & Review warnings
     addWarningCheck( [session.reviewerMode, !session.checkingWork, (notFullyClassifiedImages.size() == imageList.size())],
-        "No images have complete classifications to review from ${session.classifiers}.",
+        "No images have complete classifications to review from ${usersWithIncompleteClassifications}.",
         "Classification & Review" )
     addWarningCheck( [session.reviewerMode, !session.checkingWork, (notFullyClassifiedImages.size() !in [0, imageList.size()])],
-        "${notFullyClassifiedImages.size()} image(s) have incomplete classifications to review from ${session.classifiers}.",
+        "${notFullyClassifiedImages.size()} image(s) have incomplete classifications to review from ${usersWithIncompleteClassifications}.",
         "Classification & Review", notFullyClassifiedImages )
     
     // Annotation issues warnings
@@ -2813,9 +2964,10 @@ while (true) {
     // Sending warning if criteria are met
     if (!warningList.isEmpty()) {
         
-        def exitBtn     = new ButtonType( "Exit", ButtonBar.ButtonData.CANCEL_CLOSE )
-        def continueBtn = new ButtonType( "Continue", ButtonBar.ButtonData.OK_DONE )
-        def backBtn     = new ButtonType( "Back", ButtonData.BACK_PREVIOUS )
+        def exitBtnType      = new ButtonType( "Exit", ButtonBar.ButtonData.CANCEL_CLOSE )
+        def continueBtnType  = new ButtonType( "Continue", ButtonBar.ButtonData.OK_DONE )
+        def checkWorkBtnType = new ButtonType( "Review completed annos", ButtonBar.ButtonData.OK_DONE )
+        def backBtnType      = new ButtonType( "Back", ButtonData.BACK_PREVIOUS )
         
         def warningDecision = runOnFxThreadAndWait {
             
@@ -2824,20 +2976,29 @@ while (true) {
             unfinishedAlert.getDialogPane().setPrefHeight( warningList.size() * 60 )
             
             if (session.imagesToProcess.isEmpty()) {
-                unfinishedAlert.getButtonTypes().setAll( backBtn, exitBtn )
+                if (userCompleteImages.userInput.contains( true )) {
+                    session.imagesToProcess = new ArrayList( userCompleteImages.image )
+                    session.checkingWork = true
+                    unfinishedAlert.getButtonTypes().setAll( backBtnType, checkWorkBtnType, exitBtnType )
+                    def checkWorkBtn = unfinishedAlert.getDialogPane().lookupButton( checkWorkBtnType )
+                    checkWorkBtn.setDefaultButton( false )
+                    ButtonBar.setButtonUniformSize( checkWorkBtn, false )      
+                } else {
+                    unfinishedAlert.getButtonTypes().setAll( backBtnType, exitBtnType )
+                }
             } else {
-                unfinishedAlert.getButtonTypes().setAll( backBtn, exitBtn, continueBtn )
-                unfinishedAlert.getDialogPane().lookupButton( continueBtn ).setDefaultButton( false )
+                unfinishedAlert.getButtonTypes().setAll( backBtnType, exitBtnType, continueBtnType )
+                unfinishedAlert.getDialogPane().lookupButton( continueBtnType ).setDefaultButton( false )
                 unfinishedAlert.setContentText( "Continue anyway?" )
             }
             
-            unfinishedAlert.getDialogPane().lookupButton( exitBtn ).setDefaultButton( true )
+            unfinishedAlert.getDialogPane().lookupButton( exitBtnType ).setDefaultButton( true )
             
             // Build grouped warning UI
             def warningLabelBox = new VBox( 8 )
             
             // Group warnings by their group label, preserving insertion order
-            LinkedHashMap<String, List> grouped = warningList.groupBy { it.group }
+            Map grouped = warningList.groupBy { it.group }
             
             grouped.each { groupName, items ->
                 
@@ -2876,19 +3037,19 @@ while (true) {
     
             unfinishedAlert.getDialogPane().setHeader( warningLabelBox )
     
-            return unfinishedAlert.showAndWait().orElse( exitBtn )
+            return unfinishedAlert.showAndWait().orElse( exitBtnType )
         }
-    
+        
         switch (warningDecision) {
-            case (continueBtn): break preferencesLoop
-            case (backBtn):     continue
-            default:            return
+            case (continueBtnType)  : break preferencesLoop
+            case (checkWorkBtnType) : break preferencesLoop
+            case (backBtnType):       continue
+            default:                  return
         }
-    
-    // If no warnings, moving straight into execution
-    } else {
-        break preferencesLoop
     }
+    
+    // If no warnings or continued, moving into execution
+    break preferencesLoop
 }
 
 
