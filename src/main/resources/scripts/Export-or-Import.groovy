@@ -226,22 +226,23 @@ def resolveHierarchy( objects, hierarchy_resolve, image_resolve ) {
     if (!missingParents.isEmpty()) {
         
         String imageName = image_resolve.getImageName()
-    
+        
         def loggerWarnMessage = new StringBuilder()
-        loggerWarnMessage << "Missing parents: [${imageName}] (${missingParents.size()} objects)\n\n"
-    
+        loggerWarnMessage << "Hierarchy warning: ${imageName}\n\n"
+        
+        loggerWarnMessage << "Parent could not be found for ${missingParents.size()} objects and could not be nested:\n\n"
+        
         missingParents.each {
             loggerWarnMessage << " - Object: [Name = ${it.name}, ID = ${it.id}] " +
                        " Parent: [Name = ${it.parentName}, ID = ${it.parentID}]\n"
         }
-    
+        
         logger.warn( loggerWarnMessage.toString() )
-    
-        Dialogs.showWarningNotification(
-            "Hierarchy warning for ${imageName}",
-            "${missingParents.size()} objects could not be nested.\nCheck the log for details."
-        )
+        
+        return true
     }
+    
+    return false
 }
 
 // Function: Create alert selection window for user
@@ -799,6 +800,9 @@ int processed = 0
 boolean removeObjs = false
 boolean confirmRemoveObjsChoice = false
 
+// Flag to show warning
+boolean anyNestingProblems = false
+
 imageLoop:
 for (image in imagesToRun) { 
     
@@ -832,7 +836,7 @@ for (image in imagesToRun) {
     // Fixing hierarchy if desired
     if (codePreferences.mode == "resolveHierarchy") {
         def objectsToresolve = hierarchy.getAnnotationObjects()
-        resolveHierarchy( objectsToresolve, hierarchy, image )
+        anyNestingProblems = resolveHierarchy( objectsToresolve, hierarchy, image )
         
     } else if (codePreferences.mode == "export") {
         
@@ -1038,7 +1042,7 @@ for (image in imagesToRun) {
             
             // Resolving hierarchy if desired
             if (codePreferences.includeParents) { 
-                resolveHierarchy( workingObjects, hierarchy, image )
+                anyNestingProblems = resolveHierarchy( workingObjects, hierarchy, image )
             }
         }
     }
@@ -1077,6 +1081,14 @@ for (image in imagesToRun) {
 // Closing progress bar window
 Platform.runLater {
     progressUI.stage.close()
+}
+
+// Showing warning message if any nesting problems
+if (anyNestingProblems) {
+    Dialogs.showWarningNotification(
+        "Hierarchy warning!",
+        "One or more images had objects that could not be nested.\nCheck the log for details."
+    )
 }
 
 
