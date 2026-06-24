@@ -889,5 +889,5 @@ import java.util.function.UnaryOperator
 
 
 // Comments for tool launcher icon and tooltip
-// ICON: EXPAND
+// ICON: ARROWS_ALT
 // Create concentric rings around annotations
