@@ -22,9 +22,9 @@ class ViewerSessionVars {
     String       classifyingName
     List         recentClassifyingNames
     List<String> classifierKeys
+    String       toolKeyPrefix
     String       annoClass
     int          gridSize
-    boolean      fillClassifiedAnnos
     def          hierarchy
     def          allClassAnnos
     boolean      checkingWork
@@ -77,7 +77,8 @@ class ViewerSessionVars {
 }
 
 def session = new ViewerSessionVars(
-    currentAnnoColorsMap : [:],
+    toolKeyPrefix               : "AT-manual",
+    currentAnnoColorsMap        : [:],
     highlightStatesAndColorsMap : []
 )
 
@@ -857,8 +858,8 @@ def filterForUserKey( List annosToCheck, boolean shouldHaveKey, ViewerSessionVar
 }
 
 // Function to generate classifier/reviewer key for metadata
-def generateMdKey( String user, String classKey ) {
-    String mdKey = "manual_${user}_${classKey}"
+def generateMdKey( ViewerSessionVars session, String user, String classKey ) {
+    String mdKey = "${session.toolKeyPrefix}_${user}_${classKey}"
     return mdKey
 }
 
@@ -866,6 +867,12 @@ def generateMdKey( String user, String classKey ) {
 def getUserFromKey( String key ) {
     String user = key.split( "_" )[1]
     return user
+}
+
+// Function to get classifying name from key
+def getClassifyingNameFromKey( String key ) {
+    String classifyingName = key.split( "_" )[2]
+    return classifyingName
 }
 
 // Function to show a temporary message that fades out
@@ -997,6 +1004,24 @@ def writePreferencesMaptoJSON( preferencesFile, preferencesMap ) {
     preferencesFile.text = outputGson.toJson( preferencesMap )
 }
 
+// Function to stop nodes from becoming highlighted when clicked
+def disableNonEditableFocusTraversal( Node node ) {
+    
+    node.setFocusTraversable( false )
+    
+    if (node instanceof Parent) {
+        node.getChildrenUnmodifiable().each {
+            disableNonEditableFocusTraversal( it )
+        }
+    }
+}
+
+// Function to create icon for UI
+def addIcon( node, iconCode, int size ) {
+    def icon = IconFactory.createNode( iconCode, size )
+    node.setGraphic( icon )
+}
+
 // Function to get user preferences for run
 def getCodePreferences( ViewerSessionVars session ) {
     def currentImageData = getCurrentImageData()
@@ -1028,14 +1053,19 @@ def getCodePreferences( ViewerSessionVars session ) {
         def preferencesDialog = new Dialog()
         preferencesDialog.setTitle( "Manual Classifications" )
         
-        def exportPrefsBtnType = new ButtonType( "Export Prefs", ButtonBar.ButtonData.LEFT )
-        def importPrefsBtnType = new ButtonType( "Import Prefs", ButtonBar.ButtonData.LEFT )
+        def exportPrefsBtnType = new ButtonType( " Export", ButtonBar.ButtonData.LEFT )
+        def importPrefsBtnType = new ButtonType( " Import", ButtonBar.ButtonData.LEFT )
         
         preferencesDialog.getDialogPane().getButtonTypes().addAll( ButtonType.OK, ButtonType.CANCEL, exportPrefsBtnType, importPrefsBtnType )
         def okBtn = preferencesDialog.getDialogPane().lookupButton( ButtonType.OK )
         def cancelBtn = preferencesDialog.getDialogPane().lookupButton( ButtonType.CANCEL )
         def exportPrefsBtn = preferencesDialog.getDialogPane().lookupButton( exportPrefsBtnType )
         def importPrefsBtn = preferencesDialog.getDialogPane().lookupButton( importPrefsBtnType )
+        
+        addIcon( exportPrefsBtn, FontAwesome.Glyph.UPLOAD, 12 )
+        addIcon( importPrefsBtn, FontAwesome.Glyph.DOWNLOAD, 12 )
+        exportPrefsBtn.setFocusTraversable( false )
+        importPrefsBtn.setFocusTraversable( false )
         
         ButtonBar.setButtonUniformSize( okBtn, false )
         
@@ -1053,23 +1083,45 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         
         // --- TOP: checkbox toggling dropdown mode ---
-        def modeLabel         = new Label( "Mode:" )
-        def classifierModeBtn = new RadioButton( "Classifier" )
-        def reviewerModeBtn   = new RadioButton( "Reviewer" )
+        def classifierModeBtn = new ToggleButton( "Classifier Mode" )
+        def reviewerModeBtn   = new ToggleButton( "Reviewer Mode" )
+        
+        [classifierModeBtn, reviewerModeBtn].each { btn ->
+            btn.addEventFilter(MouseEvent.MOUSE_PRESSED) {
+                if (btn.isSelected()) {
+                    it.consume()
+                }
+            }
+        }
         
         def modeButtons = new ToggleGroup()
         classifierModeBtn.setToggleGroup( modeButtons )
         reviewerModeBtn.setToggleGroup( modeButtons )
         
-        // Create box with mode buttons and add children
-        def modeBox = new HBox( 10 )
-        modeBox.getChildren().addAll( modeLabel, classifierModeBtn, reviewerModeBtn )
+        def selectedStyle =
+            "-fx-border-color: black;" +
+            "-fx-border-width: 1;" +
+            "-fx-font-weight: bold;" +
+            "-fx-background-color: derive(-fx-base, -30%);"
         
-        // Add tooltip to mode buttons
-        setTT( modeBox, "Toggle user mode" )
+        def unselectedStyle =
+            "-fx-opacity: 0.7;"
         
-        def checkingWorkCheckbox = new CheckBox( "Check work" )
-        setTT( checkingWorkCheckbox, "Go over user's completed objects rather than new ones" )
+        def updateModeButtonStyles = {
+            classifierModeBtn.setStyle(
+                classifierModeBtn.isSelected() ? selectedStyle : unselectedStyle
+            )
+            reviewerModeBtn.setStyle(
+                reviewerModeBtn.isSelected() ? selectedStyle : unselectedStyle
+            )
+        }
+        
+        modeButtons.selectedToggleProperty().addListener { obs, oldVal, newVal ->
+            updateModeButtonStyles()
+        }
+        
+        updateModeButtonStyles()
+        
         
         def changeClassColorOrderBtn = new Button( "Classes/Colors" )
         setTT( changeClassColorOrderBtn, "Change classification specifics for both modes" )
@@ -1078,16 +1130,16 @@ def getCodePreferences( ViewerSessionVars session ) {
         setTT( specifyReviewAnnosBtn, "Specify which annotations should be reviewed (reviewer mode only)" )
         
         // Spacer that eats all extra horizontal space
-        def spacer = new Region()
-        HBox.setHgrow( spacer, Priority.ALWAYS )
+        def topRowSpacer = new Region()
+        HBox.setHgrow( topRowSpacer, Priority.ALWAYS )
         
         // Make bounding box, add children, assign to UI and set spacing
         def topRow = new HBox( 10 )
         topRow.setPadding( new Insets( 8 ) )
         topRow.getChildren().addAll(
-            modeBox,
-            spacer,
-            checkingWorkCheckbox,
+            classifierModeBtn,
+            reviewerModeBtn,
+            topRowSpacer,
             changeClassColorOrderBtn,
             specifyReviewAnnosBtn
         )
@@ -1101,37 +1153,44 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         
         // --- LEFT: dropdown (user box) + text fields ---
-        def userLabel = new Label( "User:" )
+        def userLabel = new Label( " User:" )
+        addIcon( userLabel, FontAwesome.Glyph.USER, 14 )
+        
         def userFieldNotice = new Label()
+        userFieldNotice.setPadding( new Insets( 0, 0, 0, 10 ) )
         userFieldNotice.setVisible( false )
         userFieldNotice.setManaged( false )
         
-        def userLabelRow = new HBox( 2, userLabel, userFieldNotice )
-        userFieldNotice.setPadding( new Insets( 0, 0, 0, 10 ) )
+        def userLabelRow = new HBox( 2, userLabel, userFieldNotice )   
         userLabelRow.setPadding( new Insets( 10, 0, 0, 0 ) )
         
         def users = new ComboBox()
-        users.setPrefWidth( 150 )
+        users.setMaxWidth( Double.MAX_VALUE )
+        HBox.setHgrow( users, Priority.ALWAYS )
         setTT( [userLabel, users], classifierModeBtn.isSelected() ? "Select a classifier" : "Select a reviewer" )
         
         def userInputField = new TextField()
-        userInputField.setPrefWidth( 150 )
         userInputField.setPromptText( "Add with ENTER" )
         setTT( userInputField, (classifierModeBtn.isSelected() ? "Type a new classifier" : "Type a new reviewer") + " + press enter to add" )
+        userInputField.setMaxWidth( Double.MAX_VALUE )
+        HBox.setHgrow( userInputField, Priority.ALWAYS )
         
-        def addUserBtn    = new Button( "+" )
+        def addUserBtn = new Button()
         setTT( addUserBtn, classifierModeBtn.isSelected() ? "Add a new classifier" : "Add a new reviewer" )
-        def removeUserBtn = new Button( "−" )
+        addIcon( addUserBtn, FontAwesome.Glyph.PLUS, 12 )
+        def removeUserBtn = new Button()
         setTT( removeUserBtn, "Remove a user" )
+        addIcon( removeUserBtn, FontAwesome.Glyph.MINUS, 12 )
         def removeUserDropdown = new ComboBox()
-        removeUserDropdown.setPrefWidth( 150 )
+        removeUserDropdown.setMaxWidth( Double.MAX_VALUE )
+        HBox.setHgrow( removeUserDropdown, Priority.ALWAYS )
         
         def userRow = new HBox( 5, users, addUserBtn, removeUserBtn )
         
         // Set remove user option cells style
         removeUserDropdown.setCellFactory {
             new ListCell() {
-        
+                
                 {
                     styleProperty().bind(
                         Bindings.when( hoverProperty() )
@@ -1139,7 +1198,7 @@ def getCodePreferences( ViewerSessionVars session ) {
                             .otherwise( "-fx-background-color: rgba(255,0,0,0.08);" )
                     )
                 }
-        
+                
                 @Override
                 protected void updateItem(Object item, boolean empty) {
                     super.updateItem( item, empty )
@@ -1149,20 +1208,20 @@ def getCodePreferences( ViewerSessionVars session ) {
                         setGraphic( null )
                         return
                     }
-        
+                    
                     def nameLabel = new Label( item.toString() )
                     nameLabel.setPadding( new Insets( 0, 0, 0, 0 ) )
                     nameLabel.setStyle( "-fx-text-fill: white;" )
-        
+                    
                     def removeUserSpacer = new Region()
                     HBox.setHgrow( removeUserSpacer, Priority.ALWAYS )
-        
+                    
                     def xLabel = new Label("✖  ")
-                    xLabel.setStyle("-fx-text-fill: white;")
-        
+                    xLabel.setStyle( "-fx-text-fill: white;" )
+                    
                     def cellBox = new HBox( nameLabel, removeUserSpacer, xLabel )
                     cellBox.setAlignment( Pos.CENTER_LEFT )
-        
+                    
                     setGraphic( cellBox )
                     setText( null )
                 }
@@ -1236,10 +1295,12 @@ def getCodePreferences( ViewerSessionVars session ) {
         }
         
         // If adding a user and focus is changed, cancelling add
-        userInputField.focusedProperty().addListener { obs, oldVal, newVal ->
-            if (!newVal && !addedUser) {
-                addUserBtn.setDisabled( false )
-                userRow.getChildren().set( 0, users )
+        preferencesDialog.getDialogPane().addEventFilter( MouseEvent.MOUSE_PRESSED ) { e ->
+            if (!userInputField.isHover()) {
+                if (!addedUser) {
+                    addUserBtn.setDisabled( false )
+                    userRow.getChildren().set( 0, users )
+                }
             }
         }
         
@@ -1294,14 +1355,15 @@ def getCodePreferences( ViewerSessionVars session ) {
         }
         
         
-        
         // New text fields
-        def annoClassLabel = new Label( "Annotation class:" )
+        def annoClassLabel = new Label( " Annotation class:" )
         annoClassLabel.setPadding( new Insets( 10, 0, 0, 0 ) )
+        addIcon( annoClassLabel, FontAwesome.Glyph.STAR_HALF_ALT, 14 )
         def annoClassField = new ComboBox()
+        annoClassField.setMaxWidth( Double.MAX_VALUE )
         setTT( [annoClassLabel, annoClassField], "Class of annotations to be classified. \n If missing, add to QuPath class list." )
-        def projectPathClasses = project.getPathClasses().findAll { it?.getName() }
         
+        def projectPathClasses = project.getPathClasses().findAll { it?.getName() }    
         def currentImageAnnos = currentImageData ? getAnnotationObjects() : []
         def countsByClass = currentImageAnnos.countBy { it.getPathClass() }
         
@@ -1352,34 +1414,73 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         def classifyingNameOptions
         
-        def classifyingNameLabel = new Label( "Classifying name:" )
+        def classifyingNameLabel = new Label( " Classifying name:" )
+        addIcon( classifyingNameLabel, FontAwesome.Glyph.TAG, 14 )
         
-        def classifyingNameField = new ComboBox()
-        classifyingNameField.setEditable( true )
-        classifyingNameField.setPromptText( "e.g. CAA" )
-        setTT( [classifyingNameLabel, classifyingNameField], "Simple key for what is being classified to be stored in metadata (e.g. CAA). \nLast 5 are stored." )
+        def classifyingNameNotice = new Label()
         
-        def classifyingNameNotice = new Label( "*Letters/numbers*" )
-        classifyingNameNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
         classifyingNameNotice.setPadding( new Insets( 0, 0, 0, 10 ) )
         classifyingNameNotice.setVisible( false )
         classifyingNameNotice.setManaged( false )
         
-        def classifyingNameRow = new HBox( 2, classifyingNameLabel, classifyingNameNotice )      
-        classifyingNameRow.setPadding( new Insets( 10, 0, 0, 0 ) )
+        def classifyingNameLabelRow = new HBox( 2, classifyingNameLabel, classifyingNameNotice )      
+        classifyingNameLabelRow.setPadding( new Insets( 10, 0, 0, 0 ) )
+        
+        def classifyingNameSelection = new ComboBox()
+        classifyingNameSelection.setMaxWidth( Double.MAX_VALUE )
+        HBox.setHgrow( classifyingNameSelection, Priority.ALWAYS )
+        classifyingNameSelection.setEditable( true )
+        classifyingNameSelection.setPromptText( "e.g. CAA" )
+        setTT( [classifyingNameLabel, classifyingNameSelection], "Simple key for what is being classified to be stored in metadata (e.g. CAA). \nLast 5 are stored." )
+        
+        def populateClassifyingNamesBtn = new Button()
+        setTT( populateClassifyingNamesBtn, "Populate classifying name options from existing annotations in project." )
+        addIcon( populateClassifyingNamesBtn, FontAwesome.Glyph.SEARCH, 12 )
+        
+        def classifyingNameRow = new HBox( 5, classifyingNameSelection, populateClassifyingNamesBtn )
         
         // Forcing classifying name to only have letters/numbers and showing warning if not
-        classifyingNameField.getEditor().textProperty().addListener { obs, oldVal, newVal ->
+        classifyingNameSelection.getEditor().textProperty().addListener { obs, oldVal, newVal ->
             if (!newVal.matches( "[A-Za-z0-9]*" )) {
-                classifyingNameField.getEditor().setText( oldVal )
-                        
+                classifyingNameSelection.getEditor().setText( oldVal )
+                
+                classifyingNameNotice.setText( "*Letters/numbers*" )
+                classifyingNameNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
                 showFadeOutMessage( classifyingNameNotice )
             }
         }
         
-        def gridSizeLabel = new Label( "Grid size (µm):" )
+        // Running through project and populating classifying name options and sending notice
+        populateClassifyingNamesBtn.setOnAction {
+            def uniqueNames = project.getImageList().collectMany { entry ->
+                entry.readImageData().getHierarchy().getAnnotationObjects().collectMany { anno ->
+                    anno.getMetadata().keySet().findAll { it.contains( session.toolKeyPrefix ) }
+                }
+            }.unique().collect { getClassifyingNameFromKey(it) }.unique()
+            
+            classifyingNameOptions.addAll( uniqueNames )
+            classifyingNameOptions = classifyingNameOptions.unique()
+            classifyingNameSelection.setItems( classifyingNameOptions )
+            classifyingNameSelection.setValue( classifyingNameSelection.getItems()?.first() )
+            
+            if ( !uniqueNames.isEmpty() ) {
+                classifyingNameNotice.setText( "*${uniqueNames.size()} added*" )
+                classifyingNameNotice.setStyle( "-fx-text-fill: #5cb85c;" )
+            } else {
+                classifyingNameNotice.setText( "*None available*" )
+                classifyingNameNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+            }
+            
+            showFadeOutMessage( classifyingNameNotice )
+            populateClassifyingNamesBtn.setDisabled( true )
+        }
+        
+        
+        def gridSizeLabel = new Label( " Grid size (µm):" )
+        addIcon( gridSizeLabel, FontAwesome.Glyph.TH, 14 )
         
         def gridSizeField = new TextField()
+        gridSizeField.setMaxWidth( Double.MAX_VALUE )
         gridSizeField.setPromptText( "Size of grouping grid (µm)" )
         setTT( [gridSizeLabel, gridSizeField], "Size of grouping grid (µm). Increasing this reduces the number of groups per image but increases objects per group." )
         
@@ -1390,7 +1491,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         gridSizeNotice.setManaged( false )
         
         gridSizeRow = new HBox( 2, gridSizeLabel, gridSizeNotice )  
-        gridSizeRow.setPadding( new Insets( 25, 0, 0, 0 ) )
+        gridSizeRow.setPadding( new Insets( 10, 0, 0, 0 ) )
         
         // Enforce integer-only input for grid size and show warning
         gridSizeField.textProperty().addListener { obs, oldVal, newVal ->
@@ -1418,7 +1519,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         leftBox.getChildren().addAll(
             userLabelRow, userRow,
             annoClassLabel, annoClassField,
-            classifyingNameRow, classifyingNameField,
+            classifyingNameLabelRow, classifyingNameRow,
             gridSizeRow, gridSizeField
         )
         root.left = leftBox
@@ -1426,11 +1527,16 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         
         // --- BOTTOM: checkbox for filled classified annos ---
-        def filledAnnosCheckbox = new CheckBox( "Fill classified annos" )
-        filledAnnosCheckbox.setSelected( true )
-        setTT( filledAnnosCheckbox, "Fill objects that are not in current group to visually separate the groups" )
-        filledAnnosCheckbox.setPadding( new Insets( 10, 10, 0, 15 ) )
-        root.bottom = filledAnnosCheckbox
+        def bottomRowSpacer = new Region()
+        HBox.setHgrow( bottomRowSpacer, Priority.ALWAYS )
+        
+        def checkingWorkCheckbox = new CheckBox( "Check work" )
+        setTT( checkingWorkCheckbox, "Go over user's completed objects rather than new ones." )
+        
+        def bottomRow = new HBox()
+        bottomRow.setPadding( new Insets( 20, 10, 0, 0 ) )
+        bottomRow.getChildren().setAll( bottomRowSpacer, checkingWorkCheckbox )
+        root.bottom = bottomRow
         
         // Changing applicable preferences live when switching between modes
         modeButtons.selectedToggleProperty().addListener { obs, oldToggle, newToggle ->
@@ -1438,7 +1544,6 @@ def getCodePreferences( ViewerSessionVars session ) {
             
             gridSizeLabel.setVisible( inClassifierMode )
             gridSizeField.setVisible( inClassifierMode )
-            filledAnnosCheckbox.setVisible( inClassifierMode )
             specifyReviewAnnosBtn.setVisible( !inClassifierMode )
             
             def userOptions = inClassifierMode ? classifierOptions : reviewerOptions
@@ -1481,8 +1586,9 @@ def getCodePreferences( ViewerSessionVars session ) {
         channelsLabel.setPadding( new Insets( 5, 0, 0, 0 ) )
         def fullChannelsBoxSpacer = new Region()
         HBox.setHgrow( fullChannelsBoxSpacer, Priority.ALWAYS )
-        def clearChannelsBtn = new Button( "Clear" )
+        def clearChannelsBtn = new Button()
         setTT( clearChannelsBtn, "Clear selected channels" )
+        addIcon( clearChannelsBtn, FontAwesome.Glyph.TRASH, 15 )
         
         // Assemble top row and add as child of larger channel box
         def topChannelRow = new HBox( 5 )
@@ -1510,6 +1616,7 @@ def getCodePreferences( ViewerSessionVars session ) {
                 }
             }
             channelCBsBox.getChildren().add( cb )
+            cb.setFocusTraversable( false )
         }
         
         // Clear all checked channels when clear button is pressed
@@ -1521,7 +1628,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         def channelsScroll = new ScrollPane( channelCBsBox )
         channelsScroll.setFitToWidth( true )
         fullChannelsBox.getChildren().addAll( topChannelRow, channelsScroll )
-        root.center = fullChannelsBox
+        root.right = fullChannelsBox
         
         preferencesDialog.getDialogPane().content = root
         
@@ -1673,8 +1780,9 @@ def getCodePreferences( ViewerSessionVars session ) {
                 colUnconfirmedHeader
             )
             
-            def restoreDefaultsBtn = new Button( "Restore Defaults" )
-            setTT( restoreDefaultsBtn, "Restore classification order and colors to default" )
+            def restoreDefaultsBtn = new Button( " Restore defaults" )
+            setTT( restoreDefaultsBtn, "Restore classification order and colors to default." )
+            addIcon( restoreDefaultsBtn, FontAwesome.Glyph.UNDO, 15 )
             
             def stateLabelBox = new VBox()
             stateLabelBox.setPadding( new Insets( 2, 0, 2, 0 ) )
@@ -2019,7 +2127,8 @@ def getCodePreferences( ViewerSessionVars session ) {
                 }
                 
                 // Making, formatting and placing the add state button
-                def addBtn = new Button( "+ Add state" )
+                def addBtn = new Button( " Add state" )
+                addIcon( addBtn, FontAwesome.Glyph.PLUS, 12 )
                 addBtn.setMaxWidth( Double.MAX_VALUE )
                 addBtn.setOnAction { addRow( tempStateOrder.size() ) }
                 addBtn.setDisable( tempStateOrder.size() >= maxClassifierStates )
@@ -2069,7 +2178,8 @@ def getCodePreferences( ViewerSessionVars session ) {
                         dragHandle.setMinWidth( 5 )
                         setTT( dragHandle, "Drag to reorder states/colors" )
                         
-                        def minusBtn = new Button( "−" )
+                        def minusBtn = new Button()
+                        addIcon( minusBtn, FontAwesome.Glyph.MINUS, 10 )
                         minusBtn.setMinWidth( 28 )
                         minusBtn.setPrefWidth( 28 )
                         minusBtn.setOnAction { removeRow( idx ) }
@@ -2301,7 +2411,9 @@ def getCodePreferences( ViewerSessionVars session ) {
             
             def okButton = specifyAnnosDialog.getDialogPane().lookupButton( ButtonType.OK )
             
-            def restoreReviewerAnnoDefaultsBtn = new Button( "Restore defaults" )
+            def restoreReviewerAnnoDefaultsBtn = new Button( " Restore defaults" )
+            setTT( restoreReviewerAnnoDefaultsBtn, "Restore reviewer criteria to default." )
+            addIcon( restoreReviewerAnnoDefaultsBtn, FontAwesome.Glyph.UNDO, 15 )
             
             setTT( switches.node, "Add more criteria for annotations to review" )
             
@@ -2447,7 +2559,8 @@ def getCodePreferences( ViewerSessionVars session ) {
                 updateReviewerAnnoRows()
             }
             
-            // Creating
+            // Blocking nodes from becoming highlighted when clicked
+            disableNonEditableFocusTraversal( specifyAnnosDialog.getDialogPane() )
             
             def specifyAnnosResult = specifyAnnosDialog.showAndWait()
             
@@ -2514,15 +2627,15 @@ def getCodePreferences( ViewerSessionVars session ) {
             
             updatePrefsOrLog(
                 pMap.classifyingName instanceof String,
-                { classifyingNameField.setValue( pMap.classifyingName.toString() ) },
-                { classifyingNameField.setValue( "" ) },
+                { classifyingNameSelection.setValue( pMap.classifyingName.toString() ) },
+                { classifyingNameSelection.setValue( "" ) },
                 "Classifying name"
             )
             
             updatePrefsOrLog(
                 pMap.recentClassifyingNames instanceof List && pMap.recentClassifyingNames.every { it instanceof String },
                 { classifyingNameOptions = FXCollections.observableArrayList( pMap.recentClassifyingNames?.unique() );
-                  classifyingNameField.setItems( classifyingNameOptions ) },
+                  classifyingNameSelection.setItems( classifyingNameOptions ) },
                 { classifyingNameOptions = classifyingNameOptions ?: FXCollections.observableArrayList() },
                 "Classifying name options"
             )
@@ -2532,13 +2645,6 @@ def getCodePreferences( ViewerSessionVars session ) {
                 { gridSizeField.setText( pMap.gridSize.intValue().toString() ) },
                 { gridSizeField.setText( "500" ) },
                 "Grid size"
-            )
-            
-            updatePrefsOrLog(
-                pMap.fillClassifiedAnnos instanceof Boolean,
-                { filledAnnosCheckbox.setSelected( pMap.fillClassifiedAnnos ) },
-                { filledAnnosCheckbox.setSelected( true ) },
-                "Fill classified annos checkbox"
             )
             
             updatePrefsOrLog(
@@ -2621,6 +2727,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         setPreferencesFromMap( prePrefsMap )
         
         
+        
         // Closure to collect current preferences and make map
         def collectCurrentPrefs = {
             def userName          = users.getValue().capitalize()
@@ -2630,11 +2737,10 @@ def getCodePreferences( ViewerSessionVars session ) {
                                         .collect { it.getText() }
             
             def annoClass               = annoClassField.getValue().name
-            def classifyingName         = classifyingNameField.getValue()?.trim()
+            def classifyingName         = classifyingNameSelection.getValue()?.trim()
             List recentClassifyingNames = classifyingNameOptions = ([classifyingName] + classifyingNameOptions).unique().take( 5 )
             def gridSizeText            = gridSizeField.getText().trim()
             def gridSize                = Integer.parseInt( gridSizeText )
-            def fillClassifiedAnnos     = filledAnnosCheckbox.isSelected()
             boolean instructions        = prePrefsMap.instructions
             
             // Reviewer annotation preferences
@@ -2659,7 +2765,6 @@ def getCodePreferences( ViewerSessionVars session ) {
                 "classifyingName"        : classifyingName,
                 "recentClassifyingNames" : classifyingNameOptions,
                 "gridSize"               : gridSize,
-                "fillClassifiedAnnos"    : fillClassifiedAnnos,
                 "statesAndColors"        : stateColorMap,
                 "reviewStateFreqs"       : reviewStateFreqs,
                 "reviewStates"           : reviewStates,
@@ -2676,7 +2781,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             def fileChooser = new FileChooser()
             fileChooser.setTitle( "Export preferences file" )
             fileChooser.setInitialDirectory( projectDirectory )
-            fileChooser.setInitialFileName( "preferences.json" )
+            fileChooser.setInitialFileName( "classify-preferences.json" )
             fileChooser.getExtensionFilters().add(
                 new FileChooser.ExtensionFilter( "JSON files", "*.json" )
             )
@@ -2717,13 +2822,17 @@ def getCodePreferences( ViewerSessionVars session ) {
         }
         
         
+        // - Setting buttons to not be highlighted when clicked -
+        disableNonEditableFocusTraversal( preferencesDialog.getDialogPane() )
+        
+        
         // - Disabling OK button unless certain criteria is met -
         def anySelectedChannel = Bindings.createBooleanBinding(
             { channelCheckboxes.any { it.isSelected() } },
             *channelCheckboxes.collect { it.selectedProperty() }
         )
         okBtn.disableProperty().bind(
-            classifyingNameField.getEditor().textProperty().isEmpty()
+            classifyingNameSelection.getEditor().textProperty().isEmpty()
             .or( users.valueProperty().isNull() )
             .or( gridSizeField.textProperty().isEmpty() )
             .or( anySelectedChannel.not() )
@@ -2771,13 +2880,12 @@ while (true) {
     session.classifiers         = codePreferences.classifiers
     session.reviewers           = codePreferences.reviewers
     session.classifyingName     = codePreferences.classifyingName // Name of disease/marker being classified (for metadata)
-    session.userKey             = generateMdKey( session.userName, session.classifyingName )
-    session.classifierKeys      = session.classifiers.collect { generateMdKey( it, session.classifyingName ) } 
+    session.userKey             = generateMdKey( session, session.userName, session.classifyingName )
+    session.classifierKeys      = session.classifiers.collect { generateMdKey( session, it, session.classifyingName ) } 
     session.checkingWork        = codePreferences.checkingWork // Set if the user is going back over their completed classifications
     session.toggleChannels      = codePreferences.selectedChannels // Channels to toggle for analysis (keep number of channels low)
     session.annoClass           = codePreferences.annoClass // Class of annotations to review
     session.gridSize            = codePreferences.gridSize // µm bins size for group review (will automatically add grid)
-    session.fillClassifiedAnnos = codePreferences.fillClassifiedAnnos // Fills annos not being reviewed to more easily see ones in focus
     session.statesAndColors     = codePreferences.statesAndColors // Map with the order of classes (to change) and respective colors
     session.reviewStateFreqs    = codePreferences.reviewStateFreqs // Frequencies of states to review
     session.reviewStates        = codePreferences.reviewStates // Which states to review
@@ -3259,17 +3367,15 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                     else                    { anno.setColor( BLACK ) }
                     
                     // If wanted, classifed annos out of view will be filled (using detections)
-                    if ( session.fillClassifiedAnnos ) {
-                        if (mdValue && (anno !in group) && (id !in annosIDsWithDet)) {
-                            def annoROI = anno.getROI()
-                            def detObj = PathObjects.createDetectionObject( annoROI )
-                            detObj.getMetadata().put( "annoID", id )
-                            detObj.setColor( session.statesAndColors.find { it.state == mdValue }?.color )
-                            detsToAdd << detObj
-                        } else if ((anno in group) && (id in annosIDsWithDet)) {
-                            def detForRemoval = annoDetMap[ id ]
-                            detsToRemove << detForRemoval
-                        }
+                    if (mdValue && (anno !in group) && (id !in annosIDsWithDet)) {
+                        def annoROI = anno.getROI()
+                        def detObj = PathObjects.createDetectionObject( annoROI )
+                        detObj.getMetadata().put( "annoID", id )
+                        detObj.setColor( session.statesAndColors.find { it.state == mdValue }?.color )
+                        detsToAdd << detObj
+                    } else if ((anno in group) && (id in annosIDsWithDet)) {
+                        def detForRemoval = annoDetMap[ id ]
+                        detsToRemove << detForRemoval
                     }
                 }
                 
@@ -3830,6 +3936,7 @@ import javafx.scene.shape.*
 import javafx.stage.*
 
 import qupath.lib.common.ColorTools
+import qupath.lib.gui.tools.IconFactory
 import qupath.lib.gui.viewer.QuPathViewer
 import qupath.lib.gui.viewer.QuPathViewerListener
 
@@ -3838,7 +3945,9 @@ import javafx.beans.binding.Bindings
 import com.google.gson.GsonBuilder
 import com.google.gson.Gson
 
+import org.controlsfx.glyphfont.FontAwesome
+
 
 // Comments for tool launcher icon and tooltip
-// ICON: PENCIL
+// ICON: PENCIL_SQUARE_ALT
 // Manually classify annotations
