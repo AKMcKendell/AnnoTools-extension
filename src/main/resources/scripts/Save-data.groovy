@@ -749,24 +749,24 @@ for (image in imagesToRun) {
         def parent = anno.getParent()
         Map rowMap = [:]
         
-        rowMap[ "Image" ]           = imageName
-        rowMap[ "Anno_Name" ]       = anno.getName()
-        rowMap[ "Anno_Class" ]      = anno.getPathClass()?.getName()
-        rowMap[ "Anno_ID" ]         = anno.getID()
-        rowMap[ "Parent_Name" ]     = parent?.getName()
-        rowMap[ "Parent_Class" ]    = parent?.getPathClass()?.getName()
-        rowMap[ "Parent_ID" ]       = parent?.getID()
-        rowMap[ "Hierarchy_Level" ] = anno.getLevel()
-        rowMap[ "Anno_Area_um" ]    = anno.getROI()?.getScaledArea( pixelCalibration )
+        rowMap[ "Image" ]                = imageName
+        rowMap[ "Anno_Name" ]            = anno.getName()
+        rowMap[ "Anno_Class" ]           = anno.getPathClass()?.getName()
+        rowMap[ "Anno_ID" ]              = anno.getID()
+        rowMap[ "Anno_Area_um" ]         = anno.getROI()?.getScaledArea( pixelCalibration )
+        rowMap[ "Anno_Hierarchy_Level" ] = anno.getLevel()
+        rowMap[ "Parent_Name" ]          = parent?.getName()
+        rowMap[ "Parent_Class" ]         = parent?.getPathClass()?.getName()
+        rowMap[ "Parent_ID" ]            = parent?.getID()
         
         def MMs = anno.getMeasurementList()
         codePreferences.measurements.each { mmName ->
-            rowMap[ "Metadata_${mmName}" ] = MMs.containsKey( mmName ) ? MMs.get( mmName ) : null
+            rowMap[ "Measurements_${mmName}" ] = MMs.containsKey( mmName ) ? MMs.get( mmName ) : null
         }
         
         def MD = anno.getMetadata()
         codePreferences.metadata.each { mdKey ->
-            rowMap[ "Measurements_${mdKey}" ] = MD.containsKey( mdKey ) ? MD.get( mdKey ) : null
+            rowMap[ "Metadata_${mdKey}" ] = MD.containsKey( mdKey ) ? MD.get( mdKey ) : null
         }
         
         headerRow = (headerRow + rowMap.keySet()).unique()
