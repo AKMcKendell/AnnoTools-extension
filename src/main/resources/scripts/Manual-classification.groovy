@@ -1462,7 +1462,9 @@ def getCodePreferences( ViewerSessionVars session ) {
             classifyingNameOptions.addAll( uniqueNames )
             classifyingNameOptions = classifyingNameOptions.unique()
             classifyingNameSelection.setItems( classifyingNameOptions )
-            classifyingNameSelection.setValue( classifyingNameSelection.getItems()?.first() )
+            if (!classifyingNameSelection.getItems().isEmpty()) {
+                classifyingNameSelection.setValue( classifyingNameSelection.getItems().first() )
+            }
             
             if ( !uniqueNames.isEmpty() ) {
                 classifyingNameNotice.setText( "*${uniqueNames.size()} added*" )
