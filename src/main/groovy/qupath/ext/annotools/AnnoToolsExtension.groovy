@@ -22,6 +22,7 @@ class AnnoToolsExtension implements QuPathExtension {
 
         // Extract bundled scripts from JAR to a temp folder
         def tempDir = new File( System.getProperty('java.io.tmpdir'), 'annotools-scripts' )
+        if (tempDir.exists()) { tempDir.deleteDir() }
         tempDir.mkdirs()
 
         try {
@@ -82,6 +83,13 @@ class AnnoToolsExtension implements QuPathExtension {
 
             def scriptFiles = tempDir.listFiles()?.findAll { File f ->
                 f.isFile() && f.getName().toLowerCase().endsWith( '.groovy' )
+            }?.sort { File f ->
+                def orderLine = f.readLines().reverse().find { it =~ /^\/\/\s*ORDER:\s*(\d+)/ }
+                if (orderLine) {
+                    def matcher = orderLine =~ /^\/\/\s*ORDER:\s*(\d+)/
+                    return matcher[0][1].toInteger()
+                }
+                return Integer.MAX_VALUE
             }
 
             if (!scriptFiles || scriptFiles.isEmpty()) {
