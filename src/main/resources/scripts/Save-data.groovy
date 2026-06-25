@@ -314,6 +314,12 @@ def collectAllMetadata( objects ) {
     return mdByClass
 }
 
+// Function: Create icon for UI
+def addIcon( node, iconCode, int size ) {
+    def icon = IconFactory.createNode( iconCode, size )
+    node.setGraphic( icon )
+}
+
 // Function: Scan the entire project to collect annotation field availability by class
 def collectProjectAnnotationIndex( project, Stage ownerStage = null ) {
     List projectImages = project.getImageList()
@@ -458,7 +464,8 @@ def codePreferences = runOnFxThreadAndWait {
     
     dialog.getDialogPane().buttonTypes.addAll( ButtonType.OK, ButtonType.CANCEL )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
-    okBtn.setText( "Save" )
+    okBtn.setText( " Save" )
+    addIcon( okBtn, FontAwesome.Glyph.FLOPPY_ALT, 14 )
     
     
     
@@ -568,9 +575,11 @@ def codePreferences = runOnFxThreadAndWait {
     selectSpecificCBs( liveRightCBs.mdCBs, prePrefsMap.metadata )
     
     
-    def timeStamp = new Label( "Last refresh: ${projectCache.timeStamp}" )
+    def timeStamp = new Label( " Last refresh: ${projectCache.timeStamp}" )
+    addIcon( timeStamp, FontAwesome.Glyph.CLOCK_ALT, 14 )
     timeStamp.setPadding( new Insets( 5 ) )
-    def refreshBtn = new Button( "Refresh project data" )
+    def refreshBtn = new Button( " Refresh project data" )
+    addIcon( refreshBtn, FontAwesome.Glyph.REFRESH, 12 )
     setTT( refreshBtn, "Re-scan project to update available object classes, measurements, and metadata.")
     def topRow = new HBox( 10, refreshBtn, timeStamp )
     
@@ -656,7 +665,7 @@ def codePreferences = runOnFxThreadAndWait {
                 selectSpecificCBs( liveRightCBs.pcCBs, classesSelected )
                 selectSpecificCBs( liveRightCBs.mmCBs, measurementsSelected )
                 selectSpecificCBs( liveRightCBs.mdCBs, metadataSelected )
-                timeStamp.setText( "Last refresh: ${projectCache.timeStamp}" )
+                timeStamp.setText( " Last refresh: ${projectCache.timeStamp}" )
                 refreshBtn.setDisable( true )
                 rebindOkBtn()
             }
@@ -883,8 +892,11 @@ import com.google.gson.GsonBuilder
 import com.google.gson.Gson
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import qupath.lib.gui.tools.IconFactory
+import org.controlsfx.glyphfont.FontAwesome
 
 
 // Comments for tool launcher icon and tooltip
+// ORDER: 8
 // ICON: SAVE
-// Custom export for annotation information
+// Save custom annotation information to .csv

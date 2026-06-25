@@ -206,6 +206,12 @@ def makeSelectAllCB( List groupCBs ) {
     return selectAllCB
 }
 
+// Function: Create icon for UI
+def addIcon( node, iconCode, int size ) {
+    def icon = IconFactory.createNode( iconCode, size )
+    node.setGraphic( icon )
+}
+
 
 // Function: Make a box with checkboxes and a modifiable header
 def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0 ) {
@@ -271,7 +277,8 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
         cb.setSelected( !cb.isSelected() )
     }
     
-    def clearBtn = new Button( "Clear" )
+    def clearBtn = new Button()
+    addIcon( clearBtn, FontAwesome.Glyph.TRASH, 14 )
     clearBtn.setOnAction { checkboxes.each { it.setSelected( false ) } }
     setTT( clearBtn, "Clear selected items" )
     
@@ -334,14 +341,15 @@ def codePreferences = runOnFxThreadAndWait {
     
     // Making the basic popup
     def dialog = new Dialog()
-    dialog.setTitle( "Adding measurements to annotations" )
+    dialog.setTitle( "What measurements should be added?" )
     
     def root = new BorderPane()
     root.setPrefHeight( 500 )
     
     dialog.getDialogPane().buttonTypes.addAll( ButtonType.OK, ButtonType.CANCEL )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
-    okBtn.setText( "Add measurements" )
+    okBtn.setText( "Add Measurements" )
+    ButtonBar.setButtonUniformSize( okBtn, false )
     
     
     // LEFT PANEL: Image Selection
@@ -653,7 +661,11 @@ import qupath.lib.analysis.features.ObjectMeasurements.ShapeFeatures
 
 import qupath.lib.images.servers.TransformedServerBuilder
 
+import qupath.lib.gui.tools.IconFactory
+import org.controlsfx.glyphfont.FontAwesome
+
 
 // Comments for tool launcher icon and tooltip
+// ORDER: 5
 // ICON: PLUS_CIRCLE
 // Add intensity or morphology measurements to annotations

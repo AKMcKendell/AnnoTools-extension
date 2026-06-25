@@ -275,6 +275,12 @@ def makeSelectAllCB( List groupCBs ) {
     return selectAllCB
 }
 
+// Function to create icon for UI
+def addIcon( node, iconCode, int size ) {
+    def icon = IconFactory.createNode( iconCode, size )
+    node.setGraphic( icon )
+}
+
 
 // Function: Make a box with checkboxes and a modifiable header
 def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0 ) {
@@ -340,7 +346,8 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
         cb.setSelected( !cb.isSelected() )
     }
     
-    def clearBtn = new Button( "Clear" )
+    def clearBtn = new Button()
+    addIcon( clearBtn, FontAwesome.Glyph.TRASH, 14 )
     clearBtn.setOnAction { checkboxes.each { it.setSelected( false ) } }
     setTT( clearBtn, "Clear selected items" )
     
@@ -402,7 +409,7 @@ if (prefsFile.length() > 0L && prefsFile.getText() != "null") {
 def codePreferences = runOnFxThreadAndWait {
     
     def dialog = new Dialog()
-    dialog.setTitle( "Making rings around annotations" )
+    dialog.setTitle( "What rings should be generated?" )
     
     def root = new BorderPane()
     root.setPrefHeight( 350 )
@@ -410,6 +417,7 @@ def codePreferences = runOnFxThreadAndWait {
     dialog.getDialogPane().buttonTypes.addAll( ButtonType.OK, ButtonType.CANCEL )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
     okBtn.setText( "Make rings" )
+    ButtonBar.setButtonUniformSize( okBtn, false )
     
     
     
@@ -429,7 +437,8 @@ def codePreferences = runOnFxThreadAndWait {
         return values
     }
     
-    def expansionLabel = new Label( "Expansion radii (μm):" )
+    def expansionLabel = new Label( " Expansion radii (μm):" )
+    addIcon( expansionLabel, FontAwesome.Glyph.EXPAND, 14 )
     def expansionField = new TextField()
     expansionField.setPromptText( "e.g. \"6,16,31\"" )
     setTT( [expansionLabel, expansionField], "Radii of expansion rings using numbers and commas only (max ${maxExpansions})." )
@@ -438,20 +447,21 @@ def codePreferences = runOnFxThreadAndWait {
     HBox.setHgrow( topSpacer, Priority.ALWAYS )
     def outputClassPreview = new Label()
     setTT( outputClassPreview, "Preview of output class name(s)" )
+    addIcon( outputClassPreview, FontAwesome.Glyph.EYE, 14 )
     def classPrev = new SimpleStringProperty( "Class" )
     
     // Rebuilds the preview text from the current class + up to 3 expansions
     def updateClassPreview = {
         def cls = classPrev.get()
         if (expansions.isEmpty()) {
-            outputClassPreview.setText( "Output classes preview:  ${cls}_Exp" )
+            outputClassPreview.setText( " Output classes preview:  ${cls}_Exp" )
             return
         }
         def examples = expansions.take( 3 ).collect { "${cls}_${it}" }
         if (expansions.size() > 3) {
             examples << "..."
         }
-        outputClassPreview.setText( "Output classes preview:  " + examples.join( ", " ) )
+        outputClassPreview.setText( " Output classes preview:  " + examples.join( ", " ) )
     }
     
     updateClassPreview()
@@ -502,8 +512,8 @@ def codePreferences = runOnFxThreadAndWait {
     def expansionRow = new HBox( 8, expansionLabel, expansionField, previewLabel, expansionsPreview, topSpacer )
     expansionRow.setAlignment( Pos.CENTER_LEFT )
     def classPrevRow = new HBox( 8, outputClassPreview ) 
-    def topBox = new VBox( 5, expansionRow, classPrevRow )
-    topBox.setPadding( new Insets( 10 ) )
+    def topBox = new VBox( 8, expansionRow, classPrevRow )
+    topBox.setPadding( new Insets( 5, 0, 20, 5 ) )
     topBox.setAlignment( Pos.CENTER_LEFT )
     
     // Add it to your existing layout
@@ -585,12 +595,13 @@ def codePreferences = runOnFxThreadAndWait {
     expandOnlyOutwardCheck.setSelected( prePrefsMap.expandOnlyOutward instanceof Boolean ? prePrefsMap.expandOnlyOutward : true )
     
     def contstrainToParentCheck = new CheckBox( "Constrain to parent" )
+    contstrainToParentCheck.setPadding( new Insets( 0, 0, 0, 20 ) )
     setTT( contstrainToParentCheck, "Constrain expansions to the parent object of central object?")
     contstrainToParentCheck.setSelected( prePrefsMap.constrainToParent instanceof Boolean ? prePrefsMap.constrainToParent : true )
     
     // Creating row and adding children
     def secondRow = new HBox( 10 )
-    secondRow.setPadding( new Insets( 10 ) )
+    secondRow.setPadding( new Insets( 20, 0, 0, 10 ) )
     secondRow.getChildren().addAll(
         expandOnlyOutwardCheck,
         contstrainToParentCheck
@@ -887,7 +898,11 @@ import javafx.scene.control.TextFormatter
 
 import java.util.function.UnaryOperator
 
+import qupath.lib.gui.tools.IconFactory
+import org.controlsfx.glyphfont.FontAwesome
+
 
 // Comments for tool launcher icon and tooltip
+// ORDER: 2
 // ICON: ARROWS_ALT
 // Create concentric rings around annotations

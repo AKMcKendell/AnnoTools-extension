@@ -1086,8 +1086,9 @@ def getCodePreferences( ViewerSessionVars session ) {
         def classifierModeBtn = new ToggleButton( "Classifier Mode" )
         def reviewerModeBtn   = new ToggleButton( "Reviewer Mode" )
         
+        // Stop mode buttons from being untoggled (must click other)
         [classifierModeBtn, reviewerModeBtn].each { btn ->
-            btn.addEventFilter(MouseEvent.MOUSE_PRESSED) {
+            btn.addEventFilter( MouseEvent.MOUSE_PRESSED ) {
                 if (btn.isSelected()) {
                     it.consume()
                 }
@@ -1514,8 +1515,8 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         // Create bounding box, add children and set onto UI
         def leftBox = new VBox( 10 )
-        leftBox.setPadding( new Insets( 10 ) )
-        leftBox.setPrefWidth( 250 )
+        leftBox.setPadding( new Insets( 5 ) )
+        leftBox.setPrefWidth( 265 )
         leftBox.getChildren().addAll(
             userLabelRow, userRow,
             annoClassLabel, annoClassField,
@@ -3949,5 +3950,6 @@ import org.controlsfx.glyphfont.FontAwesome
 
 
 // Comments for tool launcher icon and tooltip
+// ORDER: 4
 // ICON: PENCIL_SQUARE_ALT
 // Manually classify annotations
