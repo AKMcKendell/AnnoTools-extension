@@ -297,6 +297,12 @@ def makeSelectAllCB( List groupCBs ) {
     return selectAllCB
 }
 
+// Function: Create icon for UI
+def addIcon( node, iconCode, int size ) {
+    def icon = IconFactory.createNode( iconCode, size )
+    node.setGraphic( icon )
+}
+
 
 // Function: Make a box with checkboxes and a modifiable header
 def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0 ) {
@@ -362,7 +368,8 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
         cb.setSelected( !cb.isSelected() )
     }
     
-    def clearBtn = new Button( "Clear" )
+    def clearBtn = new Button()
+    addIcon( clearBtn, FontAwesome.Glyph.TRASH, 14 )
     clearBtn.setOnAction { checkboxes.each { it.setSelected( false ) } }
     setTT( clearBtn, "Clear selected items" )
     
@@ -422,39 +429,117 @@ if (prefsFile.length() > 0L && prefsFile.getText() != "null") {
 def codePreferences = runOnFxThreadAndWait {
     
     def dialog = new Dialog()
-    dialog.setTitle( "Moving annotations with parents" )
+    dialog.setTitle( "What annotations should be moved?" )
     
     def root = new BorderPane()
-    root.setPrefSize( 700, 350 )
-    
+    root.setPrefHeight( 350 )
     
     // Defining mode buttons early because other functions rely on their status
-    def modeLabel    = new Label( "Mode:" )
-    def exportButton = new RadioButton( "Export" )
-    def importButton = new RadioButton( "Import" )
+    def exportButton = new ToggleButton( " Export" )
+    addIcon( exportButton, FontAwesome.Glyph.UPLOAD, 14 )
+    def importButton = new ToggleButton( " Import" )
+    addIcon( importButton, FontAwesome.Glyph.DOWNLOAD, 14 )
     
+    // Stop mode buttons from being untoggled (must click other)
+    [exportButton, importButton].each { btn ->
+        btn.setFocusTraversable( false )
+        btn.addEventFilter( MouseEvent.MOUSE_PRESSED ) {
+            if (btn.isSelected()) {
+                it.consume()
+            }
+        }
+    }
+    
+    // Creating group for mode buttons
     def modeButtons = new ToggleGroup()
     exportButton.setToggleGroup( modeButtons )
     importButton.setToggleGroup( modeButtons )
+    
+    // Setting style for mode buttons
+    def commonStyle =
+    "-fx-font-size: 13px;" +
+    "-fx-padding: 8 15 8 15;"
+    
+    def selectedStyle =
+        commonStyle +
+        "-fx-border-color: black;" +
+        "-fx-border-width: 1;" +
+        "-fx-font-weight: bold;" +
+        "-fx-background-color: derive(-fx-base, -30%);"
+    
+    def unselectedStyle =
+        commonStyle +
+        "-fx-opacity: 0.6;"
+    
+    def updateModeButtonStyles = {
+        exportButton.setStyle(
+            exportButton.isSelected() ? selectedStyle : unselectedStyle
+        )
+        importButton.setStyle(
+            importButton.isSelected() ? selectedStyle : unselectedStyle
+        )
+    }
+    
+    modeButtons.selectedToggleProperty().addListener { obs, oldVal, newVal ->
+        updateModeButtonStyles()
+    }
+    
+    updateModeButtonStyles()
     
     // Restore previous mode or default to Export
     prePrefsMap.mode == "import" ? modeButtons.selectToggle( importButton ) : modeButtons.selectToggle( exportButton )
     
     
     // BOTTOM: Ok, cancel, and resolve hierarchy buttons
-    def resolveHierarchyBtnType = new ButtonType( "Nest existing objects", ButtonBar.ButtonData.LEFT )
+    def resolveHierarchyBtnType = new ButtonType( " Nest existing objects", ButtonBar.ButtonData.LEFT )
     
     dialog.getDialogPane().buttonTypes.addAll( ButtonType.OK, ButtonType.CANCEL, resolveHierarchyBtnType )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
     def resolveHierarchyBtn = dialog.getDialogPane().lookupButton( resolveHierarchyBtnType )
+    addIcon( resolveHierarchyBtn, FontAwesome.Glyph.SIGN_IN, 14 )
+    ButtonBar.setButtonUniformSize( okBtn, false )
     
     setTT( resolveHierarchyBtn, "Fix hierarchy of existing objects (no importing/exporting)" )
     ButtonBar.setButtonUniformSize( resolveHierarchyBtn, false )
     
     
+    
+    // CENTER PANEL: Image Selection
+    def imageNames = project.getImageList().collect { it.getImageName() }
+    def imagesBox = makeCheckboxBox( "Select images", "images", imageNames.collect { [name: it] } )
+    def currentImageCB = new CheckBox( "Current Image" )
+    imagesBox.header.getChildren().addAll( imagesBox.selectAll, imagesBox.spacer, currentImageCB )
+    imagesBox.CBs.each { it.setSelected( it.getText() in prePrefsMap.selectedImages  ) }
+    BorderPane.setMargin( imagesBox.box, new Insets( 0, 15, 0, 0 ) )
+    
+    if (currentEntry) {
+        def currentCB = imagesBox.CBs.find { it.getText() == currentEntry.getImageName() }
+        currentImageCB.selectedProperty().bindBidirectional(
+            currentCB.selectedProperty()
+        )
+        
+        // If current image was only one selected, will update to new image
+        if (prePrefsMap.currentImage == true && prePrefsMap.selectedImages?.size() == 1) {
+            imagesBox.CBs.each { it.setSelected( false ) }
+            currentImageCB.setSelected( true )
+        }
+    } else {
+        currentImageCB.setDisable( true )
+    }
+    
+    // Setting and updating tooltip for current image checkbox
+    currentImageCB.selectedProperty().addListener { obs, oldVal, newVal ->
+        setTT( currentImageCB, currentImageCB.isSelected() ? "Deselect current image" : "Select current image" )
+    }
+    
+    root.center = imagesBox.box
+    
+    
+    
     // TOP: Folder chooser + Export/Import mode + Include Parents
     def folderRow = new HBox( 10 )
-    def folderTitleLabel = new Label( "Folder:" )
+    def folderTitleLabel = new Label( " Folder:" )
+    addIcon( folderTitleLabel, FontAwesome.Glyph.FOLDER, 14 )
     
     // Closure: Get width of text in popup
     def getTextWidth = { String text_width, Font font_width ->
@@ -462,11 +547,6 @@ def codePreferences = runOnFxThreadAndWait {
         temp.setFont( font_width )
         return temp.getLayoutBounds().getWidth()
     }
-    
-    def folderTitleWidth = getTextWidth( folderTitleLabel.getText(), folderTitleLabel.getFont() )
-    folderTitleLabel.setPrefWidth( folderTitleWidth * 1.1 )
-    folderTitleLabel.setMinWidth( folderTitleWidth * 1.1 )
-    folderTitleLabel.setMaxWidth( folderTitleWidth * 1.1 )
     
     // Closure: Make the selected folder path viewable
     def formatFolderPathView = { String path_format, double maxWidth, Font font_format ->
@@ -505,7 +585,8 @@ def codePreferences = runOnFxThreadAndWait {
     
     def folderStatusRow   = new HBox( 10 )
     folderStatusRow.setPadding( new Insets( 0, 0, 15, 0 ) ) // small bottom gap before mode
-    def folderStatusTitle = new Label( "Folder check:" )
+    def folderStatusTitle = new Label( " Folder check:" )
+    addIcon( folderStatusTitle, FontAwesome.Glyph.SEARCH, 14 )
     def folderStatusLabel = new Label( "" )
     folderStatusRow.getChildren().addAll( folderStatusTitle, folderStatusLabel )
     folderStatusLabel.setStyle( "-fx-opacity: 0.8;" )
@@ -520,42 +601,99 @@ def codePreferences = runOnFxThreadAndWait {
         } ?: 0
     }
     
+    // Closure: Get all geoJson file names from target folder
+    List geojsonFileNames = []
+    Map CbFileMatches = [:]
+    def getGeojsonFileNames = { String folderPath ->
+        if (!folderPath) { return [] }
+        
+        def folder = new File( folderPath )    
+        List geojsonFiles = folder.listFiles().findAll {
+            it.isFile() && it.getName().toLowerCase().endsWith( ".geojson" )
+        }
+        
+        return geojsonFiles.collect { it.getName().replace( ".geojson", "" ) }
+    }
+    
+    // Closure: Find matching text between list and selected CB names
+    def getMatchingFiles = { List fileNames, CBs ->
+        List selectedCbNames = CBs.findAll { it.isSelected() }.collect { it.getText() }     
+        List matchingFileNames = fileNames.findAll { it in selectedCbNames }
+        List unmatchingFileNames = selectedCbNames.findAll { it !in fileNames }
+        
+        return [unmatchingFileNames: unmatchingFileNames, matchingFileNames: matchingFileNames]
+    }
+    
     // Closure: Change folder status label formatting
-    def updateFolderStatus = { String folderPath ->
+    def updateFolderStatus = { String folderPath, Map matchInfo ->
+        def setStatus = { String text, String style, String tooltip, FontAwesome.Glyph icon = null ->
+            folderStatusLabel.setText( text )
+            folderStatusLabel.setStyle( style )
+            setTT( folderStatusLabel, tooltip )
+            if (icon) { addIcon( folderStatusTitle, icon, 14 ) }
+        }
+    
+        def dim     = "-fx-opacity: 0.5;"
+        def green   = "-fx-text-fill: green;"
+        def red     = "-fx-text-fill: red;"
+        def neutral = "Specifics of issues with files in folder will appear here."
+    
         if (!folderPath) {
-            folderStatusLabel.setText( "No folder selected" )
-            folderStatusLabel.setStyle( "-fx-opacity: 0.5;" )
+            setStatus( text    = "No folder selected",
+                       style   = dim,
+                       tooltip = neutral )
+            return
+        }
+    
+        List matches    = matchInfo.matchingFileNames
+        List nonMatches = matchInfo.unmatchingFileNames
+    
+        if (matches.isEmpty() && nonMatches.isEmpty()) {
+            setStatus( text    = "No images selected",
+                       style   = dim,
+                       tooltip = neutral,
+                       icon    = FontAwesome.Glyph.SEARCH )
             return
         }
     
         boolean exportMode = exportButton.isSelected()
-        def nGeoJson = countGeoJsonFiles( folderPath )
     
-        if (nGeoJson > 0) {
-            folderStatusLabel.setText( "${nGeoJson} .geojson file(s) found in selected folder" )
-            folderStatusLabel.setStyle(
-                exportMode
-                    ? "-fx-text-fill: red;"
-                    : "-fx-text-fill: green;"
-            )
+        if (exportMode) {
+            if (matches.isEmpty()) {
+                setStatus( text    = "Found no files matching selected images.",
+                           style   = green,
+                           tooltip = "No issues with folder.",
+                           icon    = FontAwesome.Glyph.THUMBS_UP )
+            } else {
+                setStatus( text    = "Found (${matches.size()}) existing files matching selected images.",
+                           style   = red,
+                           tooltip = "Image files with matching names in selected folder: \n\n- ${matches.join('\n- ')}",
+                           icon    = FontAwesome.Glyph.THUMBS_DOWN )
+            }
         } else {
-            folderStatusLabel.setText( "No .geojson files found in selected folder" )
-            folderStatusLabel.setStyle(
-                exportMode
-                    ? "-fx-text-fill: green;"
-                    : "-fx-text-fill: red;"
-            )
+            if (nonMatches.isEmpty()) {
+                setStatus( text    = "Found files matching all selected images.",
+                           style   = green,
+                           tooltip = "No issues with folder.",
+                           icon    = FontAwesome.Glyph.THUMBS_UP )
+            } else if (matches.isEmpty()) {
+                setStatus( text    = "Could not find any files matching selected images.", 
+                           style   = red, 
+                           tooltip = "No image files found.", 
+                           icon    = FontAwesome.Glyph.THUMBS_DOWN )
+            } else {
+                setStatus( text    = "Could not find (${nonMatches.size()}) files matching selected images.",
+                           style   = red,
+                           tooltip = "Image files that could not be found in selected folder: \n\n- ${nonMatches.join('\n- ')}",
+                           icon    = FontAwesome.Glyph.THUMBS_DOWN )
+            }
         }
     }
     
-    def browseButton = new Button( "Browse..." )
+    def browseButton = new Button( " Browse" )
+    addIcon( browseButton, FontAwesome.Glyph.FOLDER_OPEN_ALT, 14 )
     setTT( browseButton, "Select folder" )
     def selectedFolderPath = prePrefsMap.selectedFolder ?: null
-    
-    def browseButtonWidth = getTextWidth( browseButton.getText(), browseButton.getFont() )
-    browseButton.setPrefWidth( browseButtonWidth * 1.5 )
-    browseButton.setMinWidth( browseButtonWidth * 1.5 )
-    browseButton.setMaxWidth( browseButtonWidth * 1.5 )
     
     // Making a binding to stop from importing from an empty folder
     def hasGeoJsonFiles = Bindings.createBooleanBinding(
@@ -584,45 +722,25 @@ def codePreferences = runOnFxThreadAndWait {
             hasGeoJsonFiles.invalidate()
             folderPathLabel.setText( formatFolderPathView( selectedFolderPath, folderPathLabelWidth, folderPathLabelFont ) )
             setTT( folderPathLabel, selectedFolderPath )
-            updateFolderStatus( selectedFolderPath )
+            geojsonFileNames = getGeojsonFileNames( selectedFolderPath )
+            matchInfo = getMatchingFiles( geojsonFileNames, imagesBox.CBs )
+            updateFolderStatus( selectedFolderPath, matchInfo )
             folderPathLabel.setStyle( "-fx-opacity: 0.8;" )
         }
     }
     
-    updateFolderStatus( selectedFolderPath )
-    folderRow.getChildren().addAll( folderTitleLabel, folderPathLabel, browseButton )
-    
-    
-    
-    // CENTER PANEL: Image Selection
-    def imageNames = project.getImageList().collect { it.getImageName() }
-    def imagesBox = makeCheckboxBox( "Select images", "images", imageNames.collect { [name: it] } )
-    def currentImageCB = new CheckBox( "Current Image" )
-    imagesBox.header.getChildren().addAll( imagesBox.selectAll, imagesBox.spacer, currentImageCB )
-    imagesBox.CBs.each { it.setSelected( it.getText() in prePrefsMap.selectedImages  ) }
-    BorderPane.setMargin( imagesBox.box, new Insets( 0, 15, 0, 0 ) )
-    
-    if (currentEntry) {
-        def currentCB = imagesBox.CBs.find { it.getText() == currentEntry.getImageName() }
-        currentImageCB.selectedProperty().bindBidirectional(
-            currentCB.selectedProperty()
-        )
-        
-        // If current image was only one selected, will update to new image
-        if (prePrefsMap.currentImage == true && prePrefsMap.selectedImages.size() == 1) {
-            imagesBox.CBs.each { it.setSelected( false ) }
-            currentImageCB.setSelected( true )
+    imagesBox.CBs.each { cb ->
+        cb.selectedProperty().addListener { obs, oldVal, newVal ->
+            matchInfo = getMatchingFiles( geojsonFileNames, imagesBox.CBs )
+            updateFolderStatus( selectedFolderPath, matchInfo )
         }
-    } else {
-        currentImageCB.setDisable( true )
     }
     
-    // Setting and updating tooltip for current image checkbox
-    currentImageCB.selectedProperty().addListener { obs, oldVal, newVal ->
-        setTT( currentImageCB, currentImageCB.isSelected() ? "Deselect current image" : "Select current image" )
-    }
+    geojsonFileNames = getGeojsonFileNames( selectedFolderPath )
+    matchInfo = getMatchingFiles( geojsonFileNames, imagesBox.CBs )
+    updateFolderStatus( selectedFolderPath, matchInfo )
     
-    root.center = imagesBox.box
+    folderRow.getChildren().addAll( folderTitleLabel, folderPathLabel, browseButton )
     
     
     
@@ -653,8 +771,9 @@ def codePreferences = runOnFxThreadAndWait {
     
     // SECOND TO TOP ROW: mode, remove objects, include parents buttons
     // Setting the text on the confirm button to which mode is pre-selected (import vs export)
-    def preSelectedModeBtn = modeButtons.getSelectedToggle() as RadioButton
-    okBtn.setText( preSelectedModeBtn.getText() )
+    boolean exportPreSelected = exportButton.isSelected()
+    okBtn.setText( exportPreSelected ? " Export" : " Import" )
+    addIcon( okBtn, exportPreSelected ? FontAwesome.Glyph.UPLOAD : FontAwesome.Glyph.DOWNLOAD, 14 )
     
     // Spacer pushes Include Parents to far right
     def modeSpacer = new Region()
@@ -678,17 +797,18 @@ def codePreferences = runOnFxThreadAndWait {
     modeButtons.selectedToggleProperty().addListener { obs, oldToggle, newToggle ->
         boolean exportSelected = (newToggle == exportButton)
         
-        okBtn.setText( exportSelected ? "Export" : "Import" )
+        okBtn.setText( exportSelected ? " Export" : " Import" )  
+        addIcon( okBtn, exportSelected ? FontAwesome.Glyph.UPLOAD : FontAwesome.Glyph.DOWNLOAD, 14 )    
         
         pathClassBox.box.setVisible( exportSelected )     
         setTT( includeParentsCheck, exportSelected ? exportParentsTTtext : importParentsTTtext )  
-        updateFolderStatus( selectedFolderPath )
+        updateFolderStatus( selectedFolderPath, matchInfo )
     }
     
     // Creating row and adding children
     def secondRow = new HBox( 10 )
+    secondRow.setPadding( new Insets( 0, 0, 10, 0 ) )
     secondRow.getChildren().addAll(
-        modeLabel,
         exportButton,
         importButton,
         modeSpacer,
@@ -1102,14 +1222,18 @@ import javafx.scene.Scene
 import javafx.scene.control.*
 import javafx.scene.control.ButtonBar.ButtonData
 import javafx.scene.layout.*
+import javafx.scene.input.MouseEvent
 import javafx.scene.text.Text
 import javafx.scene.text.Font
 import javafx.stage.*
 import javafx.beans.binding.Bindings
 import com.google.gson.GsonBuilder
 import com.google.gson.Gson
+import qupath.lib.gui.tools.IconFactory
+import org.controlsfx.glyphfont.FontAwesome
 
 
 // Comments for tool launcher icon and tooltip
+// ORDER: 1
 // ICON: EXCHANGE
 // Export or import annotations with parents
