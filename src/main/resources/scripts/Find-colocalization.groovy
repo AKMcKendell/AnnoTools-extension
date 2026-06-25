@@ -215,6 +215,12 @@ def makeSelectAllCB( List groupCBs ) {
     return selectAllCB
 }
 
+// Function: Create icon for UI
+def addIcon( node, iconCode, int size ) {
+    def icon = IconFactory.createNode( iconCode, size )
+    node.setGraphic( icon )
+}
+
 
 // Function: Make a box with checkboxes and a modifiable header
 def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0 ) {
@@ -280,7 +286,8 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
         cb.setSelected( !cb.isSelected() )
     }
     
-    def clearBtn = new Button( "Clear" )
+    def clearBtn = new Button()
+    addIcon( clearBtn, FontAwesome.Glyph.TRASH, 14 )
     clearBtn.setOnAction { checkboxes.each { it.setSelected( false ) } }
     setTT( clearBtn, "Clear selected items" )
     
@@ -366,17 +373,20 @@ if (prefsFile.length() > 0L && prefsFile.getText() != "null") {
 def codePreferences = runOnFxThreadAndWait {
     
     def dialog = new Dialog()
-    dialog.setTitle( "Colocalization tool" )
+    dialog.setTitle( "What colocalization objects should be generated?" )
     
     def root = new BorderPane()
     root.setPrefHeight( 350 )
     
     dialog.getDialogPane().buttonTypes.addAll( ButtonType.OK, ButtonType.CANCEL )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
+    okBtn.setText( "Make Objects" )
+    ButtonBar.setButtonUniformSize( okBtn, false )
     
     
     // TOP ROW: Nesting checkbox
-    def nestDropdownLabel = new Label( "Nest new objects?" )
+    def nestDropdownLabel = new Label( " Nest new objects?" )
+    addIcon( nestDropdownLabel, FontAwesome.Glyph.SIGN_IN, 14 )
     nestDropdownLabel.setPadding( new Insets( 5 ) )
     
     def nestDropdown = new ComboBox()
@@ -432,12 +442,13 @@ def codePreferences = runOnFxThreadAndWait {
     def bottomSpacer = new Region()
     HBox.setHgrow( bottomSpacer, Priority.ALWAYS )
     def outputPreviewLabel = new Label()
+    addIcon( outputPreviewLabel, FontAwesome.Glyph.EYE, 14 )
     outputPreviewLabel.setPadding( new Insets( 5 ) )
     setTT( outputPreviewLabel, "Preview of output class name" )
     def class1Prev = new SimpleStringProperty( "Class1" )
     def class2Prev = new SimpleStringProperty( "Class2" )
     outputPreviewLabel.textProperty().bind(
-        Bindings.concat( "Output class preview: ", class1Prev, "-", class2Prev )
+        Bindings.concat( " Output class preview: ", class1Prev, "-", class2Prev )
     )
     
     def bottomRow = new HBox( 5 )
@@ -727,7 +738,11 @@ import org.locationtech.jts.geom.*
 import org.locationtech.jts.geom.util.PolygonalExtracter
 import org.locationtech.jts.operation.union.UnaryUnionOp
 
+import qupath.lib.gui.tools.IconFactory
+import org.controlsfx.glyphfont.FontAwesome
+
 
 // Comments for tool launcher icon and tooltip
+// ORDER: 3
 // ICON: COPY
 // Make new annotations at the intersection of others
