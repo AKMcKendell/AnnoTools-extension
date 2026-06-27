@@ -33,7 +33,10 @@ class ViewerSessionVars {
     boolean      freeView
     String       freeViewMode
     List         freeViewModes
+    def          nonZoomedViewerState
+    String       scrollFilterKey
     boolean      instructions
+    boolean      zoomed
     def          showing
     def          annoStateMap
     def          statesAndColors
@@ -53,7 +56,6 @@ class ViewerSessionVars {
     List         toggleChannels
     String       annosToCheck
     List<String> reviewerStates
-    List         btnMap
     String       reviewerClassification
     Map          codePreferences
     def          prefsFile
@@ -108,6 +110,16 @@ class ActionStrings {
     static final String BACK_TO_LAST          = "Back to last"
     static final String REVIEW_ALL            = "Review all"
 }
+
+// Class for UI elements to update when needed
+class elements {
+    GridPane grid
+    List     btnMap
+    VBox     headerBox
+    Map      channelEntryByChanName
+}
+
+def uiElements = new elements()
 
 
 // --- Functions ---
@@ -179,104 +191,355 @@ def generateVisibleColor( List existingColors, List reservedColors, double minDi
     return newColor
 }
 
-// Function for buttons and response
-def buildAndWireAlertUI( Alert alert, ViewerSessionVars session ) {
-    def grid = new GridPane()
-    grid.setHgap( 10 )
-    grid.setVgap( 10 )
-    grid.setPadding( new Insets( 10 ) )
-    grid.setAlignment( Pos.CENTER )
+// Function to stop nodes from becoming highlighted when clicked
+def disableNonEditableFocusTraversal( Node node ) {
     
+    node.setFocusTraversable( false )
     
-    // --- Adding buttons, map, and shortcuts ---
-    session.btnMap = []
+    if (node instanceof Parent) {
+        node.getChildrenUnmodifiable().each {
+            disableNonEditableFocusTraversal( it )
+        }
+    }
+}
+
+// Function to make instructions and add circles of specific color if wanted (add null to make new line)
+def makeLines( List lineSpec ) {
+    def flatLine = lineSpec.flatten()
+    def listOfLines = []
     
-    if (session.freeView) {
-        def cancelBtnType = new ButtonType( "(C)ancel", ButtonData.HELP_2 )
-        
-        alert.getButtonTypes().addAll( cancelBtnType )
-        
-        def cancelBtn = alert.getDialogPane().lookupButton( cancelBtnType )
-        
-        session.btnMap << [ btn: cancelBtn, key: ["c", (KeyCode.ESCAPE)],           action: [{ alert.setResult( ActionStrings.CANCEL ) }]        ]
-        session.btnMap << [                 key: "i",                               action: [{ alert.setResult( ActionStrings.INSTRUCTIONS ) }]  ]
-        session.btnMap << [                 key: "a", click: MouseButton.MIDDLE,    action: [{ alert.setResult( ActionStrings.TOGGLE_ANNOS ) }]  ]
-        session.btnMap << [                           click: MouseButton.PRIMARY,   action: [{ alert.setResult( ActionStrings.CENTER_VIEWER ) }] ]
-        session.btnMap << [                           click: MouseButton.SECONDARY, action: [{ alert.setResult( ActionStrings.TOGGLE_FOCUS ) }]  ]
-        
+    def line = new HBox( 8 )
+    line.setAlignment( Pos.CENTER_LEFT )
     
-    } else if (session.classifierMode) {
-        def cancelBtnType = new ButtonType( "(C)ancel",     ButtonData.HELP_2 )
-        def removeBtnType = new ButtonType( "(R)emove All", ButtonData.HELP_2 )
-        def backBtnType   = new ButtonType( "(B)ack",       ButtonData.BACK_PREVIOUS )
-        def nextBtnType   = new ButtonType( "(N)ext",       ButtonData.YES )
-        
-        alert.getButtonTypes().addAll( cancelBtnType, removeBtnType, backBtnType, nextBtnType )
-        
-        def cancelBtn = alert.getDialogPane().lookupButton( cancelBtnType )
-        def removeBtn = alert.getDialogPane().lookupButton( removeBtnType )
-        def backBtn   = alert.getDialogPane().lookupButton( backBtnType )
-        def nextBtn   = alert.getDialogPane().lookupButton( nextBtnType )
-        
-        setTT( removeBtn, "Remove current user's classifications from all objects in current group" )
-        setTT( nextBtn, "Lock in current classifications and move to next group" )
-        setTT( backBtn, "Go back to previous group" )
-        
-        session.btnMap << [ btn: cancelBtn, key: ["c", (KeyCode.ESCAPE)],           action: [{ alert.setResult( ActionStrings.CANCEL ) }]       ]
-        session.btnMap << [                 key: "i",                               action: [{ alert.setResult( ActionStrings.INSTRUCTIONS ) }] ]
-        session.btnMap << [ btn: removeBtn, key: "r",                               action: [{ alert.setResult( ActionStrings.REMOVE ) }]       ]
-        session.btnMap << [ btn: backBtn,   key: "b", click: MouseButton.BACK,      action: [{ alert.setResult( ActionStrings.BACK ) }]         ]
-        session.btnMap << [ btn: nextBtn,   key: "n", click: MouseButton.FORWARD,   action: [{ alert.setResult( ActionStrings.NEXT ) }]         ]
-        session.btnMap << [                 key: "a", click: MouseButton.MIDDLE,    action: [{ alert.setResult( ActionStrings.TOGGLE_ANNOS ) }] ]
-        session.btnMap << [                           click: MouseButton.PRIMARY,   action: [{ alert.setResult( ActionStrings.TOGGLE_CLASS ) }] ]
-        session.btnMap << [                           click: MouseButton.SECONDARY, action: [{ alert.setResult( ActionStrings.TOGGLE_FOCUS ) }] ]
-        
-    
-    } else if (session.reviewerMode) {
-        def cancelBtnType = new ButtonType( "(C)ancel", ButtonData.HELP_2 )
-        def backBtnType   = new ButtonType( "(B)ack",   ButtonData.HELP_2 )
-        
-        alert.getButtonTypes().addAll( cancelBtnType, backBtnType )
-        
-        def cancelBtn = alert.getDialogPane().lookupButton( cancelBtnType )
-        def backBtn   = alert.getDialogPane().lookupButton( backBtnType )
-        
-        setTT( backBtn, "Go back to previous annotation" )
-        
-        session.btnMap << [ btn: cancelBtn, key: ["c", (KeyCode.ESCAPE)],        action: [{ alert.setResult( ActionStrings.CANCEL ) }]       ]
-        session.btnMap << [                 key: "i",                            action: [{ alert.setResult( ActionStrings.INSTRUCTIONS ) }] ]
-        session.btnMap << [ btn: backBtn,   key: "b",                            action: [{ alert.setResult( ActionStrings.BACK ) }]         ]
-        session.btnMap << [                 key: "a", click: MouseButton.MIDDLE, action: [{ alert.setResult( ActionStrings.TOGGLE_ANNOS ) }] ]
-        session.btnMap << [                           click: MouseButton.BACK,   action: [{ alert.setResult( ActionStrings.BACK ) }]         ]
-        
-        // Reviewer classification buttons
-        session.reviewerStates.eachWithIndex { state, idx ->
-            String numberTrigger = (idx + 6)
-            def revBtnType = new ButtonType( "(${numberTrigger}) ${state}" )
-            alert.getButtonTypes().add( revBtnType )
-            def revBtn = alert.getDialogPane().lookupButton( revBtnType )
-            ButtonBar.setButtonUniformSize( revBtn, false )
-            int classColorInt = session.statesAndColors.find { it.state == state }.color
-            def c = new AwtColor( classColorInt, true )
-            def btnStyle = "-fx-effect: dropshadow(gaussian, rgba(${c.red},${c.green},${c.blue},1), 3, 0.4, 0, 0)"
-            revBtn.setStyle( btnStyle )
+    flatLine.each { item ->
+        if (item == null) {
+            // end current line & start a new one
+            if (!line.getChildren().isEmpty()) { listOfLines << line }
+            line = new HBox( 8 )
+            line.setAlignment( Pos.CENTER_LEFT )
             
-            def action = [
-                { session.reviewerClassification = state },
-                { alert.setResult( ActionStrings.SET_CLASS ) }
-            ]
+        } else if (item instanceof Color) {
+            def circle = new Circle( 6 )
+            circle.setStroke( item )
+            circle.setStrokeWidth( 2 )
+            circle.setFill( Color.TRANSPARENT )
+            line.getChildren().add( circle )
             
-            session.btnMap << [
-                btn   : revBtn,
-                key   : numberTrigger,
-                action: action,
-                group : "revClass"
-            ]
+        } else {
+            def label = new Label( item.toString() )
+            label.setStyle( "-fx-font-size: 1.1em;" )
+            line.getChildren().add( label )
         }
     }
     
+    // add the last line if it has content
+    if (!line.getChildren().isEmpty()) { listOfLines << line }
     
-    // Creating button styles 
+    return listOfLines
+}
+
+// Function to generate instruction lines with colored circles
+def makeStateColorInstructions( List map ) {
+    def instructionList = []
+    boolean containsColorU = map.any { it.containsKey( "colorU" ) }
+    
+    map.eachWithIndex { it, i ->
+        instructionList << null
+        instructionList << "       ${i+1}. "
+        instructionList << intToFx( it.color )
+        if (it.containsKey( "colorU" )) {
+            instructionList << "/"
+            instructionList << intToFx( it.colorU )
+            instructionList << " -> ${it.state}"
+        } else {
+            instructionList << (containsColorU ? "          -> ${it.state}" : " -> ${it.state}")
+        }
+        if (it.containsKey( "count" )) {
+            instructionList << "(${it.count})"
+        }
+        instructionList << null
+    }
+    return instructionList
+}
+
+// Function for buttons and response
+def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElements, queue ) {
+    uiElements.grid = new GridPane()
+    uiElements.grid.setHgap( 10 )
+    uiElements.grid.setVgap( 10 )
+    uiElements.grid.setPadding( new Insets( 10 ) )
+    uiElements.grid.setAlignment( Pos.CENTER )
+    alert.getDialogPane().setContent( uiElements.grid )
+    
+    
+    // --- Adding buttons, map, and shortcuts ---
+    uiElements.btnMap = []
+    
+    uiElements.btnMap << [ name   : ActionStrings.CANCEL,
+                           action : { queue.put( ActionStrings.CANCEL ) },
+                           btnType: new ButtonType( "(C)ancel", ButtonData.HELP_2 ),
+                           key    : ["c", (KeyCode.ESCAPE)],
+                           active : false]
+                           
+    uiElements.btnMap << [ name   : ActionStrings.INSTRUCTIONS,
+                           action : { queue.put( ActionStrings.INSTRUCTIONS ) },
+                           key    : "i",
+                           active : false ]
+                           
+    uiElements.btnMap << [ name   : ActionStrings.TOGGLE_ANNOS,
+                           action : { queue.put( ActionStrings.TOGGLE_ANNOS ) },
+                           key    : "a",
+                           click  : MouseButton.MIDDLE,
+                           active : false ]
+                           
+    uiElements.btnMap << [ name   : ActionStrings.CENTER_VIEWER,
+                           action : { queue.put( ActionStrings.CENTER_VIEWER ) },
+                           click  : MouseButton.PRIMARY,
+                           active : false ]
+    
+    uiElements.btnMap << [ name   : ActionStrings.TOGGLE_FOCUS,
+                           action : { queue.put( ActionStrings.TOGGLE_FOCUS ) },
+                           click  : MouseButton.SECONDARY,
+                           active : false ]
+                           
+    uiElements.btnMap << [ name   : ActionStrings.REMOVE,
+                           action : { queue.put( ActionStrings.REMOVE ) },
+                           btnType: new ButtonType( "(R)emove All", ButtonData.HELP_2 ),
+                           btnTT  : "Remove current user's classifications from all objects in current group",
+                           key    : "r",
+                           active : false ]
+                           
+    uiElements.btnMap << [ name   : ActionStrings.BACK,
+                           action : { queue.put( ActionStrings.BACK ) },
+                           btnType: new ButtonType( "(B)ack", ButtonData.BACK_PREVIOUS ),
+                           btnTT  : "Go back to previous ${session.classifierMode ? 'group' : 'annotation'}",
+                           key    : "b",
+                           click  : MouseButton.BACK,
+                           active : false ]
+                           
+    uiElements.btnMap << [ name   : ActionStrings.NEXT,
+                           action : { queue.put( ActionStrings.NEXT ) },
+                           btnType: new ButtonType( "(N)ext", ButtonData.YES ),
+                           btnTT  : "Lock in current classifications and move to next group",
+                           key    : "n",
+                           click  : MouseButton.FORWARD,
+                           active : false ]
+                           
+    uiElements.btnMap << [ name   : ActionStrings.TOGGLE_CLASS,
+                           action : { queue.put( ActionStrings.TOGGLE_CLASS ) },
+                           click  : MouseButton.PRIMARY,
+                           active : false ]
+                           
+    // Reviewer classification buttons
+    session.reviewerStates.eachWithIndex { state, idx ->
+        String numberTrigger = (idx + 6)
+        String btnText = "(${numberTrigger}) ${state}"
+        def revBtnType = new ButtonType( btnText, ButtonData.RIGHT )
+        int classColorInt = session.statesAndColors.find { it.state == state }.color
+        def c = new AwtColor( classColorInt, true )
+        def btnStyle = "-fx-effect: dropshadow(gaussian, rgba(${c.red},${c.green},${c.blue},1), 3, 0.4, 0, 0)"
+        
+        String btnTT = "Set classification to \"${state}\""
+        
+        def action = {
+            session.reviewerClassification = state
+            queue.put( ActionStrings.SET_CLASS )
+        }
+        
+        uiElements.btnMap << [
+            name    : btnText,
+            btnType : revBtnType,
+            btnTT   : btnTT,
+            btnStyle: btnStyle,
+            key     : numberTrigger,
+            action  : action,
+            group   : "revClass",
+            active  : false
+        ]
+    }
+    
+    // Channel-specific buttons
+    session.channelSpecifics.eachWithIndex { ch, idx ->
+        String numberTrigger = (idx + 1)
+        
+        // Creating and adding them
+        String btnText = "(${idx+1}) ${ch.name}"
+        ToggleButton btn = new ToggleButton( btnText )
+        
+        // Setting their functions
+        def action = {
+            session.toggleChannel = ch.name
+            queue.put( ActionStrings.TOGGLE_CHANNEL )
+        }
+        
+        // Adding to button map
+        uiElements.btnMap << [
+            name  : btnText,
+            chName: ch.name,
+            btn   : btn,
+            btnPos: [idx, 2],
+            key   : numberTrigger,
+            action: action,
+            group : "channel",
+            active: false
+        ]
+    }
+    
+    uiElements.channelEntryByChanName = uiElements.btnMap
+        .findAll { it.group == "channel" }
+        .collectEntries { [(it.chName): it] }
+    
+    // Wire ButtonType-backed buttons
+    List btnTypes = uiElements.btnMap.findAll { it.containsKey( "btnType" ) }.btnType
+    alert.getButtonTypes().setAll( btnTypes )
+
+    uiElements.btnMap.each {
+        if (it.containsKey( "btnType" )) { it.btn = alert.getDialogPane().lookupButton( it.btnType ) }
+        if (it.containsKey( "btnTT" ))   { setTT( it.btn, it.btnTT ) }
+        if (it.group == "revClass")      { ButtonBar.setButtonUniformSize( it.btn, false ) }
+        if (it.containsKey( "btnStyle" )){ it.btn.setStyle( it.btnStyle ) }
+    }
+
+    // --- Wire button actions ONCE, guard with active flag ---
+    uiElements.btnMap.each { entry ->
+        if (!entry.btn) return
+        if (entry.btn instanceof ToggleButton) {
+            entry.btn.setOnAction { if (entry.active) entry.action() }
+        } else {
+            entry.btn.addEventFilter( ActionEvent.ACTION ) { event ->
+                if (entry.active) entry.action()
+                event.consume()
+            }
+        }
+    }
+
+    // --- Keyboard shortcuts ONCE ---
+    def scene = alert.getDialogPane().getScene()
+
+    def shiftDown        = new AtomicBoolean( false )
+    def shiftLongPressed = new AtomicBoolean( false )
+    // Single PauseTransition, reused
+    def shiftHoldTimer   = new PauseTransition( Duration.millis( 500 ) )
+    shiftHoldTimer.setOnFinished {
+        if (shiftDown.get() && !shiftLongPressed.get()) {
+            shiftLongPressed.set( true )
+            queue.put( ActionStrings.TOGGLE_FREE_VIEW )
+        }
+    }
+
+    scene.setOnKeyPressed { event ->
+        def key = event.getText() ? event.getText().toLowerCase() : event.getCode()
+
+        if (key == KeyCode.SHIFT) {
+            if (shiftDown.getAndSet( true )) return
+            shiftLongPressed.set( false )
+            shiftHoldTimer.playFromStart()
+            return
+        }
+
+        // Dynamic lookup — no rewiring needed on mode change
+        uiElements.btnMap.find { it.active && key in it.key }?.action()
+    }
+
+    scene.setOnKeyReleased { event ->
+        if (event.getCode() == KeyCode.SHIFT) {
+            shiftHoldTimer.stop()
+            if (shiftDown.get() && !shiftLongPressed.get() && session.freeView) {
+                queue.put( ActionStrings.SWITCH_FREE_VIEW_MODE )
+            }
+            shiftDown.set( false )
+        }
+    }
+
+    // --- Mouse dispatcher ONCE ---
+    def viewScene          = session.view.getScene()
+    def originalDispatcher = viewScene.getEventDispatcher()  // captured once, never stale
+
+    def handledClickEvent  = new AtomicBoolean( false )
+    def handledScrollEvent = new AtomicBoolean( false )
+
+    viewScene.setEventDispatcher( new EventDispatcher() {
+        Event dispatchEvent( Event event, EventDispatchChain tail ) {
+            if (alert.isShowing() && (event instanceof MouseEvent || event instanceof ScrollEvent)) {
+
+                if (!handledClickEvent.get() && event instanceof MouseEvent
+                        && event.getEventType() == MouseEvent.MOUSE_PRESSED) {
+                    uiElements.btnMap.find { it.active && it.click == event.getButton() }?.action()
+                    handledClickEvent.set( true )
+                }
+
+                if (event instanceof MouseEvent && event.getEventType() == MouseEvent.MOUSE_RELEASED) {
+                    handledClickEvent.set( false )
+                }
+
+                if (!handledScrollEvent.get() && event instanceof ScrollEvent) {
+                    if (session.freeView && session.freeViewMode == ActionStrings.ZOOM) {
+                        return originalDispatcher.dispatchEvent( event, tail )
+                    } else if (Math.abs( event.getDeltaY() ) >= 1) {
+                        queue.put( event.getDeltaY() > 0 ? ActionStrings.BRIGHT_UP : ActionStrings.BRIGHT_DOWN )
+                        handledScrollEvent.set( true )
+                    }
+                }
+
+                if (event instanceof ScrollEvent) { handledScrollEvent.set( false ) }
+
+                event.consume()
+                return event
+            }
+            return originalDispatcher.dispatchEvent( event, tail )
+        }
+    } )
+
+    // --- Restore dispatcher on close ---
+    alert.setOnHidden {
+        viewScene.setEventDispatcher( originalDispatcher )
+    }
+
+    // --- Header box (built once, content replaced by updateUI) ---
+    uiElements.headerBox = new VBox()
+    uiElements.headerBox.setPadding( new Insets( 10 ) )
+    uiElements.headerBox.setStyle("""
+        -fx-background-color: -fx-box-border, -fx-control-inner-background;
+        -fx-background-insets: 0, 1;
+    """)
+    alert.getDialogPane().setHeader( uiElements.headerBox )
+}
+
+// Function to update UI
+def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue ) { 
+    
+    // --- Determine active set ---
+    Set availableBtns = [ActionStrings.INSTRUCTIONS, ActionStrings.CANCEL, ActionStrings.TOGGLE_ANNOS] as LinkedHashSet
+    if (session.freeView) {
+        availableBtns.addAll( ActionStrings.INSTRUCTIONS, ActionStrings.CENTER_VIEWER, ActionStrings.TOGGLE_FOCUS )
+    } else if (session.classifierMode) {
+        availableBtns.addAll( ActionStrings.REMOVE, ActionStrings.BACK, ActionStrings.NEXT, 
+                              ActionStrings.TOGGLE_CLASS, ActionStrings.TOGGLE_FOCUS )
+    } else if (session.reviewerMode) {
+        availableBtns.addAll( ActionStrings.CANCEL, ActionStrings.TOGGLE_ANNOS, ActionStrings.BACK )
+        uiElements.btnMap.findAll { it.group == "revClass" }.each { availableBtns << it.name }
+    }
+    uiElements.btnMap.findAll { it.group == "channel" }.each { availableBtns << it.name }
+
+    // --- Diff and update ---
+    List previouslyActive = uiElements.btnMap.findAll { it.active }.name
+
+    uiElements.btnMap.each { it.active = (it.name in availableBtns) }
+
+    uiElements.btnMap.each {
+        it.btn?.setVisible( it.active )
+        it.btn?.setManaged( it.active )
+    }
+
+    // Grid membership: only touch entries that changed
+    uiElements.btnMap.findAll { it.containsKey( "btnPos" ) }.each {
+        boolean wasActive = it.name in previouslyActive
+        if (wasActive && !it.active) { uiElements.grid.getChildren().remove( it.btn ) }
+        if (!wasActive && it.active) { uiElements.grid.add( it.btn, *it.btnPos ) }
+    }
+    
+    
+    // Creating button styles
     def standardStyle = """
         -fx-padding: 6 10 6 10;
         -fx-border-radius: 6;
@@ -293,26 +556,15 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session ) {
     def unselectedStyle = "-fx-effect: innershadow(gaussian, rgba(0,0,0,0.9), 100, 0, 0, 0);" // Channel off style
     
     // - Channel-specific buttons -
+    List chBtns = uiElements.btnMap.findAll { it.group == "channel" }
     session.channelSpecifics.eachWithIndex { ch, i ->
-        String numberTrigger = (i + 1)
         
         // Creating and adding them
-        ToggleButton btn = new ToggleButton( "(${i+1}) ${ch.name}" )
-        grid.add( btn, i, 2 )
-        ch.state ? btn.setSelected( true ) : null
+        def entry = uiElements.channelEntryByChanName[ ch.name ]
+        def btn = entry.btn
         
-        // Setting their functions
-        def action = [
-            { session.toggleChannel = ch.name },
-            { alert.setResult( ActionStrings.TOGGLE_CHANNEL ) }
-        ]
+        btn.setSelected( ch.state )
         
-        session.btnMap << [
-            btn   : btn,
-            key   : numberTrigger,
-            action: action,
-            group : "channel"
-        ]
         // Adding their style
         boolean highlighted = (ch.channel == session.channelToChange) && (!session.freeView || session.freeViewMode != ActionStrings.ZOOM) // Setting initial style
         def buttonStyle = highlighted ? highlightedStyle( ch.channel ) : btn.isSelected() ? selectedStyle : unselectedStyle
@@ -322,207 +574,14 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session ) {
         setTT( btn, chBtnTooltipText )
     }
     
-    // Adding grid of buttons to the UI
-    alert.getDialogPane().setContent( grid )
     
-    // --- Setting button actions ---
-    session.btnMap.each { entry -> entry.btn?.setOnAction { entry.action.each { it() } } }
-    
-    // - Setting "X" to exit -
-    alert.setOnShown {
-        def stage = alert.getDialogPane().getScene().getWindow()
-        stage.setOnCloseRequest {
-            alert.setResult( ActionStrings.CANCEL )
-        }
-    }
-    
-    
-    // --- Creating keyboard shortcuts ---
-    def scene = alert.getDialogPane().getScene()
-    
-    // SHIFT tap vs hold state
-    def shiftDown        = new AtomicBoolean( false )
-    def shiftLongPressed = new AtomicBoolean( false )
-    PauseTransition shiftHoldTimer = null
-    
-    // - When a key is pressed enter this -
-    scene.setOnKeyPressed { event ->
-        
-        def key = event.getText() ? event.getText().toLowerCase() : event.getCode()
-        
-        // SHIFT tap vs hold reader
-        if (event.getCode() == KeyCode.SHIFT) {
-            // Ignore key-repeat: only start once per press
-            if (shiftDown.getAndSet( true )) return
-            
-            shiftLongPressed.set( false )
-            
-            // Start a 0.5s timer; if SHIFT still down then -> ToggleFreeView
-            shiftHoldTimer = new PauseTransition( Duration.millis( 500 ) )
-            shiftHoldTimer.setOnFinished {
-                if (shiftDown.get() && !shiftLongPressed.get()) {
-                    shiftLongPressed.set( true )
-                    alert.setResult( ActionStrings.TOGGLE_FREE_VIEW )
-                }
-            }
-            shiftHoldTimer.playFromStart()
-            return
-        }
-        
-        // If key is valid for settings, running action
-        session.btnMap.find { key in it.key }?.action.each { it() }
-    }
-    
-    // - SHIFT release handler -
-    scene.setOnKeyReleased { event ->
-        if (event.getCode() == KeyCode.SHIFT) {
-            
-            // Cancel timer if it's still running
-            if (shiftHoldTimer != null) {
-                shiftHoldTimer.stop()
-            }
-            
-            // If we did NOT fire the long-hold action, treat as tap
-            if (shiftDown.get() && !shiftLongPressed.get() && session.freeView) {
-                alert.setResult( ActionStrings.SWITCH_FREE_VIEW_MODE )
-            }
-            
-            shiftDown.set( false )
-        }
-    }
-    
-    
-    // --- Creating mouse shortcuts ---
-    def viewScene = session.view.getScene()
-    
-    // Save original dispatcher so we can restore later
-    def originalDispatcher = viewScene.getEventDispatcher()
-    viewScene.getProperties().put( "prevDispatcher", originalDispatcher )
-    
-    // Flags (so we only act once per input and avoid repeats)
-    def handledClickEvent  = new AtomicBoolean( false )
-    def handledScrollEvent = new AtomicBoolean( false )
-    
-    // - Detecting clicks/scrolls for certain inputs -
-    // Setting wrapper to read clicks/scrolls and stop them from being passed beyond script  
-    def wrapper
-    
-    wrapper = new EventDispatcher() {
-        Event dispatchEvent( Event event, EventDispatchChain tail ) {
-            // If the window is up, intercept ALL mouse/scroll so QuPath never sees them
-            if (alert.isShowing() && (event instanceof MouseEvent || event instanceof ScrollEvent)) {
-                
-                // Click annotation focus toggling
-                if (!handledClickEvent.get() && event instanceof MouseEvent && event.getEventType() == MouseEvent.MOUSE_PRESSED) {
-                    def button = event.getButton()
-                    
-                    // - If key is valid for settings, running action -
-                    if (button in session.btnMap.click) {
-                        session.btnMap.find { it.click == button }?.action.each { it() }                   
-                    } else {
-                        alert.setResult( "" )
-                    }
-                    handledClickEvent.set( true )
-                }
-                
-                // Scroll-wheel brightness changing
-                if (!handledScrollEvent.get() && event instanceof ScrollEvent) {
-                    
-                    if (session.freeView && session.freeViewMode == ActionStrings.ZOOM) {
-                        return originalDispatcher.dispatchEvent( event, tail )
-                        
-                    } else if (Math.abs( event.getDeltaY() ) >= 1) { // Only full scroll clicks passed along
-                        alert.setResult( event.getDeltaY() > 0 ? ActionStrings.BRIGHT_UP : ActionStrings.BRIGHT_DOWN )
-                        handledScrollEvent.set( true )
-                    }
-                }
-                
-                // Prevent QuPath from seeing input (no "please wait until script has finished" notification)
-                event.consume()
-                return event
-            }
-        }
-    }
-    
-    viewScene.setEventDispatcher( wrapper )
-    
-    // When the alert closes, restore the original dispatcher
-    alert.setOnHidden {
-        def orig = viewScene?.getProperties()?.remove( "prevDispatcher" )
-        if (orig instanceof EventDispatcher) { viewScene.setEventDispatcher( orig ) }
-    }
-    
-    
-    // --- Adding conditional instructions ---
-    def headerBox = new VBox( 0 )
-    headerBox.setPadding( new Insets( 10 ) )
-    headerBox.setStyle("""
-        -fx-background-color: -fx-box-border, -fx-control-inner-background;
-        -fx-background-insets: 0, 1;
-    """)
-    
-    // Closure to make instructions and add circles of specific color if wanted (add null to make new line)
-    def makeLines = { List lineSpec ->
-        lineSpec = lineSpec.flatten()
-        def listOfLines = []
-        
-        def line = new HBox( 8 )
-        line.setAlignment( Pos.CENTER_LEFT )
-        
-        lineSpec.each { item ->
-            if (item == null) {
-                // end current line & start a new one
-                if (!line.getChildren().isEmpty()) { listOfLines << line }
-                line = new HBox( 8 )
-                line.setAlignment( Pos.CENTER_LEFT )
-                
-            } else if (item instanceof Color) {
-                def circle = new Circle( 6 )
-                circle.setStroke( item )
-                circle.setStrokeWidth( 2 )
-                circle.setFill( Color.TRANSPARENT )
-                line.getChildren().add( circle )
-                
-            } else {
-                def label = new Label( item.toString() )
-                label.setStyle( "-fx-font-size: 1.1em;" )
-                line.getChildren().add( label )
-            }
-        }
-        
-        // add the last line if it has content
-        if (!line.getChildren().isEmpty()) { listOfLines << line }
-        
-        headerBox.getChildren().addAll( listOfLines )
-    }
     
     String brightnessChannel = session.channelToChange ? session.channelSpecifics.find { it.channel == session.channelToChange }.name : "none"
     String scrollInstructions = session.freeViewMode == ActionStrings.ZOOM ? "Zoom" : "Brightness [${brightnessChannel}]"
     boolean annosOn = getAnnosVisibilityStatus( session )
-    List revClassKeys = session.btnMap.findAll { it.group == "revClass" }?.key
-    List channelKeys = session.btnMap.findAll { it.group == "channel" }?.key
+    List revClassKeys = uiElements.btnMap.findAll { it.group == "revClass" }.key
+    List channelKeys = uiElements.btnMap.findAll { it.group == "channel" }.key
     
-    def makeStateColorInstructions = { map ->
-        def instructionList = []
-        boolean containsColorU = map.any { it.containsKey( "colorU" ) }
-        map.eachWithIndex { it, i ->
-            instructionList << null
-            instructionList << "       ${i+1}. "
-            instructionList << intToFx( it.color )
-            if (it.containsKey( "colorU" )) {
-                instructionList << "/"
-                instructionList << intToFx( it.colorU )
-                instructionList << " -> ${it.state}"
-            } else {
-                instructionList << (containsColorU ? "          -> ${it.state}" : " -> ${it.state}")
-            }
-            if (it.containsKey( "count" )) {
-                instructionList << "(${it.count})"
-            }
-            instructionList << null
-        }
-        return instructionList
-    }
     
     // Instruction lines
     List closedInstructionsI = ["(I) Show instructions", null]
@@ -544,12 +603,15 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session ) {
     List highlightClassColorsI = makeStateColorInstructions( session.highlightStatesAndColorsMap )
     
     
+    List instructionLines
+    
     // Conditionally building instructions
     if (!session.instructions) {
-        makeLines( closedInstructionsI )
+        instructionLines = makeLines( closedInstructionsI )
     
     } else if (session.freeView) {
-        makeLines( [openInstructionsI,
+        instructionLines = makeLines( [
+                    openInstructionsI,
                     toggleAnnosI,
                     moveViewerI,
                     changeFocusI,
@@ -558,19 +620,21 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session ) {
                     exitFvI,
                     "", null,
                     "${session.classifyingName} classifications from ${session.classifierMode ? session.userName : session.classifiers}:",
-                    highlightClassColorsI] )
+                    highlightClassColorsI ] )
         
     } else if (session.reviewerMode) {
-        makeLines( [openInstructionsI, 
+        instructionLines = makeLines( [
+                    openInstructionsI,
                     toggleAnnosI,
                     goBackI,
                     toggleChannelI,
                     changeBrightI, 
                     setRevClassI, 
-                    enterFvI] )
+                    enterFvI ] )
     
     } else {
-        makeLines( [openInstructionsI,
+        instructionLines = makeLines( [
+                    openInstructionsI,
                     toggleAnnosI,
                     goBackI,
                     toggleChannelI,
@@ -578,10 +642,14 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session ) {
                     cycleClassI,
                     classColorsI,
                     changeFocusI,
-                    enterFvI] )
+                    enterFvI ] )
     }
     
-    alert.getDialogPane().setHeader( headerBox )
+    uiElements.headerBox.getChildren().setAll( instructionLines )
+    
+    def dialogPane = alert.getDialogPane()
+    dialogPane.getScene()?.getWindow()?.sizeToScene()
+    disableNonEditableFocusTraversal( dialogPane )
 }
 
 // Function for changing viewer center/zoom
@@ -804,21 +872,6 @@ def changeBrightness( String changeDirection, ViewerSessionVars session ) {
     }
 }
 
-// Function to return QuPath to pre-script state
-def restoreToPrescript( ViewerSessionVars session ) {
-    Platform.runLater { 
-        session.overlayOptions.setShowAnnotations( true )
-        session.view.removeEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-        PathPrefs.annotationStrokeThicknessProperty().set( session.oldAnnoThickness )
-        session.overlayOptions.setOpacity( 1 )
-    }
-    
-    def addedDets = session.hierarchy.getDetectionObjects()
-    session.hierarchy.removeObjects( addedDets, true ) 
-    session.allClassAnnos.each { it.setColor( null ) }
-    fireHierarchyUpdate() 
-}
-
 // Function to check if a single annotation matches specific metadata classification(s)
 def matchesMdClassification( annoToCheck, List sameValues, List anyValues, boolean diffValues, ViewerSessionVars session ) {
     
@@ -855,6 +908,108 @@ def filterForUserKey( List annosToCheck, boolean shouldHaveKey, ViewerSessionVar
     annosToCheck = annosToCheck.findAll { anno ->
         shouldHaveKey ? containsUserKey( anno, session ) : !containsUserKey( anno, session )
     }
+}
+
+// Function to conditionally toggle the viewer focus to/away from an annotation
+def toggleFocus( ViewerSessionVars session, List annos ) {
+    if (!session.zoomed) {
+        def mouseCoords = getCursorPosition( session )
+        
+        for (anno in annos) {
+            def roi = anno.getROI()
+            
+            // Check if the mouse point lies inside the selected ROI and focus into it if so
+            if (roi.contains( mouseCoords.x, mouseCoords.y )) {
+                
+                session.nonZoomedViewerState = saveViewerState( session )
+                
+                changeViewer( roi.getCentroidX(), roi.getCentroidY(), roi.getBoundsWidth() * 2,
+                              roi.getBoundsHeight() * 2, false, session )
+                session.zoomed = true
+                
+                double[] lastZoom = [0.0]  // Declared here so zoomListener can reference it
+                
+                // Add a zoom listener so if zoomed after focus, it's no longer considered focues
+                // Meaning right clicking again won't take back to previous viewer
+                def zoomListener = new QuPathViewerListener() {
+                
+                    @Override
+                    void visibleRegionChanged( QuPathViewer v, java.awt.Shape shape ) {
+                        double currentZoom = v.getDownsampleFactor()
+                        if (Math.abs( currentZoom - lastZoom[0] ) > 0.1) {
+                            v.removeViewerListener( this )
+                            session.zoomed = false
+                        }
+                    }
+                
+                    @Override
+                    void imageDataChanged( QuPathViewer v, ImageData before, ImageData after ) {}
+                    @Override
+                    void selectedObjectChanged( QuPathViewer v, PathObject pathObj ) {}
+                    @Override
+                    void viewerClosed( QuPathViewer v ) {
+                        v.removeViewerListener( this )
+                    }
+                }
+                
+                // Small pause to track only when zoom actually changes
+                PauseTransition pause = new PauseTransition( Duration.millis( 200 ) )
+                pause.setOnFinished {
+                    lastZoom[0] = session.viewer.getDownsampleFactor()
+                    session.viewer.addViewerListener( zoomListener )
+                }
+                pause.play()
+                
+                break
+            }
+        }
+    } else {
+        restoreViewerState( session.nonZoomedViewerState, session )
+        session.zoomed = false
+    }
+}
+
+// Function to add a scroll blocker (stops qupath from zooming in viewer)
+def addScrollBlocker( ViewerSessionVars session ) {
+    if (!session.view.properties[ session.scrollFilterKey ]) {
+        session.view.addEventFilter( ScrollEvent.ANY, session.scrollBlocker )
+        session.view.properties[ session.scrollFilterKey ] = true
+    }
+}
+
+// Function to remove a scroll blocker (stops qupath from zooming in viewer)
+def removeScrollBlocker( ViewerSessionVars session ) {
+    session.view.removeEventFilter( ScrollEvent.ANY, session.scrollBlocker )
+    session.view.properties.remove( session.scrollFilterKey )
+}
+
+// Function to switch fre view modes
+def switchFVmode( ViewerSessionVars session ) {
+    int freeViewModeIdx = session.freeViewModes.indexOf( session.freeViewMode )
+    session.freeViewMode = session.freeViewModes[ (freeViewModeIdx + 1) % session.freeViewModes.size() ]     
+    
+    Platform.runLater {
+        if (session.freeViewMode == ActionStrings.ZOOM && session.view.properties[ session.scrollFilterKey ]) {
+            removeScrollBlocker( session )
+        } else if (session.freeViewMode == ActionStrings.BRIGHTNESS && !session.view.properties[ session.scrollFilterKey ]) {
+            addScrollBlocker( session )
+        }
+    }
+}
+
+// Function to return QuPath to pre-script state
+def restoreToPrescript( ViewerSessionVars session ) {
+    Platform.runLater { 
+        session.overlayOptions.setShowAnnotations( true )
+        removeScrollBlocker( session )
+        PathPrefs.annotationStrokeThicknessProperty().set( session.oldAnnoThickness )
+        session.overlayOptions.setOpacity( 1 )
+    }
+    
+    def addedDets = session.hierarchy.getDetectionObjects()
+    session.hierarchy.removeObjects( addedDets, true ) 
+    session.allClassAnnos.each { it.setColor( null ) }
+    fireHierarchyUpdate() 
 }
 
 // Function to generate classifier/reviewer key for metadata
@@ -899,6 +1054,7 @@ def colorAnnosFromMap( ViewerSessionVars session, List mdKeys ) {
         def md = anno.getMetadata()
         
         List classifierVals = mdKeys.collect { md.get( it ) }.unique().sort()
+        classifierVals.replaceAll { it == null ? "unclassified" : it }
         boolean sameClass = classifierVals.size() == 1
         
         def classMatch = session.highlightStatesAndColorsMap.find { it.state == classifierVals }
@@ -1004,18 +1160,6 @@ def writePreferencesMaptoJSON( preferencesFile, preferencesMap ) {
     preferencesFile.text = outputGson.toJson( preferencesMap )
 }
 
-// Function to stop nodes from becoming highlighted when clicked
-def disableNonEditableFocusTraversal( Node node ) {
-    
-    node.setFocusTraversable( false )
-    
-    if (node instanceof Parent) {
-        node.getChildrenUnmodifiable().each {
-            disableNonEditableFocusTraversal( it )
-        }
-    }
-}
-
 // Function to create icon for UI
 def addIcon( node, iconCode, int size ) {
     def icon = IconFactory.createNode( iconCode, size )
@@ -1056,7 +1200,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         def exportPrefsBtnType = new ButtonType( " Export", ButtonBar.ButtonData.LEFT )
         def importPrefsBtnType = new ButtonType( " Import", ButtonBar.ButtonData.LEFT )
         
-        preferencesDialog.getDialogPane().getButtonTypes().addAll( ButtonType.OK, ButtonType.CANCEL, exportPrefsBtnType, importPrefsBtnType )
+        preferencesDialog.getDialogPane().getButtonTypes().setAll( ButtonType.OK, ButtonType.CANCEL, exportPrefsBtnType, importPrefsBtnType )
         def okBtn = preferencesDialog.getDialogPane().lookupButton( ButtonType.OK )
         def cancelBtn = preferencesDialog.getDialogPane().lookupButton( ButtonType.CANCEL )
         def exportPrefsBtn = preferencesDialog.getDialogPane().lookupButton( exportPrefsBtnType )
@@ -1137,7 +1281,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         // Make bounding box, add children, assign to UI and set spacing
         def topRow = new HBox( 10 )
         topRow.setPadding( new Insets( 8 ) )
-        topRow.getChildren().addAll(
+        topRow.getChildren().setAll(
             classifierModeBtn,
             reviewerModeBtn,
             topRowSpacer,
@@ -1289,9 +1433,9 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         // Set field to add a user when button clicked
         addUserBtn.setOnAction {
+            addUserBtn.setDisabled( true )
             userRow.getChildren().set( 0, userInputField )
             userInputField.requestFocus()
-            addUserBtn.setDisabled( true )
             addedUser = false
         }
         
@@ -1326,11 +1470,13 @@ def getCodePreferences( ViewerSessionVars session ) {
             removeUserDropdown.valueProperty().removeListener( removeUserListener )
             userRow.getChildren().set( 0, users )
             users.show()
+            removeUserBtn.setDisabled( false )
         }
         
         // Action when remove user button is clicked
         String prevSelectedUser
         removeUserBtn.setOnAction {
+            removeUserBtn.setDisabled( true )
             removedUser = false
             
             prevSelectedUser = users.getValue()
@@ -1352,6 +1498,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             if (wasShowing && !isShowing && !removedUser) {
                 removeUserDropdown.valueProperty().removeListener( removeUserListener )
                 userRow.getChildren().set( 0, users )
+                removeUserBtn.setDisabled( false )
             }
         }
         
@@ -1459,7 +1606,7 @@ def getCodePreferences( ViewerSessionVars session ) {
                 }
             }.unique().collect { getClassifyingNameFromKey(it) }.unique()
             
-            classifyingNameOptions.addAll( uniqueNames )
+            classifyingNameOptions.setAll( uniqueNames )
             classifyingNameOptions = classifyingNameOptions.unique()
             classifyingNameSelection.setItems( classifyingNameOptions )
             if (!classifyingNameSelection.getItems().isEmpty()) {
@@ -1519,7 +1666,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         def leftBox = new VBox( 10 )
         leftBox.setPadding( new Insets( 5 ) )
         leftBox.setPrefWidth( 265 )
-        leftBox.getChildren().addAll(
+        leftBox.getChildren().setAll(
             userLabelRow, userRow,
             annoClassLabel, annoClassField,
             classifyingNameLabelRow, classifyingNameRow,
@@ -1596,7 +1743,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         // Assemble top row and add as child of larger channel box
         def topChannelRow = new HBox( 5 )
         topChannelRow.setPadding( new Insets( 8 ) )
-        topChannelRow.getChildren().addAll( channelsLabel, fullChannelsBoxSpacer, clearChannelsBtn )
+        topChannelRow.getChildren().setAll( channelsLabel, fullChannelsBoxSpacer, clearChannelsBtn )
         
         // Add channel checkboxes and listeners to enforce max number
         channelCheckboxes.each { cb ->
@@ -1630,7 +1777,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         // Adding all the pieces together
         def channelsScroll = new ScrollPane( channelCBsBox )
         channelsScroll.setFitToWidth( true )
-        fullChannelsBox.getChildren().addAll( topChannelRow, channelsScroll )
+        fullChannelsBox.getChildren().setAll( topChannelRow, channelsScroll )
         root.right = fullChannelsBox
         
         preferencesDialog.getDialogPane().content = root
@@ -1753,7 +1900,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             HBox.setHgrow( unconfirmedTailSpacer, Priority.ALWAYS )
             
             def draggableHeaderRow = new HBox( 6 )
-            draggableHeaderRow.getChildren().addAll(
+            draggableHeaderRow.getChildren().setAll(
                 dragHeaderSpacer,
                 comboHeaderSpacer,
                 confirmedHeader,
@@ -2201,7 +2348,7 @@ def getCodePreferences( ViewerSessionVars session ) {
                         
                         def row = new HBox( 10 )
                         row.setPadding( new Insets( 2, 0, 2, 0 ) )
-                        row.getChildren().addAll(
+                        row.getChildren().setAll(
                             dragHandle,
                             stateBoxes[ idx ],
                             colorPickers[ idx ],
@@ -3061,7 +3208,7 @@ while (true) {
     // Classification & Review warnings
     addWarningCheck( [session.reviewerMode, !session.checkingWork, (notFullyClassifiedImages.size() == imageList.size())],
         "No images have complete classifications to review from ${usersWithIncompleteClassifications}.",
-        "Classification & Review" )
+        "Classification & Review", generalCriteria )
     addWarningCheck( [session.reviewerMode, !session.checkingWork, (notFullyClassifiedImages.size() !in [0, imageList.size()])],
         "${notFullyClassifiedImages.size()} image(s) have incomplete classifications to review from ${usersWithIncompleteClassifications}.",
         "Classification & Review", notFullyClassifiedImages )
@@ -3189,6 +3336,7 @@ Platform.runLater {
 // =====================
 
 // ===== EXECUTION =====
+def queue = new LinkedBlockingQueue<String>()
 // -- Loop to review image (can repeat on another image) --
 imageLoop:
 for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex++) {
@@ -3284,12 +3432,11 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     }
     
     // Turning off clicking and scrolling temporarily during the script to be brought back after
-    def scrollFilterKey = "scrollFilterON"
+    session.scrollFilterKey = "scrollFilterON"
     session.scrollBlocker = { ScrollEvent e ->
         e.consume()  // stops QuPath from zooming
     } as EventHandler<ScrollEvent>
-    session.view.addEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-    session.view.properties[ scrollFilterKey ] = true
+    addScrollBlocker( session )
     
     // Establishing/storing important variables
     @Field int numTrues
@@ -3297,10 +3444,9 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     numTrues = findAnnosByMdClassification( session.allClassAnnos, all = ["true"], any = [], diff = false, session ).size()
     numMixed = findAnnosByMdClassification( session.allClassAnnos, all = [], any = ["maybe"], diff = true, session ).size()
     def obj
-    def zoomed = false
+    session.zoomed = false
     session.channelToChange = session.channelSpecifics.find { it.state }?.channel // Defaulting to first channel that's on
     def nonFreeViewerState
-    def nonZoomedViewerState
     boolean firstLoop = true
     
     
@@ -3316,6 +3462,28 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     
     currentImageLoop:
     while (true) {
+        
+        // Create and show the alert (control panel) once
+        def alert = null
+        runOnFxThreadAndWait {
+            alert = new Alert( AlertType.NONE )
+            alert.setX( dialogOffsetX )
+            alert.setY( dialogOffsetY )
+            alert.initModality( Modality.NONE )
+        
+            // Pass queue in so buttons put results instead of closing
+            buildAndWireAlertUI( alert, session, uiElements, queue )
+            updateUI( alert, session, uiElements, queue )
+        
+            alert.show()
+            
+            def window = alert.getDialogPane().getScene().getWindow()
+            window.setOnCloseRequest { queue.put( ActionStrings.CANCEL ) }
+            window.setAlwaysOnTop( true )
+            window.focusedProperty().addListener { obs, wasFocused, isFocused ->
+                if (!isFocused) { window.requestFocus() }
+            }
+        }
         
         // --- FOR NON-REVIEWER MODE: BIN CLASSIFICATIONS ---
         if (session.classifierMode) {
@@ -3397,29 +3565,23 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 annoGroupLoop:
                 while (true) { 
                     
-                    // -- Showing buttons and waiting for user input --
-                    def result = runOnFxThreadAndWait {
-                        
-                        def alert = new Alert( AlertType.NONE )
-                        alert.setTitle( !session.freeView ? 
+                    // Updating control panel
+                    Platform.runLater {
+                        alert.setTitle(!session.freeView ?
                             "Group ${binIndex + 1} of ${sortedBins.size()} — ${session.userName}" :
-                            "Free View" )
-                        alert.setX( dialogOffsetX )
-                        alert.setY( dialogOffsetY )
-                        alert.initModality( Modality.NONE ) // modeless so the viewer can still get input
-                        
-                        // Running button function
-                        buildAndWireAlertUI( alert, session )
-                        
-                        // Reading response and passing it on (making sure a string gets passed)
-                        return alert.showAndWait().orElse( ActionStrings.CANCEL )
+                            "Free View")
+                            
+                            updateUI( alert, session, uiElements, queue )
                     }
+                    
+                    def result = queue.take()
                     
                     
                     // -- Checking/acting on user response --
                     switch (result) {
                         
-                        case (ActionStrings.CANCEL): // If cancelled, puts back previous settings
+                        case (ActionStrings.CANCEL):
+                            runOnFxThreadAndWait { alert.getDialogPane()?.getScene()?.getWindow()?.hide() }
                             restoreToPrescript( session )
                             changeGrid( wasGridOn, gridX, gridY, session )
                             codePreferences.instructions = session.instructions
@@ -3441,27 +3603,8 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                             break
                             
                         case (ActionStrings.TOGGLE_FOCUS): // Looking for annotation mouse is over
-                            if (!zoomed) {
-                                def mouseCoords = getCursorPosition( session )
-                                def toggleableAnnos = session.freeView ? annotations : group
-                                for (anno in toggleableAnnos) {
-                                    def roi = anno.getROI()
-                                    
-                                    // Check if the mouse point lies inside the selected ROI and focus into it if so
-                                    if (roi.contains( mouseCoords.x, mouseCoords.y )) {
-                                        
-                                        nonZoomedViewerState = saveViewerState( session )
-                                        
-                                        changeViewer( roi.getCentroidX(), roi.getCentroidY(), roi.getBoundsWidth() * 2,
-                                                      roi.getBoundsHeight() * 2, false, session )
-                                        zoomed = true
-                                        break
-                                    }
-                                }
-                            } else {
-                                restoreViewerState( nonZoomedViewerState, session )
-                                zoomed = false
-                            }
+                            List toggleableAnnos = session.freeView ? annotations : group
+                            toggleFocus( session, toggleableAnnos )  
                             break
                             
                         case (ActionStrings.TOGGLE_CLASS):
@@ -3478,7 +3621,9 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                             break
                             
                         case (ActionStrings.TOGGLE_ANNOS): // Toggling annotations on or off
-                            getAnnosVisibilityStatus( session ) ? session.prevSelectedAnnos = getSelectedObjects().collect { it } : selectObjects( session.prevSelectedAnnos )
+                            getAnnosVisibilityStatus( session ) ? 
+                                session.prevSelectedAnnos = getSelectedObjects().collect { it } : 
+                                selectObjects( session.prevSelectedAnnos )
                             toggleAnnos( session )
                             break
                        
@@ -3530,44 +3675,25 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     session.hierarchy.getSelectionModel().clearSelection()
                                     nonFreeViewerState = saveViewerState( session )
                                     session.viewer.zoomToFit()
+                                    removeScrollBlocker( session )
                                     
-                                    // Remove scroll locker if entering free view
-                                    if (session.freeViewMode == ActionStrings.ZOOM && session.view.properties[ scrollFilterKey ]) {
-                                        session.view.removeEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-                                        session.view.properties.remove( scrollFilterKey )
-                                    }
                                 } else {
+                                    
+                                    restoreViewerState( nonFreeViewerState, session )
                                     session.overlayOptions.setShowDetections( true )
                                     session.overlayOptions.setShowGrid( true )
                                     session.overlayOptions.setOpacity( 1 )
                                     session.freeViewMode = session.freeViewModes[0]
                                     session.allClassAnnos.each { it.setColor( session.currentAnnoColorsMap[ it ] ) }                        
                                     selectObjects( session.prevSelectedAnnos )
-                                    restoreViewerState( nonFreeViewerState, session )
-                                    
-                                    // Add back scroll lock if leaving free view
-                                    if (!session.view.properties[ scrollFilterKey ]) {
-                                        session.view.addEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-                                        session.view.properties[ scrollFilterKey ] = true
-                                    }
-                                    zoomed = false
+                                    addScrollBlocker( session )
+                                    session.zoomed = false
                                 }
                             }
                             break
                             
                         case (ActionStrings.SWITCH_FREE_VIEW_MODE):
-                            freeViewModeIdx = session.freeViewModes.indexOf( session.freeViewMode )
-                            session.freeViewMode = session.freeViewModes[ (freeViewModeIdx + 1) % session.freeViewModes.size() ]
-                            
-                            Platform.runLater {
-                                if (session.freeViewMode == ActionStrings.ZOOM && session.view.properties[ scrollFilterKey ]) {
-                                    session.view.removeEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-                                    session.view.properties.remove( scrollFilterKey )
-                                } else if (session.freeViewMode == ActionStrings.BRIGHTNESS && !session.view.properties[ scrollFilterKey ]) {
-                                    session.view.addEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-                                    session.view.properties[ scrollFilterKey ] = true
-                                }
-                            }
+                            switchFVmode( session )
                             break
                             
                         case (ActionStrings.CENTER_VIEWER):
@@ -3584,6 +3710,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                     }
                     firstLoop = false
                 }
+                firstLoop = false
             }
         
         
@@ -3627,28 +3754,22 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 annoLoop:
                 while (true) {
                     
-                    // -- Showing buttons and waiting for user input --
-                    def result = runOnFxThreadAndWait {
-                        
-                        def alert = new Alert( AlertType.NONE )
+                    // Updating control panel
+                    Platform.runLater {
                         alert.setTitle( !session.freeView ? 
                             "Annotation ${annoIndex + 1} of ${annotations.size()} — ${session.userName}" :
                             "Free View" )
-                        alert.setX( dialogOffsetX )
-                        alert.setY( dialogOffsetY )
-                        alert.initModality( Modality.NONE ) // modeless so the viewer can still get input
-                        
-                        // Running button function
-                        buildAndWireAlertUI( alert, session )
-                        
-                        // Reading response and passing it on
-                        return alert.showAndWait().orElse( ActionStrings.CANCEL )
+                    
+                        updateUI( alert, session, uiElements, queue )
                     }
+                    
+                    def result = queue.take()
                     
                     // -- Checking/acting on user response --
                     switch (result) {
                         
                         case (ActionStrings.CANCEL): // If cancelled, puts back previous settings
+                            runOnFxThreadAndWait { alert.getDialogPane()?.getScene()?.getWindow()?.hide() }
                             restoreToPrescript( session )
                             changeGrid( wasGridOn, gridX, gridY, session )
                             codePreferences.instructions = session.instructions
@@ -3662,7 +3783,6 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                         case (ActionStrings.BACK):
                             if (annoIndex > 0) {
                                 annoIndex -= 2
-                                firstLoop = false
                                 break annoLoop
                             } else {
                                 session.message = "Already at first annotation."
@@ -3670,7 +3790,9 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                 break
                             }
                         case (ActionStrings.TOGGLE_ANNOS): // Toggling annotations on or off
-                            getAnnosVisibilityStatus( session ) ? session.prevSelectedAnnos = getSelectedObjects().collect { it } : selectObjects( session.prevSelectedAnnos )
+                            getAnnosVisibilityStatus( session ) ? 
+                                session.prevSelectedAnnos = getSelectedObjects().collect { it } : 
+                                selectObjects( session.prevSelectedAnnos )
                             toggleAnnos( session )
                             break
                         
@@ -3713,11 +3835,8 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     session.hierarchy.getSelectionModel().clearSelection()
                                     session.viewer.zoomToFit()
                                     session.overlayOptions.setShowGrid( false )
+                                    removeScrollBlocker( session )
                                     
-                                    if (session.freeViewMode == ActionStrings.ZOOM && session.view.properties[ scrollFilterKey ]) {
-                                        session.view.removeEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-                                        session.view.properties.remove( scrollFilterKey )
-                                    }
                                 } else {
                                     
                                     restoreViewerState( nonFreeViewerState, session )
@@ -3726,86 +3845,19 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     session.allClassAnnos.each { it.setColor( session.currentAnnoColorsMap[ it ] ) }                          
                                     selectObjects( session.prevSelectedAnnos )
                                     session.overlayOptions.setShowGrid( true )
-                                    
-                                    if (!session.view.properties[ scrollFilterKey ]) {
-                                        session.view.addEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-                                        session.view.properties[ scrollFilterKey ] = true
-                                    }
+                                    addScrollBlocker( session )
                                 }
                             }
                             break
                         
                         // Switch scroll mode in free view between zoom and brightness
                         case (ActionStrings.SWITCH_FREE_VIEW_MODE):
-                            freeViewModeIdx = session.freeViewModes.indexOf( session.freeViewMode )
-                            session.freeViewMode = session.freeViewModes[ (freeViewModeIdx + 1) % session.freeViewModes.size() ]     
-                            
-                            Platform.runLater {
-                                if (session.freeViewMode == ActionStrings.ZOOM && session.view.properties[ scrollFilterKey ]) {
-                                    session.view.removeEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-                                    session.view.properties.remove( scrollFilterKey )
-                                } else if (session.freeViewMode == ActionStrings.BRIGHTNESS && !session.view.properties[ scrollFilterKey ]) {
-                                    session.view.addEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-                                    session.view.properties[ scrollFilterKey ] = true
-                                }
-                            }
+                            switchFVmode( session )
                             break
                         
                         // Zoom in on specific annotation
                         case (ActionStrings.TOGGLE_FOCUS):
-                            if (!zoomed) {
-                                def mouseCoords = getCursorPosition( session )
-                                for (anno in session.allClassAnnos) {
-                                    def annoRoi = anno.getROI()
-                                    
-                                    // Check if the mouse point lies inside the selected ROI and focus into it if so
-                                    if (annoRoi.contains( mouseCoords.x, mouseCoords.y )) {
-                                        changeViewer( annoRoi.getCentroidX(), annoRoi.getCentroidY(), annoRoi.getBoundsWidth() * 2,
-                                                      annoRoi.getBoundsHeight() * 2, false, session )
-                                        nonZoomedViewerState = saveViewerState( session )
-                                        zoomed = true
-                                    
-                                        double[] lastZoom = [0.0]  // Declared here so zoomListener can reference it
-                                        
-                                        // Add a zoom listener so if zoomed after focus, it's no longer considered focues
-                                        // Meaning right clicking again won't take back to previous viewer
-                                        def zoomListener = new QuPathViewerListener() {
-                                        
-                                            @Override
-                                            void visibleRegionChanged( QuPathViewer v, java.awt.Shape shape ) {
-                                                double currentZoom = v.getDownsampleFactor()
-                                                if (Math.abs( currentZoom - lastZoom[0] ) > 0.1) {
-                                                    v.removeViewerListener( this )
-                                                    zoomed = false
-                                                }
-                                            }
-                                        
-                                            @Override
-                                            void imageDataChanged( QuPathViewer v, ImageData before, ImageData after ) {}
-                                            @Override
-                                            void selectedObjectChanged( QuPathViewer v, PathObject pathObj ) {}
-                                            @Override
-                                            void viewerClosed( QuPathViewer v ) {
-                                                v.removeViewerListener( this )
-                                            }
-                                        }
-                                        
-                                        // Small pause to track only when zoom actually changes
-                                        PauseTransition pause = new PauseTransition( Duration.millis( 200 ) )
-                                        pause.setOnFinished {
-                                            lastZoom[0] = session.viewer.getDownsampleFactor()
-                                            session.viewer.addViewerListener( zoomListener )
-                                        }
-                                        pause.play()
-                                    
-                                        break
-                                    }
-                                }
-                            } else {
-                                restoreViewerState( nonZoomedViewerState, session )
-                                zoomed = false
-                            }
-                            
+                            toggleFocus( session, session.allClassAnnos )                 
                             break
                         
                         case (ActionStrings.CENTER_VIEWER):
@@ -3818,13 +3870,15 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                             String setClass = session.reviewerClassification
                             md.put( session.userKey, setClass )
                             annotation.setColor( session.statesAndColors.find { it.state == setClass }.color )
-                            firstLoop = false
                             break annoLoop
                     }
                     firstLoop = false
                 }
+                firstLoop = false
             }
         }
+        
+        runOnFxThreadAndWait { alert.getDialogPane()?.getScene()?.getWindow()?.hide() }
         
         fireHierarchyUpdate()
         
@@ -3833,7 +3887,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
         def moveToNextImage = runOnFxThreadAndWait {
             int imagesDone = imageIndex + 1
             int imagesToDo = session.imagesToProcess.size() - imagesDone
-            def alert = new Alert(Alert.AlertType.NONE)
+            alert = new Alert( Alert.AlertType.NONE )
             alert.setTitle( "Image complete! (${imagesToDo} images left)" )
             alert.setHeaderText( null )
             alert.setContentText( "Save classifications and move to next image?" )
@@ -3916,6 +3970,7 @@ import java.awt.Color as AwtColor
 import java.util.Collections
 import javafx.util.StringConverter
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
