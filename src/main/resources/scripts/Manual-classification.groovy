@@ -101,7 +101,6 @@ class ActionStrings {
     static final String TOGGLE_CLASS          = "ToggleClassification"
     static final String SET_CLASS             = "SetClassification"
     static final String TOGGLE_CHANNEL        = "ToggleChannel"
-    static final String CENTER_VIEWER         = "CenterViewer"
     static final String BRIGHT_UP             = "BrightUP"
     static final String BRIGHT_DOWN           = "BrightDOWN"
     static final String INSTRUCTIONS          = "Instructions"
@@ -204,62 +203,58 @@ def disableNonEditableFocusTraversal( Node node ) {
 }
 
 // Function to make instructions and add circles of specific color if wanted (add null to make new line)
-def makeLines( List lineSpec ) {
-    def flatLine = lineSpec.flatten()
-    def listOfLines = []
-    
-    def line = new HBox( 8 )
-    line.setAlignment( Pos.CENTER_LEFT )
-    
-    flatLine.each { item ->
-        if (item == null) {
-            // end current line & start a new one
-            if (!line.getChildren().isEmpty()) { listOfLines << line }
-            line = new HBox( 8 )
-            line.setAlignment( Pos.CENTER_LEFT )
-            
-        } else if (item instanceof Color) {
-            def circle = new Circle( 6 )
-            circle.setStroke( item )
-            circle.setStrokeWidth( 2 )
-            circle.setFill( Color.TRANSPARENT )
-            line.getChildren().add( circle )
-            
+def makeLines( List<List> rows ) {
+    def grid = new GridPane()
+    grid.setHgap( 12 )
+    grid.setVgap( 5 )
+    grid.setPadding( new Insets( 4, 0, 4, 0 ) )
+
+    ColumnConstraints keyCol = new ColumnConstraints()
+    keyCol.setHalignment( HPos.RIGHT )
+    ColumnConstraints descCol = new ColumnConstraints()
+    descCol.setHalignment( HPos.LEFT )
+    grid.getColumnConstraints().addAll( keyCol, descCol )
+
+    rows.eachWithIndex { row, rowIdx ->
+        if (row.size() == 1) {
+            def label = new Label( row[0].toString() )
+            label.setStyle( "-fx-font-weight: bold;" )
+            GridPane.setColumnSpan( label, GridPane.REMAINING )
+            grid.add( label, 0, rowIdx )
         } else {
-            def label = new Label( item.toString() )
-            label.setStyle( "-fx-font-size: 1.1em;" )
-            line.getChildren().add( label )
+            def keyLabel = new Label( row[0].toString() )
+            keyLabel.setStyle( "-fx-font-weight: bold;" )
+            grid.add( keyLabel, 0, rowIdx )
+
+            def descBox = new HBox( 6 )
+            descBox.setAlignment( Pos.CENTER_LEFT )
+            row.drop(1).each { item ->
+                if (item instanceof Color) {
+                    def circle = new Circle( 6 )
+                    circle.setStroke( item )
+                    circle.setStrokeWidth( 2 )
+                    circle.setFill( Color.TRANSPARENT )
+                    descBox.getChildren().add( circle )
+                } else {
+                    descBox.getChildren().add( new Label( item.toString() ) )
+                }
+            }
+            grid.add( descBox, 1, rowIdx )
         }
     }
-    
-    // add the last line if it has content
-    if (!line.getChildren().isEmpty()) { listOfLines << line }
-    
-    return listOfLines
+    return grid
 }
 
 // Function to generate instruction lines with colored circles
 def makeStateColorInstructions( List map ) {
-    def instructionList = []
     boolean containsColorU = map.any { it.containsKey( "colorU" ) }
-    
-    map.eachWithIndex { it, i ->
-        instructionList << null
-        instructionList << "       ${i+1}. "
-        instructionList << intToFx( it.color )
-        if (it.containsKey( "colorU" )) {
-            instructionList << "/"
-            instructionList << intToFx( it.colorU )
-            instructionList << " -> ${it.state}"
-        } else {
-            instructionList << (containsColorU ? "          -> ${it.state}" : " -> ${it.state}")
-        }
-        if (it.containsKey( "count" )) {
-            instructionList << "(${it.count})"
-        }
-        instructionList << null
+    map.withIndex().collect { it, i ->
+        def row = ["", "${i+1}.", intToFx( it.color )]  // empty key -> number in desc column
+        if (it.containsKey( "colorU" )) { row += ["/", intToFx( it.colorU )] }
+        row << "-> ${it.state}"
+        if (it.containsKey( "count" )) { row << "(${it.count})" }
+        row
     }
-    return instructionList
 }
 
 // Function for buttons and response
@@ -290,11 +285,6 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
                            action : { queue.put( ActionStrings.TOGGLE_ANNOS ) },
                            key    : "a",
                            click  : MouseButton.MIDDLE,
-                           active : false ]
-                           
-    uiElements.btnMap << [ name   : ActionStrings.CENTER_VIEWER,
-                           action : { queue.put( ActionStrings.CENTER_VIEWER ) },
-                           click  : MouseButton.PRIMARY,
                            active : false ]
     
     uiElements.btnMap << [ name   : ActionStrings.TOGGLE_FOCUS,
@@ -458,20 +448,43 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
     def handledClickEvent  = new AtomicBoolean( false )
     def handledScrollEvent = new AtomicBoolean( false )
 
+    // outer scope
+    boolean isPanning = false
+    double panStartX = 0, panStartY = 0
+    final double DRAG_THRESHOLD = 5.0
+    
     viewScene.setEventDispatcher( new EventDispatcher() {
         Event dispatchEvent( Event event, EventDispatchChain tail ) {
             if (alert.isShowing() && (event instanceof MouseEvent || event instanceof ScrollEvent)) {
-
-                if (!handledClickEvent.get() && event instanceof MouseEvent
-                        && event.getEventType() == MouseEvent.MOUSE_PRESSED) {
-                    uiElements.btnMap.find { it.active && it.click == event.getButton() }?.action()
-                    handledClickEvent.set( true )
+                if (event instanceof MouseEvent && event.getEventType() == MouseEvent.MOUSE_PRESSED) {
+                    panStartX = event.x
+                    panStartY = event.y
+                    isPanning = false
+                    // action deferred to MOUSE_RELEASED
                 }
-
-                if (event instanceof MouseEvent && event.getEventType() == MouseEvent.MOUSE_RELEASED) {
+                if (event instanceof MouseEvent && event.getEventType() == MouseEvent.MOUSE_DRAGGED) {
+                    if (session.freeView) {
+                        double dx = event.x - panStartX
+                        double dy = event.y - panStartY
+                        if (Math.hypot(dx, dy) > DRAG_THRESHOLD) {
+                            isPanning = true
+                            session.viewer.setCenterPixelLocation(
+                                session.viewer.getCenterPixelX() - dx * session.viewer.getDownsampleFactor(),
+                                session.viewer.getCenterPixelY() - dy * session.viewer.getDownsampleFactor()
+                            )
+                            panStartX = event.x
+                            panStartY = event.y
+                        }
+                    }
+                }
+                if (!handledClickEvent.get() && event instanceof MouseEvent
+                        && event.getEventType() == MouseEvent.MOUSE_RELEASED) {
+                    if (!isPanning) {
+                        uiElements.btnMap.find { it.active && it.click == event.getButton() }?.action()
+                    }
+                    isPanning = false
                     handledClickEvent.set( false )
                 }
-
                 if (!handledScrollEvent.get() && event instanceof ScrollEvent) {
                     if (session.freeView && session.freeViewMode == ActionStrings.ZOOM) {
                         return originalDispatcher.dispatchEvent( event, tail )
@@ -480,9 +493,7 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
                         handledScrollEvent.set( true )
                     }
                 }
-
                 if (event instanceof ScrollEvent) { handledScrollEvent.set( false ) }
-
                 event.consume()
                 return event
             }
@@ -511,7 +522,7 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue
     // --- Determine active set ---
     Set availableBtns = [ActionStrings.INSTRUCTIONS, ActionStrings.CANCEL, ActionStrings.TOGGLE_ANNOS] as LinkedHashSet
     if (session.freeView) {
-        availableBtns.addAll( ActionStrings.INSTRUCTIONS, ActionStrings.CENTER_VIEWER, ActionStrings.TOGGLE_FOCUS )
+        availableBtns.addAll( ActionStrings.INSTRUCTIONS, ActionStrings.TOGGLE_FOCUS )
     } else if (session.classifierMode) {
         availableBtns.addAll( ActionStrings.REMOVE, ActionStrings.BACK, ActionStrings.NEXT, 
                               ActionStrings.TOGGLE_CLASS, ActionStrings.TOGGLE_FOCUS )
@@ -583,69 +594,42 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue
     List channelKeys = uiElements.btnMap.findAll { it.group == "channel" }.key
     
     
+    // Single-item = header/full-width row, two+ items = [key, ...description]
+    def I  = { String key, String desc = null -> desc ? [key, desc] : [key] }
+    def IC = { String key, Color c, String desc -> [key, c, desc] }  // for color rows
+    
     // Instruction lines
-    List closedInstructionsI = ["(I) Show instructions", null]
-    List openInstructionsI =   ["(I) Instructions:", null]
-    List toggleAnnosI =        [" - (A) Toggle annotations [${annosOn}].", null]
-    List fVscrollI =           ["       -> (SCROLL) ${scrollInstructions}.", null]
-    List moveViewerI =         [" - (LEFT CLICK VIEWER) Move viewer.", null]
-    List changeFocusI =        [" - (RIGHT CLICK ANNO) Change focus.", null]
-    List cycleClassI =         [" - (LEFT CLICK ANNO) Cycle class/colors.", null]
-    List switchFvModeI =       [" - (TAP SHIFT) Switch scroll function.", null]
-    List changeBrightI =       ["       -> (SCROLL) Brightness [${brightnessChannel}].", null]
-    List goBackI =             [" - (B) Return to previous ${session.reviewerMode ? 'annotation' : 'group'}.", null]
-    List enterFvI =            [" - (HOLD SHIFT) Enter free view", null]
-    List exitFvI =             [" - (HOLD SHIFT) Exit free view", null]
-    List setRevClassI =        [" - (${revClassKeys.join(', ')}) Set classification", null]
-    List toggleChannelI =      [" - (${channelKeys.join(', ')}) Toggle channel", null]
+    List toggleAnnosI  = [I("(A)",                          "Toggle annotations [${annosOn}]")]
+    List removeAnnosI  = [I("(R)",                          "Remove group classifications")]
+    List nextGroupI    = [I("(N)",                          "Save group and move to next")]
+    List fvScrollI     = [I("(scroll)",                     "${scrollInstructions}")]
+    List changeBrightI = [I("(scroll)",                     "Brightness [${brightnessChannel}]")]
+    List goBackI       = [I("(B)",                          "Return to previous ${session.reviewerMode ? 'annotation' : 'group'}")]
+    List cycleClassI   = [I("(left click)",                 "Cycle class/colors")]
+    List changeFocusI  = [I("(right click)",                "Focus on anno")]
+    List moveViewerI   = [I("(drag)",                       "Move viewer")]
+    List switchFvModeI = [I("(SHIFT)",                      "Switch scroll function")]
+    List enterFvI      = [I("(hold SHIFT)",                 "Enter free view")]
+    List exitFvI       = [I("(hold SHIFT)",                 "Exit free view")]
+    List setRevClassI  = [I("(${revClassKeys.join(', ')})", "Set classification")]
+    List toggleChanI   = [I("(${channelKeys.join(', ')})",  "Toggle channel")]
+    List openI         = [I("(I) Hide Instructions:",       " ")]
+    List closedI       = [I("(I) Show instructions",        " ")]
+    List emptyI        = [I("")]
     
-    List classColorsI =          makeStateColorInstructions( session.statesAndColors )
-    List highlightClassColorsI = makeStateColorInstructions( session.highlightStatesAndColorsMap )
+    List classColorsI     = makeStateColorInstructions( session.statesAndColors )
+    List showClassColorsI = makeStateColorInstructions( session.highlightStatesAndColorsMap )
+    List colorHeaderI     = [I( "${session.classifyingName} classifications from ${session.classifierMode ? session.userName : session.classifiers}:" )]
     
-    
-    List instructionLines
     
     // Conditionally building instructions
-    if (!session.instructions) {
-        instructionLines = makeLines( closedInstructionsI )
+    def instructionLines = !session.instructions ? closedI
+        : session.freeView    ? openI + emptyI + toggleAnnosI + moveViewerI + changeFocusI + switchFvModeI + fvScrollI + exitFvI + emptyI + colorHeaderI + showClassColorsI
+        : session.reviewerMode? openI + emptyI + toggleAnnosI + goBackI + toggleChanI + changeBrightI + setRevClassI + emptyI + enterFvI
+        :                       openI + emptyI + toggleAnnosI + nextGroupI + goBackI + removeAnnosI + toggleChanI + changeBrightI + changeFocusI + cycleClassI + classColorsI + emptyI + enterFvI
     
-    } else if (session.freeView) {
-        instructionLines = makeLines( [
-                    openInstructionsI,
-                    toggleAnnosI,
-                    moveViewerI,
-                    changeFocusI,
-                    switchFvModeI,
-                    fVscrollI,
-                    exitFvI,
-                    "", null,
-                    "${session.classifyingName} classifications from ${session.classifierMode ? session.userName : session.classifiers}:",
-                    highlightClassColorsI ] )
-        
-    } else if (session.reviewerMode) {
-        instructionLines = makeLines( [
-                    openInstructionsI,
-                    toggleAnnosI,
-                    goBackI,
-                    toggleChannelI,
-                    changeBrightI, 
-                    setRevClassI, 
-                    enterFvI ] )
     
-    } else {
-        instructionLines = makeLines( [
-                    openInstructionsI,
-                    toggleAnnosI,
-                    goBackI,
-                    toggleChannelI,
-                    changeBrightI,
-                    cycleClassI,
-                    classColorsI,
-                    changeFocusI,
-                    enterFvI ] )
-    }
-    
-    uiElements.headerBox.getChildren().setAll( instructionLines )
+    uiElements.headerBox.getChildren().setAll( makeLines( instructionLines ) )
     
     def dialogPane = alert.getDialogPane()
     dialogPane.getScene()?.getWindow()?.sizeToScene()
@@ -653,34 +637,56 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue
 }
 
 // Function for changing viewer center/zoom
-def changeViewer( double centerX, double centerY, double vWidth, double vHeight, boolean isUM, ViewerSessionVars session ) {
-    double width_uM = vWidth
-    double height_uM = vHeight
-    if (!isUM) {
-        // Convert annotation size from px to µm
-        width_uM  = width_uM  * session.pixelSize
-        height_uM = height_uM * session.pixelSize
-    }
-    
-    // Get viewer display area in pixels
-    double viewWidthPx  = session.view.getWidth()
-    double viewHeightPx = session.view.getHeight()
-    // Compute µm per screen pixel needed to fit
-    double umPerPxX = width_uM  / viewWidthPx
-    double umPerPxY = height_uM / viewHeightPx
-    double umPerPx = Math.max(umPerPxX, umPerPxY) * 1.1 // Add margin
-    // Convert to magnification
-    double mag = 0.25 / umPerPx
-    
-    // Spetial run so viewer doesn't "miss"
-    Platform.runLater {   
-        def settle = new PauseTransition( Duration.millis( 5 ) )
-        settle.setOnFinished {          
-            session.viewer.setMagnification( mag )
-            session.viewer.setCenterPixelLocation( centerX, centerY )
+def changeViewer( double centerX, double centerY, double vWidth, double vHeight, boolean isUM, ViewerSessionVars session, Double targetMag = null ) {
+    if (targetMag == null) {
+        double width_uM  = vWidth
+        double height_uM = vHeight
+        if (!isUM) {
+            width_uM  *= session.pixelSize
+            height_uM *= session.pixelSize
         }
-        
-        settle.play()
+        double viewWidthPx  = session.view.getWidth()
+        double viewHeightPx = session.view.getHeight()
+        double umPerPx = Math.max(width_uM / viewWidthPx, height_uM / viewHeightPx) * 1.1
+        targetMag = 0.25 / umPerPx
+    }
+
+    Platform.runLater {
+        double startX   = session.viewer.getCenterPixelX()
+        double startY   = session.viewer.getCenterPixelY()
+        double logStart = Math.log(session.viewer.getMagnification())
+        double logEnd   = Math.log(targetMag)
+        double startMag = Math.exp(logStart)
+        boolean zoomingIn = targetMag > startMag
+        long durationNs = 350 * 1_000_000L
+        long[] startTime = [-1L]
+
+        new AnimationTimer() {
+            @Override
+            void handle(long now) {
+                if (startTime[0] < 0) startTime[0] = now
+                double t = Math.min((now - startTime[0]) / (double) durationNs, 1.0)
+                double e = t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2
+
+                double currentMag = Math.exp(logStart + (logEnd - logStart) * e)
+                session.viewer.setMagnification(currentMag)
+
+                if (zoomingIn) {
+                    double ratio = startMag / currentMag * (1 - e)
+                    session.viewer.setCenterPixelLocation(
+                        centerX - (centerX - startX) * ratio,
+                        centerY - (centerY - startY) * ratio
+                    )
+                } else {
+                    session.viewer.setCenterPixelLocation(
+                        startX + (centerX - startX) * e,
+                        startY + (centerY - startY) * e
+                    )
+                }
+
+                if (t >= 1.0) stop()
+            }
+        }.start()
     }
 }
 
@@ -701,8 +707,7 @@ def restoreViewerState( viewerState, ViewerSessionVars session ) {
     //Double running execution so viewer doesn't "miss"
     (0..1).each {
         Platform.runLater {
-            session.viewer.setMagnification( viewerState.mag )
-            session.viewer.setCenterPixelLocation( viewerState.x, viewerState.y )
+            changeViewer( viewerState.x, viewerState.y, 0, 0, true, session, viewerState.mag )
         }
     }
 }
@@ -953,7 +958,7 @@ def toggleFocus( ViewerSessionVars session, List annos ) {
                 }
                 
                 // Small pause to track only when zoom actually changes
-                PauseTransition pause = new PauseTransition( Duration.millis( 200 ) )
+                PauseTransition pause = new PauseTransition( Duration.millis( 500 ) )
                 pause.setOnFinished {
                     lastZoom[0] = session.viewer.getDownsampleFactor()
                     session.viewer.addViewerListener( zoomListener )
@@ -1604,9 +1609,9 @@ def getCodePreferences( ViewerSessionVars session ) {
                 entry.readImageData().getHierarchy().getAnnotationObjects().collectMany { anno ->
                     anno.getMetadata().keySet().findAll { it.contains( session.toolKeyPrefix ) }
                 }
-            }.unique().collect { getClassifyingNameFromKey(it) }.unique()
+            }.unique().collect { getClassifyingNameFromKey( it ) }.unique()
             
-            classifyingNameOptions.setAll( uniqueNames )
+            classifyingNameOptions.addAll( uniqueNames  )
             classifyingNameOptions = classifyingNameOptions.unique()
             classifyingNameSelection.setItems( classifyingNameOptions )
             if (!classifyingNameSelection.getItems().isEmpty()) {
@@ -3695,11 +3700,6 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                         case (ActionStrings.SWITCH_FREE_VIEW_MODE):
                             switchFVmode( session )
                             break
-                            
-                        case (ActionStrings.CENTER_VIEWER):
-                            def mouseCoords = getCursorPosition( session )
-                            Platform.runLater { session.viewer.setCenterPixelLocation( mouseCoords.x, mouseCoords.y ) }
-                            break
                         
                         case (ActionStrings.NEXT): // Updating classifications after each group
                             for (anno : group) {
@@ -3860,11 +3860,6 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                             toggleFocus( session, session.allClassAnnos )                 
                             break
                         
-                        case (ActionStrings.CENTER_VIEWER):
-                            def mouseCoords = getCursorPosition( session )
-                            Platform.runLater { session.viewer.setCenterPixelLocation( mouseCoords.x, mouseCoords.y ) }
-                            break
-                        
                         case (ActionStrings.SET_CLASS ):
                             def md = annotation.getMetadata()
                             String setClass = session.reviewerClassification
@@ -3974,6 +3969,7 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
+import javafx.animation.AnimationTimer
 import javafx.animation.PauseTransition
 import javafx.animation.FadeTransition
 import javafx.util.Duration
