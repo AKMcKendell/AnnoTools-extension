@@ -60,6 +60,9 @@ class ViewerSessionVars {
     Map          currentAnnoColorsMap
     List         highlightStatesAndColorsMap
     int          viewerMoveTimeMS
+    boolean      groupDone
+    List         hoverAnnos
+    def          hoveredAnno
     
     // Making mode variables that are permanently opposite
     private boolean _classifierMode = false
@@ -116,20 +119,24 @@ class elements {
     List     btnMap
     VBox     headerBox
     Map      channelEntryByChanName
+    GridPane classesGrid
+    GridPane channelGrid
+    Map      classLabelByClassName
 }
 
 def uiElements = new elements()
 
 // Class for original viewer settings
 class settings {
-    EventHandler scrollBlocker
-    String       scrollFilterKey
-    boolean      wasGridOn
-    double       oGridX
-    double       oGridY
-    boolean      wasOverviewOn
-    double       oldAnnoThickness
-    def          overlayOptions
+    AnimationTimer hoverTimer
+    EventHandler   scrollBlocker
+    String         scrollFilterKey
+    boolean        wasGridOn
+    double         oGridX
+    double         oGridY
+    boolean        wasOverviewOn
+    double         oldAnnoThickness
+    def            overlayOptions
 }
 
 def viewerSettings = new settings()
@@ -229,6 +236,20 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
     uiElements.grid.setVgap( 10 )
     uiElements.grid.setPadding( new Insets( 10 ) )
     uiElements.grid.setAlignment( Pos.CENTER )
+    
+    uiElements.classesGrid = new GridPane()
+    uiElements.classesGrid.setHgap( 15 )
+    uiElements.classesGrid.setPadding( new Insets( 6, 8, 6, 8 ) )
+    //uiElements.classesGrid.setStyle( "-fx-border-color: #666; -fx-border-width: 1; -fx-border-radius: 4;" )
+    
+    uiElements.channelGrid = new GridPane()
+    uiElements.channelGrid.setHgap( 10 )
+    uiElements.channelGrid.setPadding( new Insets( 6, 8, 6, 8 ) )
+    //uiElements.channelGrid.setStyle( "-fx-border-color: #4466aa; -fx-border-width: 1; -fx-border-radius: 4;" )
+    
+    uiElements.grid.add( uiElements.classesGrid, 0, 0 )
+    uiElements.grid.add( uiElements.channelGrid, 0, 1 )
+    
     alert.getDialogPane().setContent( uiElements.grid )
     
     
@@ -323,7 +344,7 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
     uiElements.btnMap << [ name   : ActionStrings.TOGGLE_CLASS,
                            btn    : new Label( "${session.classifyingName} Classification:" ),
                            btnPos : [0, 0],
-                           group   : "classes",
+                           container: uiElements.classesGrid,
                            active : false ]
     
     session.statesAndColors.eachWithIndex { group, idx ->
@@ -331,23 +352,21 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
         def stateLabel = new Label( labelText )
         stateLabel.setPadding( new Insets( 5, 10, 5, 10 ) )
         
-        String cssColor = intToFx( group.color ).toString().replace( "0x", "#" )
-        
-        def labelStyle = """
-            -fx-border-color: ${cssColor};
-            -fx-border-width: 1.5;
-            -fx-border-radius: 3;
-        """
-        
         uiElements.btnMap << [
             name    : labelText,
+            clName  : group.state,
             btn     : stateLabel,
             btnPos  : [idx+1, 0],
-            btnStyle: labelStyle,
+            container: uiElements.classesGrid,
             group   : "classes",
             active  : false
         ]
     }
+    
+    // Create a map for class labels
+    uiElements.classLabelByClassName = uiElements.btnMap
+        .findAll { it.group == "classes" }
+        .collectEntries { [(it.clName): it] }
     
     // Channel-specific buttons
     session.channelSpecifics.eachWithIndex { ch, idx ->
@@ -372,6 +391,7 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
             btnPos: [idx, 1],
             key   : numberTrigger,
             action: action,
+            container: uiElements.channelGrid,
             group : "channel",
             active: false
         ]
@@ -578,8 +598,27 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, setti
     // Change any grid buttons needed
     uiElements.btnMap.findAll { it.containsKey( "btnPos" ) }.each {
         boolean wasActive = it.name in previouslyActive
-        if (wasActive && !it.active) { uiElements.grid.getChildren().remove( it.btn ) }
-        if (!wasActive && it.active) { uiElements.grid.add( it.btn, *it.btnPos ) }
+        if (wasActive && !it.active) { it.container.getChildren().remove( it.btn ) }
+        if (!wasActive && it.active) { it.container.add( it.btn, *it.btnPos ) }
+    }
+    
+    session.statesAndColors.each { group ->
+        def entry = uiElements.classLabelByClassName[ group.state ]
+        def label = entry.btn
+        
+        String cssColor = intToFx( group.color ).toString().replace( "0x", "#" )
+        
+        if (group.containsKey( "colorU" ) && !session.groupDone) {
+            cssColor = intToFx( group.colorU ).toString().replace( "0x", "#" )
+        }
+        
+        def labelStyle = """
+            -fx-border-color: ${cssColor};
+            -fx-border-width: 1.5;
+            -fx-border-radius: 3;
+        """
+        
+        label.setStyle( labelStyle )
     }
     
     
@@ -600,7 +639,6 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, setti
     def unselectedStyle = "-fx-effect: innershadow(gaussian, rgba(0,0,0,0.9), 100, 0, 0, 0);" // Channel off style
     
     // Set channel button updated style
-    List chBtns = uiElements.btnMap.findAll { it.group == "channel" }
     session.channelSpecifics.eachWithIndex { ch, i ->
         
         // Creating and adding them
@@ -784,28 +822,6 @@ def getAnnosVisibilityStatus( settings viewerSettings ) {
     return annosOn
 }
 
-// Function to get cursor position (x,y)
-def getCursorPosition( ViewerSessionVars session ) {
-    // Get viewer JavaFX node and convert its top-left to screen coordinates
-    def viewScreenPos = session.view.localToScreen( 0, 0 )
-    
-    // Get the mouse pointer location on screen (AWT)
-    def mouseScreen = MouseInfo.getPointerInfo()?.getLocation()
-    
-    // Compute mouse position relative to viewer (component coordinates)
-    def mouseX_inViewer = mouseScreen.getX() - viewScreenPos.getX()
-    def mouseY_inViewer = mouseScreen.getY() - viewScreenPos.getY()
-    
-    // Convert to image pixel coordinates
-    def viewerPoint = new Point2D.Double( mouseX_inViewer, mouseY_inViewer )
-    def imagePoint = session.viewer.componentPointToImagePoint( viewerPoint, null, true )
-    
-    def cursorX = imagePoint.getX()
-    def cursorY = imagePoint.getY()
-    
-    return [x: cursorX, y: cursorY]
-}
-
 // Function to toggle a channel's visibility
 def toggleChannel( channelForToggle, ViewerSessionVars session ) {
     if (!channelForToggle) return // Skipping rest if there is no channel to change
@@ -946,65 +962,66 @@ def adjustX( ViewerSessionVars session, double boundsX, double boundsY, double c
 }
 
 // Function to conditionally toggle the viewer focus to/away from an annotation
-def toggleFocus( ViewerSessionVars session, List annos ) {
+def toggleFocus( ViewerSessionVars session ) {
     if (!session.zoomed) {
-        def mouseCoords = getCursorPosition( session )
-        
-        for (anno in annos) {
-            def roi = anno.getROI()
             
-            // Check if the mouse point lies inside the selected ROI and focus into it if so
-            if (roi.contains( mouseCoords.x, mouseCoords.y )) {
-                
-                session.nonZoomedViewerState = saveViewerState( session )
-                
-                double adjustedX = adjustX( session, roi.getBoundsWidth(), roi.getBoundsHeight(), roi.getCentroidX() )
-                
-                changeViewer( adjustedX, roi.getCentroidY(), roi.getBoundsWidth() * 2,
-                              roi.getBoundsHeight() * 2, false, session )
-                session.zoomed = true
-                
-                double[] lastZoom = [0.0]  // Declared here so zoomListener can reference it
-                
-                // Add a zoom listener so if zoomed after focus, it's no longer considered focues
-                // Meaning right clicking again won't take back to previous viewer
-                def zoomListener = new QuPathViewerListener() {
-                
-                    @Override
-                    void visibleRegionChanged( QuPathViewer v, java.awt.Shape shape ) {
-                        double currentZoom = v.getDownsampleFactor()
-                        if (Math.abs( currentZoom - lastZoom[0] ) > 0.1) {
-                            v.removeViewerListener( this )
-                            session.zoomed = false
-                        }
-                    }
-                
-                    @Override
-                    void imageDataChanged( QuPathViewer v, ImageData before, ImageData after ) {}
-                    @Override
-                    void selectedObjectChanged( QuPathViewer v, PathObject pathObj ) {}
-                    @Override
-                    void viewerClosed( QuPathViewer v ) {
+        // Check if the mouse point lies inside the selected ROI and focus into it if so
+        if (session.hoveredAnno) {
+            
+            def roi = session.hoveredAnno.getROI()
+            
+            session.nonZoomedViewerState = saveViewerState( session )
+            
+            double adjustedX = adjustX( session, roi.getBoundsWidth(), roi.getBoundsHeight(), roi.getCentroidX() )
+            
+            changeViewer( adjustedX, roi.getCentroidY(), roi.getBoundsWidth() * 2,
+                          roi.getBoundsHeight() * 2, false, session )
+            session.zoomed = true
+            
+            double[] lastZoom = [0.0]  // Declared here so zoomListener can reference it
+            
+            // Add a zoom listener so if zoomed after focus, it's no longer considered focues
+            // Meaning right clicking again won't take back to previous viewer
+            def zoomListener = new QuPathViewerListener() {
+            
+                @Override
+                void visibleRegionChanged( QuPathViewer v, java.awt.Shape shape ) {
+                    double currentZoom = v.getDownsampleFactor()
+                    if (Math.abs( currentZoom - lastZoom[0] ) > 0.1) {
                         v.removeViewerListener( this )
+                        session.zoomed = false
                     }
                 }
-                
-                // Small pause to track only when zoom actually changes
-                PauseTransition pause = new PauseTransition( Duration.millis( session.viewerMoveTimeMS * 1.1 ) )
-                pause.setOnFinished {
-                    lastZoom[0] = session.viewer.getDownsampleFactor()
-                    session.viewer.addViewerListener( zoomListener )
+            
+                @Override
+                void imageDataChanged( QuPathViewer v, ImageData before, ImageData after ) {}
+                @Override
+                void selectedObjectChanged( QuPathViewer v, PathObject pathObj ) {}
+                @Override
+                void viewerClosed( QuPathViewer v ) {
+                    v.removeViewerListener( this )
                 }
-                pause.play()
-                
-                break
             }
+            
+            // Small pause to track only when zoom actually changes after transition
+            PauseTransition pause = new PauseTransition( Duration.millis( session.viewerMoveTimeMS * 1.1 ) )
+            pause.setOnFinished {
+                lastZoom[0] = session.viewer.getDownsampleFactor()
+                session.viewer.addViewerListener( zoomListener )
+            }
+            pause.play()
         }
     } else {
         restoreViewerState( session.nonZoomedViewerState, session )
         session.zoomed = false
     }
 }
+
+// Define scroll blocker specifics
+viewerSettings.scrollFilterKey = "scrollFilterON"
+viewerSettings.scrollBlocker = { ScrollEvent e ->
+    e.consume()  // stops QuPath from zooming
+} as EventHandler<ScrollEvent>
 
 // Function to add a scroll blocker (stops qupath from zooming in viewer)
 def addScrollBlocker( ViewerSessionVars session, settings viewerSettings ) {
@@ -1020,6 +1037,52 @@ def removeScrollBlocker( ViewerSessionVars session, settings viewerSettings ) {
     session.view.properties.remove( viewerSettings.scrollFilterKey )
 }
 
+// Define hover timer specifics (checks if mouse is over anno)
+def tempAnno
+def lastX = -1.0
+def lastY = -1.0
+viewerSettings.hoverTimer = new AnimationTimer() {
+    @Override
+    void handle(long now) {
+        def loc = MouseInfo.getPointerInfo().getLocation()
+        if (loc.x == lastX && loc.y == lastY) return
+        lastX = loc.x
+        lastY = loc.y
+
+        def canvasPoint = getCurrentViewer().getView().screenToLocal( loc.x, loc.y )
+        def pt = getCurrentViewer().componentPointToImagePoint( canvasPoint.getX(), canvasPoint.getY(), null, false )
+        session.hoveredAnno = session.hoverAnnos.find { it.getROI().contains( pt.getX(), pt.getY() ) }
+    }
+}
+
+// Function to add the hover timer to check if mouse if over an anno
+def addHoverFilter( ViewerSessionVars session, settings viewerSettings ) {
+    viewerSettings.hoverTimer.start()
+}
+
+// Function to remove the hover timer to check if mouse if over an anno
+def removeHoverFilter( ViewerSessionVars session, settings viewerSettings ) {
+    viewerSettings.hoverTimer.stop()
+}
+
+// Function to return QuPath to pre-script state
+def restoreToPrescript( ViewerSessionVars session, settings viewerSettings ) {
+    Platform.runLater { 
+        viewerSettings.overlayOptions.setShowAnnotations( true )
+        PathPrefs.annotationStrokeThicknessProperty().set( viewerSettings.oldAnnoThickness )
+        changeGrid( viewerSettings, viewerSettings.wasGridOn, viewerSettings.oGridX, viewerSettings.oGridY )
+        ViewerPlusDisplayOptions.getSharedInstance().setShowOverview( viewerSettings.wasOverviewOn )
+        viewerSettings.overlayOptions.setOpacity( 1 )
+    }
+    
+    removeScrollBlocker( session, viewerSettings )
+    removeHoverFilter( session, viewerSettings )
+    def addedDets = session.hierarchy.getDetectionObjects()
+    session.hierarchy.removeObjects( addedDets, true ) 
+    session.allClassAnnos.each { it.setColor( null ) }
+    fireHierarchyUpdate() 
+}
+
 // Function to switch fre view modes
 def switchFVmode( ViewerSessionVars session, settings viewerSettings ) {
     int freeViewModeIdx = session.freeViewModes.indexOf( session.freeViewMode )
@@ -1032,23 +1095,6 @@ def switchFVmode( ViewerSessionVars session, settings viewerSettings ) {
             addScrollBlocker( session, viewerSettings )
         }
     }
-}
-
-// Function to return QuPath to pre-script state
-def restoreToPrescript( ViewerSessionVars session, settings viewerSettings ) {
-    Platform.runLater { 
-        viewerSettings.overlayOptions.setShowAnnotations( true )
-        removeScrollBlocker( session, viewerSettings )
-        PathPrefs.annotationStrokeThicknessProperty().set( viewerSettings.oldAnnoThickness )
-        changeGrid( viewerSettings, viewerSettings.wasGridOn, viewerSettings.oGridX, viewerSettings.oGridY )
-        ViewerPlusDisplayOptions.getSharedInstance().setShowOverview( viewerSettings.wasOverviewOn )
-        viewerSettings.overlayOptions.setOpacity( 1 )
-    }
-    
-    def addedDets = session.hierarchy.getDetectionObjects()
-    session.hierarchy.removeObjects( addedDets, true ) 
-    session.allClassAnnos.each { it.setColor( null ) }
-    fireHierarchyUpdate() 
 }
 
 // Function to generate classifier/reviewer key for metadata
@@ -3302,21 +3348,19 @@ while (true) {
         }
         
         // Collect which users are missing classifications in reviewer mode
-        def annosMissingClassifierKeys = session.reviewerMode ? imageAnnos.findAll { anno ->
-            session.classifierKeys.any { key -> !anno.getMetadata().containsKey( key ) }
-        } : []
-        
-        annosMissingClassifierKeys.each { anno ->
-            def missingUsers = session.classifierKeys.findAll { key ->
-                !anno.getMetadata().containsKey( key )
-            
-            }.collect { getUserFromKey( it ) }
-            
-            usersWithIncompleteClassifications.addAll( missingUsers )
-            incompleteUsersByImage[ image.getImageName() ].addAll( missingUsers )
+        def annosMissingClassifierKeys = []
+        if ( session.reviewerMode ) {
+            imageAnnos.each { anno ->
+                def missingUsers = session.classifierKeys.findAll { !anno.getMetadata().containsKey( it ) }
+                                                         .collect { getUserFromKey( it ) }
+                if ( missingUsers ) {
+                    annosMissingClassifierKeys << anno
+                    usersWithIncompleteClassifications.addAll( missingUsers )
+                    incompleteUsersByImage[ image.getImageName() ].addAll( missingUsers )
+                }
+            }
         }
-        
-        boolean anyMissingClassifierKeys = session.reviewerMode && !annosMissingClassifierKeys.isEmpty()
+        boolean anyMissingClassifierKeys = !annosMissingClassifierKeys.isEmpty()
         
         boolean anyMissingUserKey = imageAnnos.any { anno ->
             if (session.reviewerMode) {
@@ -3640,11 +3684,8 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     }
     
     // Turning off clicking and scrolling temporarily during the script to be brought back after
-    viewerSettings.scrollFilterKey = "scrollFilterON"
-    viewerSettings.scrollBlocker = { ScrollEvent e ->
-        e.consume()  // stops QuPath from zooming
-    } as EventHandler<ScrollEvent>
-    addScrollBlocker( session, viewerSettings )
+    addScrollBlocker( session, viewerSettings )   
+    addHoverFilter( session, viewerSettings )
     
     // Establishing/storing important variables
     @Field int numTrues
@@ -3725,9 +3766,11 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 
                 def binKey = sortedBins[ binIndex ]
                 def group = binMap[ binKey ]
+                session.hoverAnnos = group
                 
                 // Checking if annotations need classification (skipping if they do not)
-                if (!session.checkingWork && firstLoop && group.every { it.getMetadata().containsKey( session.userKey ) }) continue
+                session.groupDone = group.every { containsUserKey( it, session ) }
+                if (!session.checkingWork && firstLoop && session.groupDone) continue
                 
                 // If wanted, classifed annos out of view will be filled (using detections)
                 def detObjs = session.hierarchy.getDetectionObjects()
@@ -3779,6 +3822,8 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 annoGroupLoop:
                 while (true) { 
                     
+                    session.groupDone = group.every { containsUserKey( it, session ) }
+                    
                     // Updating control panel
                     Platform.runLater {
                         alert.setTitle(!session.freeView ?
@@ -3816,20 +3861,12 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                             break
                             
                         case (ActionStrings.TOGGLE_FOCUS): // Looking for annotation mouse is over
-                            List toggleableAnnos = session.freeView ? annotations : group
-                            toggleFocus( session, toggleableAnnos )  
+                            toggleFocus( session )  
                             break
                             
                         case (ActionStrings.TOGGLE_CLASS):
-                            def mouseCoords = getCursorPosition( session )
-                            for (anno in group) {
-                                def roi = anno.getROI()
-                                
-                                // Check if the mouse point lies inside the selected ROI
-                                if (roi.contains( mouseCoords.x, mouseCoords.y )) {
-                                    changeClassification( anno, session )
-                                    break
-                                }
+                            if (session.hoveredAnno) {
+                                changeClassification( session.hoveredAnno, session )
                             }
                             break
                             
@@ -3884,6 +3921,9 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     // Storing existing colors for anno before any change
                                     session.allClassAnnos.each { session.currentAnnoColorsMap[ it ] = it.getColor() }
                                     
+                                    // Defining which annos can be focused on
+                                    session.hoverAnnos = session.allClassAnnos
+                                    
                                     // Getting/generating/setting colors of different anno classifications
                                     colorAnnosFromMap( session, [session.userKey] )
                                     
@@ -3900,6 +3940,8 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     removeScrollBlocker( session, viewerSettings )
                                     
                                 } else {
+                                    // Defining which annos can be focused on
+                                    session.hoverAnnos = group
                                     
                                     restoreViewerState( nonFreeViewerState, session )
                                     viewerSettings.overlayOptions.setShowDetections( true )
@@ -3957,8 +3999,11 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 
                 def annotation = annotations[ annoIndex ]
                 
+                // Defining which annos can be focused on (when applicable)
+                session.hoverAnnos = session.allClassAnnos
+                
                 // Skipping to annotations that needs review if others alrady have been
-                if (firstLoop && annotation.getMetadata().containsKey( session.userKey )) continue
+                if (firstLoop && containsUserKey( annotation, session )) continue
                 
                 Platform.runLater { session.viewer.repaintEntireImage() }
                 
@@ -4083,7 +4128,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                         
                         // Zoom in on specific annotation
                         case (ActionStrings.TOGGLE_FOCUS):
-                            toggleFocus( session, session.allClassAnnos )                 
+                            toggleFocus( session )                 
                             break
                         
                         case (ActionStrings.SET_CLASS ):
@@ -4113,10 +4158,9 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
             alert.setHeaderText( null )
             alert.setContentText( "Save classifications and move to next image?" )
             
-            // Customize buttons to Yes and No only
+            // Customize buttons to based on if user inupt
             boolean anyFinishedImageAnnos = session.allClassAnnos.any { anno ->
-                boolean hasUserKey = anno.getMetadata().containsKey( session.userKey )
-                return hasUserKey
+                return containsUserKey( anno, session )
             }
             if (annotations.isEmpty() && !anyFinishedImageAnnos) {
                 alert.getButtonTypes().setAll( ButtonType.YES, ButtonType.NO )
