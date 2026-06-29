@@ -14,6 +14,7 @@ class ViewerSessionVars {
     QuPathViewer viewer
     def          view
     def          activeAnimation
+    def          alertRightEdge
     String       userName
     String       userKey
     String       classifyingName
@@ -318,6 +319,36 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
         ]
     }
     
+    // Classification labels
+    uiElements.btnMap << [ name   : ActionStrings.TOGGLE_CLASS,
+                           btn    : new Label( "${session.classifyingName} Classification:" ),
+                           btnPos : [0, 0],
+                           group   : "classes",
+                           active : false ]
+    
+    session.statesAndColors.eachWithIndex { group, idx ->
+        String labelText = "${idx+1}. ${group.state}"
+        def stateLabel = new Label( labelText )
+        stateLabel.setPadding( new Insets( 5, 10, 5, 10 ) )
+        
+        String cssColor = intToFx( group.color ).toString().replace( "0x", "#" )
+        
+        def labelStyle = """
+            -fx-border-color: ${cssColor};
+            -fx-border-width: 1.5;
+            -fx-border-radius: 3;
+        """
+        
+        uiElements.btnMap << [
+            name    : labelText,
+            btn     : stateLabel,
+            btnPos  : [idx+1, 0],
+            btnStyle: labelStyle,
+            group   : "classes",
+            active  : false
+        ]
+    }
+    
     // Channel-specific buttons
     session.channelSpecifics.eachWithIndex { ch, idx ->
         String numberTrigger = (idx + 1)
@@ -338,7 +369,7 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
             name  : btnText,
             chName: ch.name,
             btn   : btn,
-            btnPos: [idx, 2],
+            btnPos: [idx, 1],
             key   : numberTrigger,
             action: action,
             group : "channel",
@@ -527,6 +558,11 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, setti
         availableBtns.addAll( ActionStrings.CANCEL, ActionStrings.TOGGLE_ANNOS, ActionStrings.BACK )
         uiElements.btnMap.findAll { it.group == "revClass" }.each { availableBtns << it.name }
     }
+    
+    if (session.classifierMode) {
+        availableBtns.addAll( uiElements.btnMap.findAll { it.group == "classes" }.name )
+    }
+    
     uiElements.btnMap.findAll { it.group == "channel" }.each { availableBtns << it.name }
 
     // Map which buttons are active and which need to change
@@ -604,8 +640,8 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, setti
     List fvScrollI     = [I("(scroll)",                     "${scrollInstructions}")]
     List changeBrightI = [I("(scroll)",                     "Brightness [${brightnessChannel}]")]
     List goBackI       = [I("(B)",                          "Return to previous ${session.reviewerMode ? 'annotation' : 'group'}")]
-    List cycleClassI   = [I("(left click)",                 "Cycle class/colors")]
-    List changeFocusI  = [I("(right click)",                "Focus on anno")]
+    List cycleClassI   = [I("(left click anno)",            "Cycle class/colors")]
+    List changeFocusI  = [I("(right click anno)",           "Focus on anno")]
     List moveViewerI   = [I("(drag)",                       "Pan viewer")]
     List switchFvModeI = [I("(SHIFT)",                      "Switch scroll function")]
     List enterFvI      = [I("(hold SHIFT)",                 "Enter free view")]
@@ -896,6 +932,19 @@ def filterForUserKey( List annosToCheck, boolean shouldHaveKey, ViewerSessionVar
     }
 }
 
+// Function to adjust x to middle of available space including the alert
+def adjustX( ViewerSessionVars session, double boundsX, double boundsY, double cX ) {
+    def viewerBounds = session.view.localToScreen( session.view.getBoundsInLocal() )
+    double leftBound = Math.max( session.alertRightEdge, viewerBounds.getMinX() )
+    double targetScreenX = (leftBound + viewerBounds.getMaxX()) / 2.0
+    double viewerCenterX = (viewerBounds.getMinX() + viewerBounds.getMaxX()) / 2.0
+    double gridPx = Math.min( boundsX, boundsY ) / session.pixelSize
+    double targetDownsample = Math.max( gridPx / session.view.getWidth(), gridPx / session.view.getHeight() )
+    double adjustedX = cX - (targetScreenX - viewerCenterX) * targetDownsample
+    
+    return adjustedX
+}
+
 // Function to conditionally toggle the viewer focus to/away from an annotation
 def toggleFocus( ViewerSessionVars session, List annos ) {
     if (!session.zoomed) {
@@ -909,7 +958,9 @@ def toggleFocus( ViewerSessionVars session, List annos ) {
                 
                 session.nonZoomedViewerState = saveViewerState( session )
                 
-                changeViewer( roi.getCentroidX(), roi.getCentroidY(), roi.getBoundsWidth() * 2,
+                double adjustedX = adjustX( session, roi.getBoundsWidth(), roi.getBoundsHeight(), roi.getCentroidX() )
+                
+                changeViewer( adjustedX, roi.getCentroidY(), roi.getBoundsWidth() * 2,
                               roi.getBoundsHeight() * 2, false, session )
                 session.zoomed = true
                 
@@ -1212,7 +1263,6 @@ def getCodePreferences( ViewerSessionVars session ) {
     def project = getProject()
     
     def missingStyle = """
-        -fx-background-insets: 0;
         -fx-border-color: red;
         -fx-border-radius: 3;
     """
@@ -3047,7 +3097,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             List recentClassifyingNames = classifyingNameOptions = ([classifyingName] + classifyingNameOptions).unique().take( 5 )
             def gridSizeText            = gridSizeField.getText().trim()
             def gridSize                = Integer.parseInt( gridSizeText )
-            boolean instructions        = prePrefsMap.instructions
+            boolean instructions        = prePrefsMap.instructions != null ? prePrefsMap.instructions : true
             
             // Reviewer annotation preferences
             def reviewStateFreqs = []
@@ -3641,7 +3691,12 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
             window.focusedProperty().addListener { obs, wasFocused, isFocused ->
                 if (!isFocused) { window.requestFocus() }
             }
+            
+            // Get and stash the right edge of alert for reference
+            session.alertRightEdge = window.getX() + window.getWidth()
         }
+        
+        
         
         // --- CLASSIFIER MODE: BIN CLASSIFICATIONS ---
         if (session.classifierMode) {
@@ -3714,10 +3769,11 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 
                 // Calcualating bin coordinates for viewer centering
                 double binX = (session.gridSize / session.pixelSize) * (binKey[0] + 0.5)
-                double binY = (session.gridSize / session.pixelSize) * (binKey[1] + 0.5)
+                double binY = (session.gridSize / session.pixelSize) * (binKey[1] + 0.5)            
+                double adjustedX = adjustX( session, session.gridSize, session.gridSize, binX )
                 
                 // Focus viewer on group
-                changeViewer( binX, binY, session.gridSize, session.gridSize, true, session )
+                changeViewer( adjustedX, binY, session.gridSize, session.gridSize, true, session )
                 
                 // --- Loop if adjusting settings without moving to next group ---
                 annoGroupLoop:
@@ -3907,8 +3963,9 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 Platform.runLater { session.viewer.repaintEntireImage() }
                 
                 // Focusing on specific annotation
-                def roi = annotation.getROI()
-                changeViewer( roi.getCentroidX(), roi.getCentroidY(), roi.getBoundsWidth() * 2, roi.getBoundsHeight() * 2, false, session )
+                def roi = annotation.getROI()       
+                double adjustedX = adjustX( session, roi.getBoundsWidth(), roi.getBoundsHeight(), roi.getCentroidX() )         
+                changeViewer( adjustedX, roi.getCentroidY(), roi.getBoundsWidth() * 2, roi.getBoundsHeight() * 2, false, session )
                 selectObjects( annotation )
                 
                 // --- Loop if adjusting settings without moving to next group ---
