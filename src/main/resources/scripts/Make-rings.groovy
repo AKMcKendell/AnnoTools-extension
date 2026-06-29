@@ -471,8 +471,6 @@ def codePreferences = runOnFxThreadAndWait {
     setTT( [previewLabel, expansionsPreview], "Preview of final expansions.")
     
     
-    
-    
     expansionField.textProperty().addListener { obs, oldVal, newVal ->
         
         // Allow only digits and commas (no double commas, no leading comma)
@@ -534,6 +532,15 @@ def codePreferences = runOnFxThreadAndWait {
         currentImageCB.selectedProperty().bindBidirectional(
             currentCB.selectedProperty()
         )
+        
+        // Setting bright border on checkbox for current image
+        Platform.runLater { 
+            currentCB.lookup( ".box" )?.setStyle("""
+                -fx-border-color: white;
+                -fx-border-width: 1.5;
+                -fx-border-radius: 3;
+            """)
+        }
         
         // If current image was only one selected, will update to new image
         if (prePrefsMap.currentImage == true && prePrefsMap.selectedImages.size() == 1) {
