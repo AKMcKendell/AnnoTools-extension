@@ -4,10 +4,6 @@
  * Description: Manually classify many objects
 */
 
-// --- Parameters ---
-def dialogOffsetX = 25
-def dialogOffsetY = 25
-
 
 // --- Classes ---
 // Define once at the top of the script
@@ -17,7 +13,6 @@ class ViewerSessionVars {
     ImageServer  server
     QuPathViewer viewer
     def          view
-    def          overlayOptions
     def          activeAnimation
     String       userName
     String       userKey
@@ -36,7 +31,6 @@ class ViewerSessionVars {
     String       freeViewMode
     List         freeViewModes
     def          nonZoomedViewerState
-    String       scrollFilterKey
     boolean      instructions
     boolean      zoomed
     def          showing
@@ -46,8 +40,6 @@ class ViewerSessionVars {
     def          controllableChannels
     def          prevSelectedAnnos
     double       pixelSize
-    def          scrollBlocker
-    double       oldAnnoThickness
     List<String> reviewStateFreqs
     List<String> reviewStates
     Map          reviewerCriteria
@@ -103,6 +95,7 @@ class ActionStrings {
     static final String TOGGLE_FREE_VIEW      = "ToggleFreeView"
     static final String SWITCH_FREE_VIEW_MODE = "SwitchFreeViewMode"
     static final String TOGGLE_ANNOS          = "ToggleAnnos"
+    static final String TOGGLE_GRID           = "ToggleGrid"
     static final String TOGGLE_FOCUS          = "ToggleFocus"
     static final String TOGGLE_CLASS          = "ToggleClassification"
     static final String SET_CLASS             = "SetClassification"
@@ -125,6 +118,20 @@ class elements {
 }
 
 def uiElements = new elements()
+
+// Class for original viewer settings
+class settings {
+    EventHandler scrollBlocker
+    String       scrollFilterKey
+    boolean      wasGridOn
+    double       oGridX
+    double       oGridY
+    boolean      wasOverviewOn
+    double       oldAnnoThickness
+    def          overlayOptions
+}
+
+def viewerSettings = new settings()
 
 
 // --- Functions ---
@@ -244,6 +251,11 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
                            key    : "a",
                            click  : MouseButton.MIDDLE,
                            active : false ]
+                           
+    uiElements.btnMap << [ name   : ActionStrings.TOGGLE_GRID,
+                           action : { queue.put( ActionStrings.TOGGLE_GRID ) },
+                           key    : "g",
+                           active : false ]
     
     uiElements.btnMap << [ name   : ActionStrings.TOGGLE_FOCUS,
                            action : { queue.put( ActionStrings.TOGGLE_FOCUS ) },
@@ -313,6 +325,7 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
         // Creating and adding them
         String btnText = "(${idx+1}) ${ch.name}"
         ToggleButton btn = new ToggleButton( btnText )
+        btn.setMnemonicParsing( false ) // So no characters are dropped
         
         // Setting their functions
         def action = {
@@ -501,12 +514,12 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
 }
 
 // Function to update UI
-def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue ) { 
+def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, settings viewerSettings, queue ) { 
     
     // Set which buttons should now be available
     Set availableBtns = [ActionStrings.INSTRUCTIONS, ActionStrings.CANCEL, ActionStrings.TOGGLE_ANNOS] as LinkedHashSet
     if (session.freeView) {
-        availableBtns.addAll( ActionStrings.INSTRUCTIONS, ActionStrings.TOGGLE_FOCUS )
+        availableBtns.addAll( ActionStrings.TOGGLE_FOCUS, ActionStrings.TOGGLE_GRID )
     } else if (session.classifierMode) {
         availableBtns.addAll( ActionStrings.REMOVE, ActionStrings.BACK, ActionStrings.NEXT, 
                               ActionStrings.TOGGLE_CLASS, ActionStrings.TOGGLE_FOCUS )
@@ -573,7 +586,8 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue
     // - Update instructions -
     String brightnessChannel = session.channelToChange ? session.channelSpecifics.find { it.channel == session.channelToChange }.name : "none"
     String scrollInstructions = session.freeViewMode == ActionStrings.ZOOM ? "Zoom" : "Brightness [${brightnessChannel}]"
-    boolean annosOn = getAnnosVisibilityStatus( session )
+    boolean annosOn = getAnnosVisibilityStatus( viewerSettings )
+    boolean gridOn = viewerSettings.overlayOptions.getShowGrid()
     List revClassKeys = uiElements.btnMap.findAll { it.group == "revClass" }.key
     List channelKeys = uiElements.btnMap.findAll { it.group == "channel" }.key
     
@@ -584,6 +598,7 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue
     
     // Instruction lines
     List toggleAnnosI  = [I("(A)",                          "Toggle annotations [${annosOn}]")]
+    List toggleGridI   = [I("(G)",                          "Toggle grid [${gridOn}]")]
     List removeAnnosI  = [I("(R)",                          "Remove group classifications")]
     List nextGroupI    = [I("(N)",                          "Save group and move to next")]
     List fvScrollI     = [I("(scroll)",                     "${scrollInstructions}")]
@@ -591,7 +606,7 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue
     List goBackI       = [I("(B)",                          "Return to previous ${session.reviewerMode ? 'annotation' : 'group'}")]
     List cycleClassI   = [I("(left click)",                 "Cycle class/colors")]
     List changeFocusI  = [I("(right click)",                "Focus on anno")]
-    List moveViewerI   = [I("(drag)",                       "Move viewer")]
+    List moveViewerI   = [I("(drag)",                       "Pan viewer")]
     List switchFvModeI = [I("(SHIFT)",                      "Switch scroll function")]
     List enterFvI      = [I("(hold SHIFT)",                 "Enter free view")]
     List exitFvI       = [I("(hold SHIFT)",                 "Exit free view")]
@@ -608,7 +623,7 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue
     
     // Conditionally building instructions
     def instructionLines = !session.instructions ? closedI
-        : session.freeView    ? openI + emptyI + toggleAnnosI + moveViewerI + changeFocusI + switchFvModeI + fvScrollI + exitFvI + toggleChanI + emptyI + colorHeaderI + showClassColorsI
+        : session.freeView    ? openI + emptyI + toggleAnnosI + toggleGridI + moveViewerI + changeFocusI + switchFvModeI + fvScrollI + exitFvI + toggleChanI + emptyI + colorHeaderI + showClassColorsI
         : session.reviewerMode? openI + emptyI + toggleAnnosI + goBackI + toggleChanI + changeBrightI + setRevClassI + emptyI + enterFvI
         :                       openI + emptyI + toggleAnnosI + nextGroupI + goBackI + removeAnnosI + toggleChanI + changeBrightI + changeFocusI + cycleClassI + classColorsI + emptyI + enterFvI
     
@@ -625,7 +640,7 @@ def changeViewer( double centerX, double centerY, double vWidth, double vHeight,
     if (targetMag == null) {
         double width_uM  = isUM ? vWidth  : vWidth  * session.pixelSize
         double height_uM = isUM ? vHeight : vHeight * session.pixelSize
-        double umPerPx = Math.max(width_uM / session.view.getWidth(), height_uM / session.view.getHeight()) * 1.1
+        double umPerPx = Math.max( width_uM / session.view.getWidth(), height_uM / session.view.getHeight() ) * 1.1
         targetMag = 0.25 / umPerPx
     }
     
@@ -679,11 +694,11 @@ def restoreViewerState( viewerState, ViewerSessionVars session ) {
 }
 
 // Function for changing viewing grid
-def changeGrid( boolean turnOnGrid, double spacingX, double spacingY, ViewerSessionVars session ) {
+def changeGrid( settings viewerSettings, boolean turnOnGrid, double spacingX = null, double spacingY = null ) {
     Platform.runLater {
-        session.overlayOptions.setShowGrid( turnOnGrid )
-        PathPrefs.gridSpacingX.set( spacingX )
-        PathPrefs.gridSpacingY.set( spacingY )
+        viewerSettings.overlayOptions.setShowGrid( turnOnGrid )
+        if (spacingX) { PathPrefs.gridSpacingX.set( spacingX ) }
+        if (spacingY) { PathPrefs.gridSpacingY.set( spacingY ) }
     }
 }
 
@@ -719,17 +734,17 @@ def getNextImage( nextImage ) {
 }
 
 // Function to toggle annotation visibility or read whether they're on
-def toggleAnnos( ViewerSessionVars session ) {
-    boolean annosOn = session.overlayOptions.getShowAnnotations()
+def toggleAnnos( settings viewerSettings ) {
+    boolean annosOn = viewerSettings.overlayOptions.getShowAnnotations()
     Platform.runLater {
-        session.overlayOptions.setShowAnnotations( !annosOn )
+        viewerSettings.overlayOptions.setShowAnnotations( !annosOn )
         if (annosOn) { resetSelection() }
     }
 }
 
 // Function to get annotation visibility
-def getAnnosVisibilityStatus( ViewerSessionVars session ) {
-    boolean annosOn = session.overlayOptions.getShowAnnotations()
+def getAnnosVisibilityStatus( settings viewerSettings ) {
+    boolean annosOn = viewerSettings.overlayOptions.getShowAnnotations()
     return annosOn
 }
 
@@ -941,40 +956,42 @@ def toggleFocus( ViewerSessionVars session, List annos ) {
 }
 
 // Function to add a scroll blocker (stops qupath from zooming in viewer)
-def addScrollBlocker( ViewerSessionVars session ) {
-    if (!session.view.properties[ session.scrollFilterKey ]) {
-        session.view.addEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-        session.view.properties[ session.scrollFilterKey ] = true
+def addScrollBlocker( ViewerSessionVars session, settings viewerSettings ) {
+    if (!session.view.properties[ viewerSettings.scrollFilterKey ]) {
+        session.view.addEventFilter( ScrollEvent.ANY, viewerSettings.scrollBlocker )
+        session.view.properties[ viewerSettings.scrollFilterKey ] = true
     }
 }
 
 // Function to remove a scroll blocker (stops qupath from zooming in viewer)
-def removeScrollBlocker( ViewerSessionVars session ) {
-    session.view.removeEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-    session.view.properties.remove( session.scrollFilterKey )
+def removeScrollBlocker( ViewerSessionVars session, settings viewerSettings ) {
+    session.view.removeEventFilter( ScrollEvent.ANY, viewerSettings.scrollBlocker )
+    session.view.properties.remove( viewerSettings.scrollFilterKey )
 }
 
 // Function to switch fre view modes
-def switchFVmode( ViewerSessionVars session ) {
+def switchFVmode( ViewerSessionVars session, settings viewerSettings ) {
     int freeViewModeIdx = session.freeViewModes.indexOf( session.freeViewMode )
     session.freeViewMode = session.freeViewModes[ (freeViewModeIdx + 1) % session.freeViewModes.size() ]     
     
     Platform.runLater {
-        if (session.freeViewMode == ActionStrings.ZOOM && session.view.properties[ session.scrollFilterKey ]) {
-            removeScrollBlocker( session )
-        } else if (session.freeViewMode == ActionStrings.BRIGHTNESS && !session.view.properties[ session.scrollFilterKey ]) {
-            addScrollBlocker( session )
+        if (session.freeViewMode == ActionStrings.ZOOM && session.view.properties[ viewerSettings.scrollFilterKey ]) {
+            removeScrollBlocker( session, viewerSettings )
+        } else if (session.freeViewMode == ActionStrings.BRIGHTNESS && !session.view.properties[ viewerSettings.scrollFilterKey ]) {
+            addScrollBlocker( session, viewerSettings )
         }
     }
 }
 
 // Function to return QuPath to pre-script state
-def restoreToPrescript( ViewerSessionVars session ) {
+def restoreToPrescript( ViewerSessionVars session, settings viewerSettings ) {
     Platform.runLater { 
-        session.overlayOptions.setShowAnnotations( true )
-        removeScrollBlocker( session )
-        PathPrefs.annotationStrokeThicknessProperty().set( session.oldAnnoThickness )
-        session.overlayOptions.setOpacity( 1 )
+        viewerSettings.overlayOptions.setShowAnnotations( true )
+        removeScrollBlocker( session, viewerSettings )
+        PathPrefs.annotationStrokeThicknessProperty().set( viewerSettings.oldAnnoThickness )
+        changeGrid( viewerSettings, viewerSettings.wasGridOn, viewerSettings.oGridX, viewerSettings.oGridY )
+        ViewerPlusDisplayOptions.getSharedInstance().setShowOverview( viewerSettings.wasOverviewOn )
+        viewerSettings.overlayOptions.setOpacity( 1 )
     }
     
     def addedDets = session.hierarchy.getDetectionObjects()
@@ -1003,10 +1020,13 @@ def getClassifyingNameFromKey( String key ) {
 
 // Function to show a temporary message that fades out
 def showFadeOutMessage( label ) {
+    def existing = label.getProperties().get( "fadeOut" )
+    if ( existing ) existing.stop()
+
     label.setOpacity( 0.7 )
     label.setVisible( true )
     label.setManaged( true )
-    
+
     def fadeOut = new FadeTransition( Duration.millis( 800 ), label )
     fadeOut.setDelay( Duration.millis( 700 ) )
     fadeOut.setToValue( 0.0 )
@@ -1014,6 +1034,7 @@ def showFadeOutMessage( label ) {
         label.setVisible( false )
         label.setManaged( false )
     }
+    label.getProperties().put( "fadeOut", fadeOut )
     fadeOut.play()
 }
 
@@ -1190,6 +1211,12 @@ def getCodePreferences( ViewerSessionVars session ) {
     def currentImageData = getCurrentImageData()
     def project = getProject()
     
+    def missingStyle = """
+        -fx-background-insets: 0;
+        -fx-border-color: red;
+        -fx-border-radius: 3;
+    """
+    
     // Make/get prefs folder as needed
     def projectDirectory = project.getBaseDirectory()
     def projectFolderNames = projectDirectory.listFiles().collect { it.getName() }
@@ -1332,6 +1359,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         users.setMaxWidth( Double.MAX_VALUE )
         HBox.setHgrow( users, Priority.ALWAYS )
         setTT( [userLabel, users], classifierModeBtn.isSelected() ? "Select a classifier" : "Select a reviewer" )
+        users.setStyle( missingStyle ) // Start with red border (cleared if selection)
         
         def userInputField = new TextField()
         userInputField.setPromptText( "Add with ENTER" )
@@ -1350,6 +1378,11 @@ def getCodePreferences( ViewerSessionVars session ) {
         HBox.setHgrow( removeUserDropdown, Priority.ALWAYS )
         
         def userRow = new HBox( 5, users, addUserBtn, removeUserBtn )
+        
+        // Red border if no value
+        users.valueProperty().addListener { obs, oldVal, newVal ->
+            users.setStyle( newVal ? null : missingStyle )
+        }
         
         // Set remove user option cells style
         removeUserDropdown.setCellFactory {
@@ -1439,14 +1472,26 @@ def getCodePreferences( ViewerSessionVars session ) {
             }
         }
         
-        // Forcing new users to only have letters/numbers and showing warning if not
+        // Enforcing criteria and firing messages
         userInputField.textProperty().addListener { obs, oldVal, newVal ->
+            // Letters/numbers only
             if (!newVal.matches( "[A-Za-z0-9]*" )) {
                 userInputField.setText( oldVal )
                 
                 userFieldNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
                 userFieldNotice.setText( "*Letters/numbers*" )           
                 showFadeOutMessage( userFieldNotice )
+                return
+            }
+            
+            // 15 characters max
+            if (newVal.length() > 15) {
+                userInputField.setText( oldVal )
+                
+                userFieldNotice.setText( "*15 chrs max*" )
+                userFieldNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                showFadeOutMessage( userFieldNotice )
+                return
             }
         }
         
@@ -1529,6 +1574,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         def annoClassField = new ComboBox()
         annoClassField.setMaxWidth( Double.MAX_VALUE )
         setTT( [annoClassLabel, annoClassField], "Class of annotations to be classified. \n If missing, add to QuPath class list." )
+        annoClassField.setStyle( missingStyle ) // Start with red border
         
         def projectPathClasses = project.getPathClasses().findAll { it?.getName() }    
         def currentImageAnnos = currentImageData ? getAnnotationObjects() : []
@@ -1578,6 +1624,11 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         annoClassField.setItems( FXCollections.observableArrayList( pathClassEntries ) )
         
+        // Red border if empty
+        annoClassField.valueProperty().addListener { obs, oldVal, newVal ->
+            annoClassField.setStyle( newVal ? null : missingStyle )
+        }
+        
         
         def classifyingNameOptions
         
@@ -1606,42 +1657,68 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         def classifyingNameRow = new HBox( 5, classifyingNameSelection, populateClassifyingNamesBtn )
         
-        // Forcing classifying name to only have letters/numbers and showing warning if not
+        // Enforcing criteria and firing messages
         classifyingNameSelection.getEditor().textProperty().addListener { obs, oldVal, newVal ->
+            // Letters/numbers only
             if (!newVal.matches( "[A-Za-z0-9]*" )) {
                 classifyingNameSelection.getEditor().setText( oldVal )
                 
                 classifyingNameNotice.setText( "*Letters/numbers*" )
                 classifyingNameNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
                 showFadeOutMessage( classifyingNameNotice )
+                return
             }
+            
+            // 15 characters max
+            if (newVal.length() > 15) {
+                classifyingNameSelection.getEditor().setText( oldVal )
+                
+                classifyingNameNotice.setText( "*15 chrs max*" )
+                classifyingNameNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                showFadeOutMessage( classifyingNameNotice )
+                return
+            }
+            
+            // Red border if missing
+            classifyingNameSelection.setStyle( !newVal ? missingStyle : null )
         }
+        
+        // Start with red border (cleared if added to)
+        classifyingNameSelection.setStyle( missingStyle )
         
         // Running through project and populating classifying name options and sending notice
         populateClassifyingNamesBtn.setOnAction {
-            def uniqueNames = project.getImageList().collectMany { entry ->
-                entry.readImageData().getHierarchy().getAnnotationObjects().collectMany { anno ->
-                    anno.getMetadata().keySet().findAll { it.contains( session.toolKeyPrefix ) }
+            def scene = QuPathGUI.getInstance().getStage().getScene()
+            scene.setCursor( Cursor.WAIT )
+            populateClassifyingNamesBtn.setDisable( true )
+        
+            Thread.start {
+                def uniqueNames = project.getImageList().collectMany { entry ->
+                    entry.readImageData().getHierarchy().getAnnotationObjects().collectMany { anno ->
+                        anno.getMetadata().keySet().findAll { it.contains( session.toolKeyPrefix ) }
+                    }
+                }.unique().collect { getClassifyingNameFromKey( it ) }.unique()
+        
+                Platform.runLater {
+                    classifyingNameOptions.addAll( uniqueNames )
+                    classifyingNameOptions = classifyingNameOptions.unique()
+                    classifyingNameSelection.setItems( classifyingNameOptions )
+                    if ( !classifyingNameSelection.getItems().isEmpty() ) {
+                        classifyingNameSelection.setValue( classifyingNameSelection.getItems().first() )
+                    }
+        
+                    if ( !uniqueNames.isEmpty() ) {
+                        classifyingNameNotice.setText( "*${uniqueNames.size()} added*" )
+                        classifyingNameNotice.setStyle( "-fx-text-fill: #5cb85c;" )
+                    } else {
+                        classifyingNameNotice.setText( "*None available*" )
+                        classifyingNameNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                    }
+                    
+                    showFadeOutMessage( classifyingNameNotice )
+                    scene.setCursor( Cursor.DEFAULT )
                 }
-            }.unique().collect { getClassifyingNameFromKey( it ) }.unique()
-            
-            classifyingNameOptions.addAll( uniqueNames  )
-            classifyingNameOptions = classifyingNameOptions.unique()
-            classifyingNameSelection.setItems( classifyingNameOptions )
-            if (!classifyingNameSelection.getItems().isEmpty()) {
-                classifyingNameSelection.setValue( classifyingNameSelection.getItems().first() )
             }
-            
-            if ( !uniqueNames.isEmpty() ) {
-                classifyingNameNotice.setText( "*${uniqueNames.size()} added*" )
-                classifyingNameNotice.setStyle( "-fx-text-fill: #5cb85c;" )
-            } else {
-                classifyingNameNotice.setText( "*None available*" )
-                classifyingNameNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
-            }
-            
-            showFadeOutMessage( classifyingNameNotice )
-            populateClassifyingNamesBtn.setDisabled( true )
         }
         
         
@@ -1653,7 +1730,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         gridSizeField.setPromptText( "Size of grouping grid (µm)" )
         setTT( [gridSizeLabel, gridSizeField], "Size of grouping grid (µm). Increasing this reduces the number of groups per image but increases objects per group." )
         
-        def gridSizeNotice = new Label( "*Numbers only*" )
+        def gridSizeNotice = new Label()
         gridSizeNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
         gridSizeNotice.setPadding( new Insets( 0, 0, 0, 10 ) )
         gridSizeNotice.setVisible( false )
@@ -1662,12 +1739,24 @@ def getCodePreferences( ViewerSessionVars session ) {
         gridSizeRow = new HBox( 2, gridSizeLabel, gridSizeNotice )  
         gridSizeRow.setPadding( new Insets( 10, 0, 0, 0 ) )
         
-        // Enforce integer-only input for grid size and show warning
+        // Enforcing criteria and firing messages
         gridSizeField.textProperty().addListener { obs, oldVal, newVal ->
+            // Numbers only
             if (!newVal.matches( "\\d*" )) {
                 gridSizeField.setText( oldVal )
                 
+                gridSizeNotice.setText( "*Numbers only*" )
                 showFadeOutMessage( gridSizeNotice )
+                return
+            }
+            
+            // 5 numbers max
+            if (newVal.length() > 5) {
+                gridSizeField.setText( oldVal )
+                
+                gridSizeNotice.setText( "*5 nums max*" )
+                showFadeOutMessage( gridSizeNotice )
+                return
             }
         }
         
@@ -1738,6 +1827,9 @@ def getCodePreferences( ViewerSessionVars session ) {
         // Create bounding box for channels and relevant options
         def fullChannelsBox = new VBox( 5 )
         fullChannelsBox.setPadding( new Insets( 0, 5, 5, 5 ) )
+        fullChannelsBox.setStyle( missingStyle ) // Start with red border
+        
+        def chanBoxStyle = "-fx-border-color: #000000"
         
         // Create bounding box for channel checkboxes
         def channelCBsBox =  new VBox( 5 )
@@ -1754,6 +1846,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         def channelsLabel = new Label( "Select up to ${maxChannels} channels: [0]" )
         channelsLabel.setPadding( new Insets( 5, 0, 0, 0 ) )
         def fullChannelsBoxSpacer = new Region()
+        fullChannelsBoxSpacer.setMinWidth( 10 )
         HBox.setHgrow( fullChannelsBoxSpacer, Priority.ALWAYS )
         def clearChannelsBtn = new Button()
         setTT( clearChannelsBtn, "Clear selected channels" )
@@ -1763,6 +1856,14 @@ def getCodePreferences( ViewerSessionVars session ) {
         def topChannelRow = new HBox( 5 )
         topChannelRow.setPadding( new Insets( 8 ) )
         topChannelRow.getChildren().setAll( channelsLabel, fullChannelsBoxSpacer, clearChannelsBtn )
+        
+        // Compute width once then lock
+        Platform.runLater {
+            double w = topChannelRow.getWidth()
+            topChannelRow.setMinWidth( w )
+            topChannelRow.setPrefWidth( w )
+            topChannelRow.setMaxWidth( w )
+        }
         
         // Add channel checkboxes and listeners to enforce max number
         channelCheckboxes.each { cb ->
@@ -1783,6 +1884,9 @@ def getCodePreferences( ViewerSessionVars session ) {
                     // Too many – revert this one
                     cb.setSelected( false )
                 }
+                
+                // Red border none selected
+                fullChannelsBox.setStyle( selectedCount ? chanBoxStyle : missingStyle )
             }
             channelCBsBox.getChildren().add( cb )
             cb.setFocusTraversable( false )
@@ -1802,7 +1906,6 @@ def getCodePreferences( ViewerSessionVars session ) {
         preferencesDialog.getDialogPane().content = root
         
         // Formatting scrollable box
-        fullChannelsBox.setStyle( "-fx-border-color: #000000" )
         topChannelRow.setStyle( "-fx-border-color: #000000; -fx-border-width: 0 0 1 0" )
         channelsScroll.setStyle( "-fx-background-color: transparent" )
         
@@ -1971,6 +2074,9 @@ def getCodePreferences( ViewerSessionVars session ) {
             
             classColorDialog.getDialogPane().setContent( classColorGrid )
             
+            // Stopping the row from staying highlighted on mouse release
+            rowListView.setOnMouseReleased { rowListView.getSelectionModel().clearSelection() }
+            
             
             def refreshStateLabelBox
             
@@ -2060,14 +2166,14 @@ def getCodePreferences( ViewerSessionVars session ) {
                                      colorPickerValues.size() != colorPickerValues.unique().size() )
             }
             
-            // Closure: Attach a listener that blocks invalid inputs and updates respective lists/maps
-            def attachStateColorListener = { item ->
+            // Closure: Attach a state box listener that blocks invalid inputs and updates respective lists/maps
+            def attachStateListeners = { item ->
                 
                 item.valueProperty().addListener { obs, oldVal, newVal ->
                     
-                    if (updatingSelections) return
-                    
+                    if (updatingSelections) { return }
                     updatingSelections = true
+                    
                     try {
                         // If state box is empty, setting to last state
                         if (!newVal) {
@@ -2075,25 +2181,48 @@ def getCodePreferences( ViewerSessionVars session ) {
                             return
                         }
                         
-                        if (item instanceof ComboBox) {
-                            def restOfBoxes = stateBoxes.findAll { it != item }
-                            
-                            // If an existing state is entered, switching the two states
-                            restOfBoxes.each { box ->
-                                if (box.getValue() == newVal) {
-                                    box.setValue( oldVal )
-                                }
+                        // If an existing state is entered, switching the two states
+                        def restOfBoxes = stateBoxes.findAll { it != item }
+                        restOfBoxes.each { box ->
+                            if (box.getValue() == newVal) {
+                                box.setValue( oldVal )
                             }
+                        }  
                         
-                        } else if (item instanceof ColorPicker) {
-                            def restOfPickers = (colorPickers + colorPickerU).findAll { it != item }
-                            def usedColors = restOfPickers.collect { it.getValue() }
-                            
-                            // Blocking new color if already being used
-                            if (newVal in usedColors) {
-                                item.setValue( oldVal )
-                                return
-                            }
+                        syncMapsFromControls()
+                        rowListView.refresh()
+                        refreshStateLabelBox()
+                        updateOkButton()
+                    
+                    } finally {
+                        updatingSelections = false
+                    }
+                }
+                
+                // Letters/numbers only and no more than 15 characters
+                item.getEditor().textProperty().addListener { obs, oldVal, newVal ->
+                    if (!newVal.matches( "[A-Za-z0-9]*" ) || newVal.length() > 15) {
+                        item.getEditor().setText( oldVal )
+                    }
+                }
+            }
+            
+            // Closure: Attach a color listener to stop duplicate colors and updates respective lists/maps
+            def attachColorListener = { item ->
+                 
+                item.valueProperty().addListener { obs, oldVal, newVal ->
+                    
+                    if (updatingSelections) { return }   
+                    updatingSelections = true
+                    
+                    try {
+                        def restOfPickers = (colorPickers + colorPickerU).findAll { it != item }
+                        def usedColors = restOfPickers.collect { it.getValue() }
+                        
+                        // Blocking new color if already being used
+                        if (newVal in usedColors) {
+                            item.setValue( oldVal )
+                            return
                         }
                         
                         syncMapsFromControls()
@@ -2127,14 +2256,14 @@ def getCodePreferences( ViewerSessionVars session ) {
             
             // Attaching listeners to existing objects
             stateBoxes.each { cb ->
-                attachStateColorListener( cb )
+                attachStateListeners( cb )
             }
             
             colorPickers.each { cp ->
-                attachStateColorListener( cp )
+                attachColorListener( cp )
             }
             
-            attachStateColorListener( colorPickerU )
+            attachColorListener( colorPickerU )
             
             reviewerCheckboxes.each { rCB ->
                 rCB.selectedProperty().addListener( RevCBListener )
@@ -2143,14 +2272,14 @@ def getCodePreferences( ViewerSessionVars session ) {
             // Closure: Create a new state box, add options and listener
             def createStateBox = {
                 def sb = new ComboBox<String>()
-                attachStateColorListener( sb )
+                attachStateListeners( sb )
                 return sb
             }
             
             // Closure: Create a new color picker and add listener
             def createColorPicker = {
                 def cp = new ColorPicker()
-                attachStateColorListener( cp )
+                attachColorListener( cp )
                 return cp
             }
             
@@ -2447,7 +2576,6 @@ def getCodePreferences( ViewerSessionVars session ) {
                 return rowCell
             }
             
-            
             // Setup to restore default number and order of classes/colors
             restoreDefaultsBtn.setOnAction {
                 tempStateOrder = new ArrayList<>( defaultStateOrder )
@@ -2627,6 +2755,15 @@ def getCodePreferences( ViewerSessionVars session ) {
             stateSelectors.eachWithIndex { stateSelector, i ->            
                 stateSelector.valueProperty().addListener { obs, oldVal, newVal ->
                     stateSelector.setValue( newVal ?: oldVal )
+                }
+            }
+            
+            // Letters/numbers only and no more than 15 characters
+            stateSelectors.each { sS ->
+                sS.getEditor().textProperty().addListener { obs, oldVal, newVal ->
+                    if (!newVal.matches( "[A-Za-z0-9]*" ) || newVal.length() > 15) {
+                        sS.getEditor().setText( oldVal )
+                    }
                 }
             }
             
@@ -3205,7 +3342,7 @@ while (true) {
         "User Completion", reviewerCriteriaList )
     addWarningCheck( [session.classifierMode, session.checkingWork, userCompleteImages.isEmpty()],
         "User has not completed any images and cannot check work.",
-        "User Completion" )
+        "User Completion", generalCriteria )
     addWarningCheck( [session.checkingWork, (userIncompleteImages.size() !in [0, imageList.size()])],
         "${userIncompleteImages.size()} image(s) have not been completed by user and cannot be checked.",
         "User Completion", userIncompleteImages )
@@ -3331,24 +3468,26 @@ if (session.currentEntry) {
 }
 
 
-// Collect preset options to restore after script
+// Collect existing viewer settings to restore after script
 session.viewer = getCurrentViewer()
 session.view = session.viewer.getView()
-session.overlayOptions = session.viewer.getOverlayOptions()
-boolean wasGridOn = session.overlayOptions.getShowGrid()
-double gridX = PathPrefs.gridSpacingX.get()
-double gridY = PathPrefs.gridSpacingY.get()
-changeGrid( true, session.gridSize, session.gridSize, session )
-session.oldAnnoThickness = PathPrefs.annotationStrokeThicknessProperty().get()
+viewerSettings.overlayOptions = session.viewer.getOverlayOptions()
+viewerSettings.wasGridOn = viewerSettings.overlayOptions.getShowGrid()
+viewerSettings.oGridX = PathPrefs.gridSpacingX.get()
+viewerSettings.oGridY = PathPrefs.gridSpacingY.get()
+viewerSettings.wasOverviewOn = ViewerPlusDisplayOptions.getSharedInstance().getShowOverview()
+viewerSettings.oldAnnoThickness = PathPrefs.annotationStrokeThicknessProperty().get()
 
-// Adding grid / changing to needed viewer settings
+// Changing viewer settings for run
 Platform.runLater {
+    ViewerPlusDisplayOptions.getSharedInstance().setShowOverview( false )
     PathPrefs.annotationStrokeThicknessProperty().set( 1 )
-    session.overlayOptions.setShowDetections( true )
-    session.overlayOptions.setFillDetections( true )
-    session.overlayOptions.setShowAnnotations( true )
-    session.overlayOptions.setFillAnnotations( false )
-    session.overlayOptions.setOpacity( 1 )
+    changeGrid( viewerSettings, true, session.gridSize, session.gridSize )
+    viewerSettings.overlayOptions.setShowDetections( true )
+    viewerSettings.overlayOptions.setFillDetections( true )
+    viewerSettings.overlayOptions.setShowAnnotations( true )
+    viewerSettings.overlayOptions.setFillAnnotations( false )
+    viewerSettings.overlayOptions.setOpacity( 1 )
 }
 
 
@@ -3451,11 +3590,11 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     }
     
     // Turning off clicking and scrolling temporarily during the script to be brought back after
-    session.scrollFilterKey = "scrollFilterON"
-    session.scrollBlocker = { ScrollEvent e ->
+    viewerSettings.scrollFilterKey = "scrollFilterON"
+    viewerSettings.scrollBlocker = { ScrollEvent e ->
         e.consume()  // stops QuPath from zooming
     } as EventHandler<ScrollEvent>
-    addScrollBlocker( session )
+    addScrollBlocker( session, viewerSettings )
     
     // Establishing/storing important variables
     @Field int numTrues
@@ -3486,13 +3625,13 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
         def alert = null
         runOnFxThreadAndWait {
             alert = new Alert( AlertType.NONE )
-            alert.setX( dialogOffsetX )
-            alert.setY( dialogOffsetY )
+            alert.setX( 0 )
+            alert.setY( 0 )
             alert.initModality( Modality.NONE )
         
             // Pass queue in so buttons put results instead of closing
             buildAndWireAlertUI( alert, session, uiElements, queue )
-            updateUI( alert, session, uiElements, queue )
+            updateUI( alert, session, uiElements, viewerSettings, queue )
         
             alert.show()
             
@@ -3517,7 +3656,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 def binKey = [binX, binY]
                 binMap[ binKey ] << anno
             }
-            sortedBins = binMap.keySet().sort { a, b -> a[0] <=> b[0] ?: a[1] <=> b[1] }
+            sortedBins = binMap.keySet().sort { a, b -> a[1] <=> b[1] ?: a[0] <=> b[0] }
             
             // Storing classification data
             session.annoStateMap = [:]
@@ -3590,7 +3729,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                             "Group ${binIndex + 1} of ${sortedBins.size()} — ${session.userName}" :
                             "Free View")
                             
-                            updateUI( alert, session, uiElements, queue )
+                            updateUI( alert, session, uiElements, viewerSettings, queue )
                     }
                     
                     def result = queue.take()
@@ -3601,8 +3740,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                         
                         case (ActionStrings.CANCEL):
                             runOnFxThreadAndWait { alert.getDialogPane()?.getScene()?.getWindow()?.hide() }
-                            restoreToPrescript( session )
-                            changeGrid( wasGridOn, gridX, gridY, session )
+                            restoreToPrescript( session, viewerSettings )
                             codePreferences.instructions = session.instructions
                             writePreferencesMaptoJSON( session.prefsFile, codePreferences )
                             return
@@ -3640,12 +3778,17 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                             break
                             
                         case (ActionStrings.TOGGLE_ANNOS): // Toggling annotations on or off
-                            getAnnosVisibilityStatus( session ) ? 
+                            getAnnosVisibilityStatus( viewerSettings ) ? 
                                 session.prevSelectedAnnos = getSelectedObjects().collect { it } : 
                                 selectObjects( session.prevSelectedAnnos )
-                            toggleAnnos( session )
+                            toggleAnnos( viewerSettings )
                             break
                        
+                        case (ActionStrings.TOGGLE_GRID): // Toggles grid on or off
+                            boolean gridOn = viewerSettings.overlayOptions.getShowGrid()
+                            changeGrid( viewerSettings, !gridOn )
+                            break
+                        
                         case (ActionStrings.TOGGLE_CHANNEL): // Toggles channel of interest or remembers for changing brightness (if turned off, finds first one that's on)
                             def channelToToggle = session.channelSpecifics.find { it.name == session.toggleChannel }?.channel
                             toggleChannel( channelToToggle, session )
@@ -3688,8 +3831,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     // Getting/generating/setting colors of different anno classifications
                                     colorAnnosFromMap( session, [session.userKey] )
                                     
-                                    session.overlayOptions.setShowDetections( false )
-                                    session.overlayOptions.setShowGrid( false )
+                                    viewerSettings.overlayOptions.setShowDetections( false )
                                     session.prevSelectedAnnos = getSelectedObjects().collect { it }
                                     session.hierarchy.getSelectionModel().clearSelection()
                                     nonFreeViewerState = saveViewerState( session )
@@ -3699,25 +3841,25 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     session.server.getMetadata().getMagnification()
                                     changeViewer( sWidth/2, sHeight/2, sWidth/1.4, sHeight/1.4, false, session )
                                     
-                                    removeScrollBlocker( session )
+                                    removeScrollBlocker( session, viewerSettings )
                                     
                                 } else {
                                     
                                     restoreViewerState( nonFreeViewerState, session )
-                                    session.overlayOptions.setShowDetections( true )
-                                    session.overlayOptions.setShowGrid( true )
-                                    session.overlayOptions.setOpacity( 1 )
+                                    viewerSettings.overlayOptions.setShowDetections( true )
+                                    changeGrid( viewerSettings, true )
+                                    viewerSettings.overlayOptions.setOpacity( 1 )
                                     session.freeViewMode = session.freeViewModes[0]
                                     session.allClassAnnos.each { it.setColor( session.currentAnnoColorsMap[ it ] ) }                        
                                     selectObjects( session.prevSelectedAnnos )
-                                    addScrollBlocker( session )
+                                    addScrollBlocker( session, viewerSettings )
                                     session.zoomed = false
                                 }
                             }
                             break
                             
                         case (ActionStrings.SWITCH_FREE_VIEW_MODE):
-                            switchFVmode( session )
+                            switchFVmode( session, viewerSettings )
                             break
                         
                         case (ActionStrings.NEXT): // Updating classifications after each group
@@ -3779,7 +3921,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                             "Annotation ${annoIndex + 1} of ${annotations.size()} — ${session.userName}" :
                             "Free View" )
                     
-                        updateUI( alert, session, uiElements, queue )
+                        updateUI( alert, session, uiElements, viewerSettings, queue )
                     }
                     
                     def result = queue.take()
@@ -3789,8 +3931,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                         
                         case (ActionStrings.CANCEL): // If cancelled, puts back previous settings
                             runOnFxThreadAndWait { alert.getDialogPane()?.getScene()?.getWindow()?.hide() }
-                            restoreToPrescript( session )
-                            changeGrid( wasGridOn, gridX, gridY, session )
+                            restoreToPrescript( session, viewerSettings )
                             codePreferences.instructions = session.instructions
                             writePreferencesMaptoJSON( session.prefsFile, codePreferences )
                             return
@@ -3809,10 +3950,15 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                 break
                             }
                         case (ActionStrings.TOGGLE_ANNOS): // Toggling annotations on or off
-                            getAnnosVisibilityStatus( session ) ? 
+                            getAnnosVisibilityStatus( viewerSettings ) ? 
                                 session.prevSelectedAnnos = getSelectedObjects().collect { it } : 
                                 selectObjects( session.prevSelectedAnnos )
-                            toggleAnnos( session )
+                            toggleAnnos( viewerSettings )
+                            break
+                        
+                        case (ActionStrings.TOGGLE_GRID): // Toggles grid on or off
+                            boolean gridOn = viewerSettings.overlayOptions.getShowGrid()
+                            changeGrid( viewerSettings, !gridOn )
                             break
                         
                         case (ActionStrings.TOGGLE_CHANNEL): // Toggles channel of interest or remembers for changing brightness (if turned off, finds first one that's on)
@@ -3858,25 +4004,24 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     session.server.getMetadata().getMagnification()
                                     changeViewer( sWidth/2, sHeight/2, sWidth/1.4, sHeight/1.4, false, session )
                                     
-                                    session.overlayOptions.setShowGrid( false )
-                                    removeScrollBlocker( session )
+                                    removeScrollBlocker( session, viewerSettings )
                                     
                                 } else {
                                     
                                     restoreViewerState( nonFreeViewerState, session )
-                                    session.overlayOptions.setOpacity( 1 )
+                                    viewerSettings.overlayOptions.setOpacity( 1 )
                                     session.freeViewMode = session.freeViewModes[0]
                                     session.allClassAnnos.each { it.setColor( session.currentAnnoColorsMap[ it ] ) }                          
                                     selectObjects( session.prevSelectedAnnos )
-                                    session.overlayOptions.setShowGrid( true )
-                                    addScrollBlocker( session )
+                                    changeGrid( viewerSettings, true )
+                                    addScrollBlocker( session, viewerSettings )
                                 }
                             }
                             break
                         
                         // Switch scroll mode in free view between zoom and brightness
                         case (ActionStrings.SWITCH_FREE_VIEW_MODE):
-                            switchFVmode( session )
+                            switchFVmode( session, viewerSettings )
                             break
                         
                         // Zoom in on specific annotation
@@ -3934,8 +4079,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
         // If next image wanted, saving changes and changing image
         switch (moveToNextImage) {
             case (ActionStrings.YES):
-                restoreToPrescript( session )
-                changeGrid( wasGridOn, gridX, gridY, session )
+                restoreToPrescript( session, viewerSettings )
                 codePreferences.instructions = session.instructions
                 writePreferencesMaptoJSON( session.prefsFile, codePreferences )
                 
@@ -3947,8 +4091,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
             
             // Stopping script and resetting colors if not
             case (ActionStrings.NO):
-                restoreToPrescript( session )
-                changeGrid( wasGridOn, gridX, gridY, session )
+                restoreToPrescript( session, viewerSettings )
                 codePreferences.instructions = session.instructions
                 writePreferencesMaptoJSON( session.prefsFile, codePreferences )
                 return
@@ -4017,6 +4160,7 @@ import qupath.lib.common.ColorTools
 import qupath.lib.gui.tools.IconFactory
 import qupath.lib.gui.viewer.QuPathViewer
 import qupath.lib.gui.viewer.QuPathViewerListener
+import qupath.lib.gui.viewer.ViewerPlusDisplayOptions
 
 import javafx.beans.binding.Bindings
 
