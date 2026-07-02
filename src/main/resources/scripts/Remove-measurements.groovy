@@ -654,13 +654,33 @@ def codePreferences = runOnFxThreadAndWait {
         .or( anySelectedClass.not() )
     )
     
+    // Requesting confirmation to remove
+    boolean confirmRemove = false
+    okBtn.addEventFilter( ActionEvent.ACTION ) { e ->
+        def confirmRemoveAlert = new Alert( Alert.AlertType.CONFIRMATION )
+        
+        confirmRemoveAlert.setTitle( "Confirm information removal" )  
+        confirmRemoveAlert.setHeaderText( null )
+        confirmRemoveAlert.setContentText( "Removed information cannot be recovered. Continue?" )
+        
+        def result = confirmRemoveAlert.showAndWait()
+        def selection = result.isPresent() && result.get() == ButtonType.OK
+        
+        if (!selection) {
+            e.consume()
+            return
+        }
+        
+        confirmRemove = true
+    }
     
     // Attach root & show dialog
     dialog.getDialogPane().content = root   
+    
     def result = dialog.showAndWait()
     def button = result.get()
     
-    if (button == ButtonType.OK) {
+    if (confirmRemove) {
         def selectedImages = imagesBox.CBs
                 .findAll { it.isSelected() }
                 .collect { it.getText() }
@@ -732,11 +752,11 @@ for (image in imagesToRun) {
         codePreferences.measurements.each { anno.getMeasurements().remove( it ) }
     }
     
-    // Updating viewer and saving (when relevant)
-    // If only current image is imported to, will not automatically save so the import can be tested
-    if (imagesToRun.size() > 1 || image != currentEntry) {
-        image.saveImageData( imageData ) // Saving data
-    }
+    
+    
+    
+    // Saving data
+    image.saveImageData( imageData )
     
     // Ensure current viewer updates its annotation list when working on the current image
     if (image == currentEntry) {

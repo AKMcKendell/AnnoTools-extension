@@ -412,7 +412,7 @@ def codePreferences = runOnFxThreadAndWait {
         .or( anySelectedPathClass.not() )
     )
     
-    
+    // Requesting confirmation to remove
     boolean confirmRemove = false
     okBtn.addEventFilter( ActionEvent.ACTION ) { e ->
         def confirmRemoveAlert = new Alert( Alert.AlertType.CONFIRMATION )
