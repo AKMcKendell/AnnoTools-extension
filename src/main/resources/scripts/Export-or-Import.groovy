@@ -43,6 +43,8 @@ def setTT( objs, String tooltip ) {
 def createProgressWindow( String title, int totalImages ) {
     return runOnFxThreadAndWait {
         def stage = new Stage()
+        stage.setMinWidth( 350 )
+        stage.setResizable( false )
         stage.setTitle( title )
         
         def imageNum = new SimpleStringProperty( "1" )
@@ -54,8 +56,13 @@ def createProgressWindow( String title, int totalImages ) {
         def imageRow = new HBox( 5, imageLabel )
         
         def bar = new ProgressBar( 0.0 )
+        
+        // Progress bar fills row width
         bar.setPrefWidth( 350 )
-        def barRow = new HBox( 10, bar )     
+        bar.setMaxWidth( Double.MAX_VALUE )
+        HBox.setHgrow( bar, Priority.ALWAYS )
+        
+        def barRow = new HBox( 10, bar )
         
         def cancelBtn = new Button( "Cancel" )
         cancelBtn.setDisable( false )
@@ -86,6 +93,19 @@ def createProgressWindow( String title, int totalImages ) {
             node.widthProperty().addListener { obs, old, nw -> updateMinWidth() }
         }
         
+        def updateStageWidth = {
+            Platform.runLater {
+                double maxRowPref = rows.collect { it.prefWidth(-1) }.max()
+                double needed = Math.max(maxRowPref + vbox.getPadding().getLeft() + vbox.getPadding().getRight(), 350)
+                if (needed > stage.getWidth()) {
+                    stage.setWidth(needed)
+                }
+            }
+        }
+        [imageNum, imageName].each { prop ->
+            prop.addListener { obs, old, nw -> updateStageWidth() }
+        }
+        
         def scene = new Scene( vbox )
         stage.setScene( scene )
         
@@ -95,6 +115,7 @@ def createProgressWindow( String title, int totalImages ) {
         }
         stage.initModality( Modality.WINDOW_MODAL )
         stage.show()
+        updateStageWidth()
         
         def startTime = System.nanoTime()
         
@@ -366,6 +387,32 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
         // Double fire to spark listeners
         cb.setSelected( !cb.isSelected() )
         cb.setSelected( !cb.isSelected() )
+    }
+    
+    // Allowing shift + click to select/deselect multiple
+    CheckBox lastClicked = null   
+    checkboxes.eachWithIndex { cb, idx ->
+    
+        cb.addEventHandler( MouseEvent.MOUSE_CLICKED ) { e ->
+    
+            if (e.isShiftDown() && lastClicked != null) {
+                int lastIdx = checkboxes.indexOf( lastClicked )
+                int start = Math.min( lastIdx, idx )
+                int end   = Math.max( lastIdx, idx )
+    
+                // Use the state of the checkbox just clicked
+                boolean value = lastClicked.isSelected()
+    
+                (start..end).each { i ->
+                    cb = checkboxes[i]
+                    if (!cb.isDisabled() && cb.isVisible() ) {
+                        cb.setSelected( value )
+                    }
+                }
+            }
+    
+            lastClicked = cb
+        }
     }
     
     def clearBtn = new Button()
@@ -1204,7 +1251,7 @@ for (image in imagesToRun) {
     // - Reporting progress -
     processed++
     double frac = processed / total 
-    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
+    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed+1] )
 }
 
 // Closing progress bar window

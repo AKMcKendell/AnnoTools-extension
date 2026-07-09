@@ -52,6 +52,8 @@ def setTT( objs, String tooltip ) {
 def createProgressWindow( String title, int totalImages ) {
     return runOnFxThreadAndWait {
         def stage = new Stage()
+        stage.setMinWidth( 350 )
+        stage.setResizable( false )
         stage.setTitle( title )
         
         def stepLabel = new Label()
@@ -73,8 +75,7 @@ def createProgressWindow( String title, int totalImages ) {
         def imageRow = new HBox( 5, imageLabel )
         
         def bar = new ProgressBar( 0.0 )
-        bar.setPrefWidth( 350 )
-        def barRow = new HBox( 10, bar )     
+        def barRow = new HBox( 10, bar )  
         
         def cancelBtn = new Button( "Cancel" )
         cancelBtn.setDisable( false )
@@ -105,6 +106,24 @@ def createProgressWindow( String title, int totalImages ) {
             node.widthProperty().addListener { obs, old, nw -> updateMinWidth() }
         }
         
+        // Progress bar fills row width
+        bar.setMaxWidth( Double.MAX_VALUE )
+        HBox.setHgrow( bar, Priority.ALWAYS )
+        
+        // Stage grows (never shrinks) to fit widest row
+        def updateStageWidth = {
+            Platform.runLater {
+                double maxRowPref = rows.collect { it.prefWidth(-1) }.max()
+                double needed = maxRowPref + vbox.getPadding().getLeft() + vbox.getPadding().getRight()
+                if ( needed > Math.max( stage.getMinWidth(), 0 ) ) {
+                    stage.setMinWidth( needed )
+                }
+            }
+        }
+        [ stepNum, stepMax, stepName, stepPer, imageNum, imageName ].each { prop ->
+            prop.addListener { obs, old, nw -> updateStageWidth() }
+        }
+        
         def scene = new Scene( vbox )
         stage.setScene( scene )
         
@@ -114,6 +133,7 @@ def createProgressWindow( String title, int totalImages ) {
         }
         stage.initModality( Modality.WINDOW_MODAL )
         stage.show()
+        updateStageWidth()
         
         def startTime = System.nanoTime()
         
@@ -284,6 +304,32 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
         // Double fire to spark listeners
         cb.setSelected( !cb.isSelected() )
         cb.setSelected( !cb.isSelected() )
+    }
+    
+    // Allowing shift + click to select/deselect multiple
+    CheckBox lastClicked = null   
+    checkboxes.eachWithIndex { cb, idx ->
+    
+        cb.addEventHandler( MouseEvent.MOUSE_CLICKED ) { e ->
+    
+            if (e.isShiftDown() && lastClicked != null) {
+                int lastIdx = checkboxes.indexOf( lastClicked )
+                int start = Math.min( lastIdx, idx )
+                int end   = Math.max( lastIdx, idx )
+    
+                // Use the state of the checkbox just clicked
+                boolean value = lastClicked.isSelected()
+    
+                (start..end).each { i ->
+                    cb = checkboxes[i]
+                    if (!cb.isDisabled() && cb.isVisible() ) {
+                        cb.setSelected( value )
+                    }
+                }
+            }
+    
+            lastClicked = cb
+        }
     }
     
     def clearBtn = new Button()
@@ -591,7 +637,7 @@ int netSteps = codePreferences.objectClasses1.size() * codePreferences.objectCla
 imageLoop:
 for (image in imagesToRun) {
     
-    if (cancelFlag.get()) break
+    if (cancelFlag.get()) { break }
     
     // Reporting current image
     updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image] )
@@ -644,7 +690,7 @@ for (image in imagesToRun) {
             int compNum = 1
             
             // Skipping the loop if either class has no objects
-            if (class1Annos.isEmpty() || class2Annos.isEmpty()) continue
+            if (class1Annos.isEmpty() || class2Annos.isEmpty()) { continue }
             
             class1Annos.each { class1Anno ->
                 def class1Geom = class1Anno.getROI().getGeometry()
@@ -738,6 +784,7 @@ import javafx.scene.Scene
 import javafx.scene.control.*
 import javafx.scene.control.ButtonBar.ButtonData
 import javafx.scene.layout.*
+import javafx.scene.input.MouseEvent
 import javafx.stage.*
 import javafx.beans.binding.Bindings
 import com.google.gson.GsonBuilder

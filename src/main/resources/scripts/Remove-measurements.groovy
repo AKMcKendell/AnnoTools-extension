@@ -43,22 +43,26 @@ def setTT( objs, String tooltip ) {
 def createProgressWindow( String title, int totalImages, boolean simplify = false, Stage ownerStage = null ) {
     return runOnFxThreadAndWait {
         def stage = new Stage()
+        stage.setMinWidth( 350 )
+        stage.setResizable( false )
         stage.setTitle( title )
         
-        def imageLabel = new Label( "Image:" )
-        def imageName = new Label( "Starting..." )
-        def imageRow = new HBox( 5, imageLabel, imageName )
+        def imageNum = new SimpleStringProperty( "1" )
+        def imageName = new SimpleStringProperty( "Starting..." )
+        def imageLabel = new Label()
+        imageLabel.textProperty().bind(
+            Bindings.concat( "Image ", imageNum, "/", totalImages, ": ", imageName )
+        )      
+        def imageRow = new HBox( 5, imageLabel )
         
         def bar = new ProgressBar( 0.0 )
-        bar.setPrefWidth( 350 )
-        def progressLabel = new Label( "0 / ${totalImages}" )
-        def barRow = new HBox( 10, bar, progressLabel )
         
-        def stepLabel = new Label( "Step" )
-        def stepNum = new Label()
-        def stepUpdate = new Label()
-        def stepProgress = new Label()
-        def stepRow = new HBox( 5, stepLabel, stepNum, stepUpdate, stepProgress )
+        // Progress bar fills row width
+        bar.setPrefWidth( 350 )
+        bar.setMaxWidth( Double.MAX_VALUE )
+        HBox.setHgrow( bar, Priority.ALWAYS )
+        
+        def barRow = new HBox( 10, bar )
         
         def cancelBtn = new Button( "Cancel" )
         cancelBtn.setDisable( false )
@@ -68,15 +72,15 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
-        List rows = [imageRow, barRow, stepRow, bottomRow]
+        List rows = [imageRow, barRow, bottomRow]
         
         if (simplify) {
-            rows.removeAll( imageRow, stepRow, bottomRow )
+            rows.removeAll( imageRow, bottomRow )
         }
         
         def vbox = new VBox( 10 )
         vbox.getChildren().addAll( rows )
-        vbox.setPadding( new Insets( 5 ) )
+        vbox.setPadding( new Insets( 10 ) )
         vbox.setAlignment( Pos.CENTER_LEFT )
         
         // Sizing to fit all rows
@@ -93,14 +97,28 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
             node.widthProperty().addListener { obs, old, nw -> updateMinWidth() }
         }
         
+        def updateStageWidth = {
+            Platform.runLater {
+                double maxRowPref = rows.collect { it.prefWidth(-1) }.max()
+                double needed = Math.max(maxRowPref + vbox.getPadding().getLeft() + vbox.getPadding().getRight(), 350)
+                if (needed > stage.getWidth()) {
+                    stage.setWidth(needed)
+                }
+            }
+        }
+        [imageNum, imageName].each { prop ->
+            prop.addListener { obs, old, nw -> updateStageWidth() }
+        }
+        
         def scene = new Scene( vbox )
         stage.setScene( scene )
         
         def gui = QuPathGUI.getInstance()
-        stage.initOwner( ownerStage ?: gui?.getStage() )  // use passed owner, fallback to QuPath
+        stage.initOwner( ownerStage ?: gui?.getStage() ) // use passed owner, fallback to QuPath
+        
         stage.initModality( Modality.WINDOW_MODAL )
         stage.show()
-        
+        updateStageWidth()
         
         def startTime = System.nanoTime()
         
@@ -123,7 +141,6 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         timeline.setCycleCount( Animation.INDEFINITE )
         timeline.play()
         
-        
         // Signal to cancel script
         def cancelFlag = new java.util.concurrent.atomic.AtomicBoolean( false )
         def cancelUpdateLabel = new Label( "Cancelling after image..." )
@@ -140,34 +157,24 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         
         return [
             stage        : stage,
+            imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            progressLabel: progressLabel,
-            stepNum      : stepNum,
-            stepUpdate   : stepUpdate,
-            stepProgress : stepProgress,
-            cancelFlag   : cancelFlag,
-            timeline     : timeline
+            cancelFlag   : cancelFlag
         ]
     }
 }
 
-// Function: Show update on code progress
-def updateProgressWindow( Map args = [:] ) {
-    String image      = args.image
-    String stepNum    = args.stepNum
-    String stepUpdate = args.stepUpdate
-    String stepFrac   = args.stepFrac
-    double imageFrac  = args.imageFrac ?: 0
-    String imageStep  = args.imageStep
+// Function: Update progress window
+def updateProgressWindow( UI, Map args = [:] ) {
+    String imageNum  = args.imageNum
+    String imageName = args.imageName
+    double imagePer  = args.imagePer ?: 0
 
     Platform.runLater {
-        if (image)      { args.UI.imageName.setText( image ) }
-        if (stepNum)    { args.UI.stepNum.setText( stepNum ) }
-        if (stepUpdate) { args.UI.stepUpdate.setText( stepUpdate ) }
-        if (stepFrac)   { args.UI.stepProgress.setText( stepFrac ) }
-        if (imageFrac)  { args.UI.bar.setProgress( imageFrac ) }
-        if (imageStep)  { args.UI.progressLabel.setText( imageStep ) }
+        if (imageName) { UI.imageName.set( imageName ) }
+        if (imageNum)  { UI.imageNum.set( imageNum ) }
+        if (imagePer)  { UI.bar.setProgress( imagePer ) }
     }
 }
 
@@ -273,6 +280,32 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
         // Double fire to spark listeners
         cb.setSelected( !cb.isSelected() )
         cb.setSelected( !cb.isSelected() )
+    }
+    
+    // Allowing shift + click to select/deselect multiple
+    CheckBox lastClicked = null   
+    checkboxes.eachWithIndex { cb, idx ->
+    
+        cb.addEventHandler( MouseEvent.MOUSE_CLICKED ) { e ->
+    
+            if (e.isShiftDown() && lastClicked != null) {
+                int lastIdx = checkboxes.indexOf( lastClicked )
+                int start = Math.min( lastIdx, idx )
+                int end   = Math.max( lastIdx, idx )
+    
+                // Use the state of the checkbox just clicked
+                boolean value = lastClicked.isSelected()
+    
+                (start..end).each { i ->
+                    cb = checkboxes[i]
+                    if (!cb.isDisabled() && cb.isVisible() ) {
+                        cb.setSelected( value )
+                    }
+                }
+            }
+    
+            lastClicked = cb
+        }
     }
     
     def clearBtn = new Button( "Clear" )
@@ -382,7 +415,7 @@ def collectProjectAnnotationIndex( project, Stage ownerStage = null ) {
         // - Reporting progress -
         imagesScanned++
         double frac = imagesScanned / projectImages.size() 
-        updateProgressWindow( UI: collectingUI, imageFrac: frac, imageStep: "${imagesScanned}/${projectImages.size()}" )
+        updateProgressWindow( collectingUI, [imagePer: frac, imageNum: imagesScanned] )
     }
     
     // Closing progress bar window
@@ -623,7 +656,7 @@ def codePreferences = runOnFxThreadAndWait {
                 selectSpecificCBs( liveRightCBs.pcCBs, classesSelected )
                 selectSpecificCBs( liveRightCBs.mmCBs, measurementsSelected )
                 selectSpecificCBs( liveRightCBs.mdCBs, metadataSelected )
-                timeStamp.setText( " Last refresh: ${projectCache.timeStamp}" )
+                timeStamp.setText( " Last refresh: ${projectCache.timeStamp}  [CURRENT DATA]" )
                 refreshBtn.setDisable( true )
             }
         }
@@ -648,10 +681,20 @@ def codePreferences = runOnFxThreadAndWait {
         { pathClassBox.CBs.any { it.isSelected() } },
         *pathClassBox.CBs.collect { it.selectedProperty() }
     )
+    def anySelectedMeasurements = Bindings.createBooleanBinding(
+        { measurementsBox.CBs.any { it.isSelected() } },
+        *measurementsBox.CBs.collect { it.selectedProperty() }
+    )
+    def anySelectedMetadata = Bindings.createBooleanBinding(
+        { metadataBox.CBs.any { it.isSelected() } },
+        *metadataBox.CBs.collect { it.selectedProperty() }
+    )
     
     okBtn.disableProperty().bind(
         anySelectedImage.not()
         .or( anySelectedClass.not() )
+        .or( anySelectedMeasurements.not()
+            .and( anySelectedMetadata.not() ) )
     )
     
     // Requesting confirmation to remove
@@ -739,7 +782,7 @@ for (image in imagesToRun) {
     if (cancelFlag.get()) break
     
     // Reporting current image
-    updateProgressWindow( UI: progressUI, image: image.toString() )
+    updateProgressWindow( progressUI, [imageName: image] )
     
     
     // If working on current image, modifying respective image data
@@ -779,7 +822,7 @@ for (image in imagesToRun) {
     // - Reporting progress -
     processed++
     double frac = processed / total 
-    updateProgressWindow( UI: progressUI, imageFrac: frac, imageStep: "${processed}/${total}" )
+    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed+1] )
 }
 
 
@@ -808,6 +851,7 @@ Platform.runLater {
 import java.util.concurrent.CountDownLatch
 import javafx.animation.*
 import javafx.application.Platform
+import javafx.beans.property.SimpleStringProperty
 import javafx.event.ActionEvent
 import javafx.geometry.Insets
 import javafx.geometry.Pos
@@ -815,6 +859,7 @@ import javafx.scene.Scene
 import javafx.scene.control.*
 import javafx.scene.control.ButtonBar.ButtonData
 import javafx.scene.layout.*
+import javafx.scene.input.MouseEvent
 import javafx.stage.*
 import javafx.beans.binding.Bindings
 import com.google.gson.GsonBuilder

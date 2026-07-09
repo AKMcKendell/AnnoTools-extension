@@ -339,57 +339,48 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     uiElements.btnMap << [ name   : ActionStrings.CANCEL,
                            action : { queue.put( ActionStrings.CANCEL ) },
                            btnType: new ButtonType( "(C)ancel", ButtonData.HELP_2 ),
-                           key    : ["c", (KeyCode.ESCAPE)],
-                           active : false]
+                           key    : ["c", (KeyCode.ESCAPE)] ]
                            
     uiElements.btnMap << [ name   : ActionStrings.INSTRUCTIONS,
                            action : { queue.put( ActionStrings.INSTRUCTIONS ) },
-                           key    : "i",
-                           active : false ]
+                           key    : "i" ]
                            
     uiElements.btnMap << [ name   : ActionStrings.TOGGLE_ANNOS,
                            action : { queue.put( ActionStrings.TOGGLE_ANNOS ) },
                            key    : "a",
-                           click  : MouseButton.MIDDLE,
-                           active : false ]
+                           click  : MouseButton.MIDDLE ]
                            
     uiElements.btnMap << [ name   : ActionStrings.TOGGLE_GRID,
                            action : { queue.put( ActionStrings.TOGGLE_GRID ) },
-                           key    : "g",
-                           active : false ]
+                           key    : "g" ]
     
     uiElements.btnMap << [ name   : ActionStrings.TOGGLE_FOCUS,
                            action : { queue.put( ActionStrings.TOGGLE_FOCUS ) },
-                           click  : MouseButton.SECONDARY,
-                           active : false ]
+                           click  : MouseButton.SECONDARY ]
                            
     uiElements.btnMap << [ name   : ActionStrings.REMOVE,
                            action : { queue.put( ActionStrings.REMOVE ) },
                            btnType: new ButtonType( "(R)emove All", ButtonData.HELP_2 ),
                            btnTT  : "Remove current user's classifications from all objects in current group",
-                           key    : "r",
-                           active : false ]
+                           key    : "r" ]
                            
     uiElements.btnMap << [ name   : ActionStrings.BACK,
                            action : { queue.put( ActionStrings.BACK ) },
                            btnType: new ButtonType( "(B)ack", ButtonData.BACK_PREVIOUS ),
                            btnTT  : "Go back to previous ${session.classifierMode ? 'group' : 'annotation'}",
                            key    : "b",
-                           click  : MouseButton.BACK,
-                           active : false ]
+                           click  : MouseButton.BACK ]
                            
     uiElements.btnMap << [ name   : ActionStrings.NEXT,
                            action : { queue.put( ActionStrings.NEXT ) },
                            btnType: new ButtonType( "(N)ext", ButtonData.YES ),
                            btnTT  : "Lock in current classifications and move to next group",
                            key    : "n",
-                           click  : MouseButton.FORWARD,
-                           active : false ]
+                           click  : MouseButton.FORWARD ]
                            
     uiElements.btnMap << [ name  : ActionStrings.TOGGLE_CLASS,
                            action: { queue.put( ActionStrings.TOGGLE_CLASS ) },
-                           click : MouseButton.PRIMARY,
-                           active: false ]
+                           click : MouseButton.PRIMARY ]
     
     
     // - Classification labels -
@@ -398,8 +389,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     
     uiElements.btnMap << [ name  : "Classification label",
                            btn   : classLabel,
-                           group : "classes",
-                           active: false ]
+                           group : "classes" ]
     
     session.statesAndColors.eachWithIndex { group, idx ->
         String labelText = "${idx+1}. ${group.state}"
@@ -411,8 +401,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
             name  : labelText,
             clName: group.state,
             btn   : stateLabel,
-            group : "classes",
-            active: false
+            group : "classes"
         ]
     }
     
@@ -440,8 +429,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     
     uiElements.btnMap << [ name  : "All user classifications label",
                            btn   : allClassesLabel,
-                           group : "classesSummary",
-                           active: false ]
+                           group : "classesSummary" ]
     
     
     
@@ -452,8 +440,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     
     uiElements.btnMap << [ name  : "Reviewer class label",
                            btn   : revClassLabel,
-                           group : "revClass",
-                           active: false ]
+                           group : "revClass" ]
     
     session.reviewerStates.eachWithIndex { state, idx ->
         String numberTrigger = (idx + 6)
@@ -478,8 +465,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
             btnStyle: btnStyle,
             key     : numberTrigger,
             action  : action,
-            group   : "revClass",
-            active  : false
+            group   : "revClass"
         ]
     }
     
@@ -490,8 +476,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     
     uiElements.btnMap << [ name   : "Channel label",
                            btn    : channelsLabel,
-                           group  : "channel",
-                           active : false ]
+                           group  : "channel" ]
     
     session.channelSpecifics.eachWithIndex { ch, idx ->
         String numberTrigger = (idx + 1)
@@ -512,8 +497,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
             btn   : btn,
             key   : numberTrigger,
             action: action,
-            group : "channel",
-            active: false
+            group : "channel"
         ]
     }
     
@@ -536,12 +520,11 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     
     // Set button actions
     uiElements.btnMap.each { entry ->
-        if (!entry.btn) return
-        if (entry.btn instanceof ToggleButton) {
-            entry.btn.setOnAction { if (entry.active) { entry.action() } }
-        } else {
-            entry.btn.addEventFilter( ActionEvent.ACTION ) { event ->
-                if (entry.active) { entry.action() }
+        if (!entry.btn) { return }
+        entry.btn.addEventFilter( ActionEvent.ACTION ) { event ->
+            if (entry.active) {  
+                entry.action()
+                event.consume()
             }
         }
     }
@@ -719,7 +702,7 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
     uiElements.classesSection.setVisible( classesActive )
     uiElements.classesSection.setManaged( classesActive )
     
-    boolean classesSummaryActive = uiElements.btnMap.any { it.group in "classesSummary" && it.active }
+    boolean classesSummaryActive = uiElements.btnMap.any { it.group == "classesSummary" && it.active }
     uiElements.classesSummarySection.setVisible( classesSummaryActive )
     uiElements.classesSummarySection.setManaged( classesSummaryActive )
     
@@ -731,6 +714,7 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
     uiElements.revClassSection.setVisible( revClassesActive )
     uiElements.revClassSection.setManaged( revClassesActive )
     
+    // Set labels for classifications in classifier mode
     session.statesAndColors.each { group ->
         def entry = uiElements.classLabelByClassName[ group.state ]
         def label = entry.btn
@@ -741,7 +725,7 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
             cssColor = intToFx( group.colorU ).toString().replace( "0x", "#" )
         }
         
-        entry.cssColor = cssColor  // store it here
+        entry.cssColor = cssColor
         
         def labelStyle = """
             -fx-border-color: ${cssColor};
@@ -752,7 +736,7 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
         label.setStyle( labelStyle )
     }
     
-    
+    // Update class summary buttons if entering free view mode
     if (session.UI_COMMAND == ActionStrings.TOGGLE_FREE_VIEW && session.freeView) {
         def currentGroupsByState = session.highlightStatesAndColorsMap.collectEntries { [(it.state): it] }
         Set existingStates = uiElements.classLabelSummaryByClassName.keySet() as Set
@@ -1652,6 +1636,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         def userLabelRow = new HBox( 2, userLabel, userFieldNotice )   
         userLabelRow.setPadding( new Insets( 10, 0, 0, 0 ) )
+        lockDimensions( userLabelRow )
         
         def users = new ComboBox()
         users.setMaxWidth( Double.MAX_VALUE )
@@ -1677,6 +1662,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         HBox.setHgrow( removeUserDropdown, Priority.ALWAYS )
         
         def userRow = new HBox( 5, users, addUserBtn, removeUserBtn )
+        lockDimensions( userRow )
         
         // Red border if no value
         users.valueProperty().addListener { obs, oldVal, newVal ->
@@ -1943,8 +1929,9 @@ def getCodePreferences( ViewerSessionVars session ) {
         classifyingNameNotice.setVisible( false )
         classifyingNameNotice.setManaged( false )
         
-        def classifyingNameLabelRow = new HBox( 2, classifyingNameLabel, classifyingNameNotice )      
+        def classifyingNameLabelRow = new HBox( 2, classifyingNameLabel, classifyingNameNotice )
         classifyingNameLabelRow.setPadding( new Insets( 10, 0, 0, 0 ) )
+        lockDimensions( classifyingNameLabelRow )
         
         def classifyingNameSelection = new ComboBox()
         classifyingNameSelection.setMaxWidth( Double.MAX_VALUE )
@@ -1958,6 +1945,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         addIcon( populateClassifyingNamesBtn, FontAwesome.Glyph.SEARCH, 12 )
         
         def classifyingNameRow = new HBox( 5, classifyingNameSelection, populateClassifyingNamesBtn )
+        lockDimensions( classifyingNameRow )
         
         // Enforcing criteria and firing messages
         classifyingNameSelection.getEditor().textProperty().addListener { obs, oldVal, newVal ->
@@ -2039,8 +2027,9 @@ def getCodePreferences( ViewerSessionVars session ) {
         gridSizeNotice.setVisible( false )
         gridSizeNotice.setManaged( false )
         
-        gridSizeRow = new HBox( 2, gridSizeLabel, gridSizeNotice )  
+        gridSizeRow = new HBox( 2, gridSizeLabel, gridSizeNotice )
         gridSizeRow.setPadding( new Insets( 10, 0, 0, 0 ) )
+        lockDimensions( gridSizeRow )
         
         // Enforcing criteria and firing messages
         gridSizeField.textProperty().addListener { obs, oldVal, newVal ->
