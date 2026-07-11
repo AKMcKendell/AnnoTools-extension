@@ -130,7 +130,7 @@ def createProgressWindow( String title, int totalImages ) {
         
         def timeline = new Timeline(
             new KeyFrame(
-                javafx.util.Duration.seconds( 1 ),
+                Duration.seconds( 1 ),
                 { evt ->
                     long elapsedNs = System.nanoTime() - startTime
                     long seconds = (long)( elapsedNs / 1_000_000_000L )
@@ -352,7 +352,45 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     def selectAllCB = makeSelectAllCB( checkboxes )
     
     def scrollPane = new ScrollPane( checkboxContainer )
-    scrollPane.setFitToWidth( true )
+    
+    
+    // Making scrollpane slide back to left if horizontally scrollable
+    Platform.runLater {
+        def hBar = scrollPane.lookupAll( ".scroll-bar" )
+            .find { it instanceof ScrollBar && it.orientation == Orientation.HORIZONTAL }
+            
+        if (hBar.isVisible()) {
+            def snapBack = new PauseTransition( Duration.millis( 300 ) )
+            snapBack.setOnFinished {
+                new Timeline(
+                    new KeyFrame(
+                        Duration.millis( 200 ),
+                        new KeyValue( scrollPane.hvalueProperty(), 0, Interpolator.EASE_BOTH )
+                    )
+                ).play()
+            }
+            
+            scrollPane.addEventFilter( ScrollEvent.SCROLL ) { e ->
+                if (Math.abs( e.deltaX ) > 0 || e.isShiftDown()) {
+                    def delta = (e.deltaX != 0 ? e.deltaX : e.deltaY)
+                    def sensitivity = 250.0
+                    def newValue = scrollPane.hvalue - (delta / sensitivity)
+                    scrollPane.hvalue = Math.max( 0, Math.min( 1, newValue ) )
+                    e.consume()
+                }
+            }
+            
+            scrollPane.addEventFilter( ScrollEvent.SCROLL_FINISHED ) { e ->
+                snapBack.playFromStart()
+                e.consume()
+            }
+            
+            hBar.addEventFilter( MouseEvent.MOUSE_RELEASED ) {
+                snapBack.playFromStart()
+            }
+        }
+    }
+    
     
     def titleLabel = new Label()
     titleLabel.setPadding( new Insets( 5, 0, 0, 0 ) )
@@ -1069,9 +1107,7 @@ import javafx.util.Duration
 import javafx.animation.*
 import javafx.application.Platform
 import javafx.beans.property.SimpleStringProperty
-import javafx.geometry.Orientation
-import javafx.geometry.Insets
-import javafx.geometry.Pos
+import javafx.geometry.*
 import javafx.scene.Scene
 import javafx.scene.control.*
 import javafx.scene.control.ButtonBar.ButtonData
