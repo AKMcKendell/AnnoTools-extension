@@ -371,61 +371,64 @@ def addIcon( node, iconCode, int size ) {
 // Function: Scan the entire project to collect annotation field availability by class
 def collectProjectAnnotationIndex( project, Stage ownerStage = null ) {
     List projectImages = project.getImageList()
-    
     def collectingUI = createProgressWindow( "Getting project specifics", projectImages.size(), true, ownerStage )
-    int imagesScanned = 0
-    
+    def imagesScanned = new AtomicInteger( 0 )
+    int total = projectImages.size()
+
+    def pool = Executors.newFixedThreadPool( Math.min( 8, total ) ) // cap at 8 — I/O bound
+
+    def futures = projectImages.collect { entry ->
+        pool.submit({
+            def localClassCounts     = [:].withDefault { 0 }
+            def localMeasurements    = [:].withDefault { new LinkedHashSet() }
+            def localMetadata        = [:].withDefault { new LinkedHashSet() }
+
+            def imageData = null
+            try {
+                imageData = entry.readImageData()
+                if (imageData) {
+                    def annos = imageData.getHierarchy()?.getAnnotationObjects() ?: []
+                    annos.each { obj ->
+                        def className = obj.getPathClass()?.getName()
+                        if (className) {
+                            localClassCounts[ className ]++
+                            obj.getMeasurementList()?.getMeasurementNames()?.each { localMeasurements[ className ] << it }
+                            obj.getMetadata()?.keySet()?.each { localMetadata[ className ] << it }
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+            } finally {
+                try { imageData?.close() } catch (Exception ignored2) {}
+            }
+
+            int done = imagesScanned.incrementAndGet()
+            updateProgressWindow( collectingUI, [ imagePer: done / total, imageNum: done ] )
+
+            return [ classCounts: localClassCounts, measurements: localMeasurements, metadata: localMetadata ]
+        } as Callable)
+    }
+
+    // Serial merge — fast, no contention
     def index = [
         classCounts        : [:].withDefault { 0 },
         measurementsByClass: [:].withDefault { new LinkedHashSet() },
         metadataByClass    : [:].withDefault { new LinkedHashSet() }
     ]
-    
-    projectImages.each { entry ->
-        def imageData = null
-        try {
-            imageData = entry.readImageData()
-            if (imageData) {
-                def annos = imageData.getHierarchy()?.getAnnotationObjects() ?: []
-                annos.each { obj ->
-                    def className = obj.getPathClass()?.getName()
-                    if (className) {
-                        index.classCounts[ className ] = (index.classCounts[ className ] ?: 0) + 1
-                        
-                        obj.getMeasurementList()?.getMeasurementNames()?.each { name ->
-                            index.measurementsByClass[ className ] << name
-                        }
-                        
-                        obj.getMetadata()?.keySet()?.each { key ->
-                            index.metadataByClass[ className ] << key
-                        }
-                    }
-                }
-            }
-        } catch (Exception ignored) {
-            // Skip images that cannot be read for any reason
-        } finally {
-            try {
-                imageData?.close()
-            } catch (Exception ignored2) {
-                // Ignore close failures
-            }
-        }
-        
-        // - Reporting progress -
-        imagesScanned++
-        double frac = imagesScanned / projectImages.size() 
-        updateProgressWindow( collectingUI, [imagePer: frac, imageNum: imagesScanned] )
+    futures.each { future ->
+        def local = future.get()
+        local.classCounts.each    { k, v -> index.classCounts[ k ] = ( index.classCounts[ k ] ?: 0 ) + v }
+        local.measurements.each   { k, v -> index.measurementsByClass[ k ].addAll( v ) }
+        local.metadata.each       { k, v -> index.metadataByClass[ k ].addAll( v ) }
     }
-    
-    // Closing progress bar window
-    Platform.runLater {
-        collectingUI.stage.close()
-    }
-    
+
+    pool.shutdown()
+
+    Platform.runLater { collectingUI.stage.close() }
+
     index.measurementsByClass = index.measurementsByClass.collectEntries { k, v -> [k, new LinkedHashSet( v )] }
-    index.metadataByClass = index.metadataByClass.collectEntries { k, v -> [k, new LinkedHashSet( v )] }
-    index.classCounts = index.classCounts.collectEntries { k, v -> [k, v as int] }
+    index.metadataByClass     = index.metadataByClass.collectEntries     { k, v -> [k, new LinkedHashSet( v )] }
+    index.classCounts         = index.classCounts.collectEntries         { k, v -> [k, v as int] }
     return index
 }
 
@@ -639,6 +642,45 @@ def codePreferences = runOnFxThreadAndWait {
     setTT( refreshBtn, "Re-scan project to update available object classes, measurements, and metadata.")
     def topRow = new HBox( 10, refreshBtn, timeStamp )
     
+    def rightPanel = new VBox( 10, topRow, bottomRightPanel)
+    
+    root.right = rightPanel
+    
+    
+    
+    // Disabling the "OK" button if not all inputs are met    
+    def rebindOkBtn = {
+        okBtn.disableProperty().unbind()
+        def anySelectedImage = Bindings.createBooleanBinding(
+            { imagesBox.CBs.any { it.isSelected() } },
+            *imagesBox.CBs.collect { it.selectedProperty() }
+        )
+        def anySelectedClass = Bindings.createBooleanBinding(
+            { pathClassBox.CBs.any { it.isSelected() } },
+            *pathClassBox.CBs.collect { it.selectedProperty() }
+        )
+        def anySelectedMeasurements = Bindings.createBooleanBinding(
+            { measurementsBox.CBs.any { it.isSelected() } },
+            *measurementsBox.CBs.collect { it.selectedProperty() }
+        )
+        def anySelectedMetadata = Bindings.createBooleanBinding(
+            { metadataBox.CBs.any { it.isSelected() } },
+            *metadataBox.CBs.collect { it.selectedProperty() }
+        )
+        
+        okBtn.disableProperty().bind(
+            anySelectedImage.not()
+            .or( anySelectedClass.not() )
+            .or( anySelectedMeasurements.not()
+                .and( anySelectedMetadata.not() ) )
+        )
+    }
+    
+    // Initial bind
+    rebindOkBtn()
+    
+    
+    // Refresh project details
     refreshBtn.setOnAction { e ->
         refreshBtn.setDisable( true )
         def dialogStage = dialog.getDialogPane().getScene().getWindow() as Stage
@@ -658,44 +700,13 @@ def codePreferences = runOnFxThreadAndWait {
                 selectSpecificCBs( liveRightCBs.mdCBs, metadataSelected )
                 timeStamp.setText( " Last refresh: ${projectCache.timeStamp}  [CURRENT DATA]" )
                 refreshBtn.setDisable( true )
+                rebindOkBtn()
             }
         }
-        
-        
         
         e.consume()
     }
     
-    def rightPanel = new VBox( 10, topRow, bottomRightPanel)
-    
-    root.right = rightPanel
-    
-    
-    
-    // Disabling the "OK" button if not all inputs are met    
-    def anySelectedImage = Bindings.createBooleanBinding(
-        { imagesBox.CBs.any { it.isSelected() } },
-        *imagesBox.CBs.collect { it.selectedProperty() }
-    )
-    def anySelectedClass = Bindings.createBooleanBinding(
-        { pathClassBox.CBs.any { it.isSelected() } },
-        *pathClassBox.CBs.collect { it.selectedProperty() }
-    )
-    def anySelectedMeasurements = Bindings.createBooleanBinding(
-        { measurementsBox.CBs.any { it.isSelected() } },
-        *measurementsBox.CBs.collect { it.selectedProperty() }
-    )
-    def anySelectedMetadata = Bindings.createBooleanBinding(
-        { metadataBox.CBs.any { it.isSelected() } },
-        *metadataBox.CBs.collect { it.selectedProperty() }
-    )
-    
-    okBtn.disableProperty().bind(
-        anySelectedImage.not()
-        .or( anySelectedClass.not() )
-        .or( anySelectedMeasurements.not()
-            .and( anySelectedMetadata.not() ) )
-    )
     
     // Requesting confirmation to remove
     boolean confirmRemove = false
@@ -848,7 +859,8 @@ Platform.runLater {
 
 
 
-import java.util.concurrent.CountDownLatch
+import java.util.concurrent.*
+import java.util.concurrent.atomic.AtomicInteger
 import javafx.animation.*
 import javafx.application.Platform
 import javafx.beans.property.SimpleStringProperty

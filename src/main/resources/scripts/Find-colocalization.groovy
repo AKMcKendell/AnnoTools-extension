@@ -634,6 +634,9 @@ def cancelFlag = progressUI.cancelFlag
 int processed = 0
 int netSteps = codePreferences.objectClasses1.size() * codePreferences.objectClasses2.size()
 
+// Pool for parallel processing
+def pool = Executors.newFixedThreadPool( Runtime.getRuntime().availableProcessors() )
+
 imageLoop:
 for (image in imagesToRun) {
     
@@ -686,54 +689,59 @@ for (image in imagesToRun) {
                 it.getPathClass()?.getName() == class2
             }
             
-            int totalComps = class1Annos.size() * class2Annos.size()
-            int compNum = 1
+            
             
             // Skipping the loop if either class has no objects
             if (class1Annos.isEmpty() || class2Annos.isEmpty()) { continue }
             
-            class1Annos.each { class1Anno ->
-                def class1Geom = class1Anno.getROI().getGeometry()
-                
-                class2Annos.each { class2Anno ->
-                    def class2Geom = class2Anno.getROI().getGeometry()
-                    
-                    if (class1Geom.intersects( class2Geom )) {
-                        
-                        // Establishing the variable for the coming lines
-                        def overlapGeom = cleanForROI( class1Geom.intersection( class2Geom ) )
-                        
-                        if (!overlapGeom.isEmpty() && overlapGeom.getArea() > 1) { 
-                            
-                            def overlapROI = GeometryTools.geometryToROI( overlapGeom, class1Anno.getROI().getImagePlane() )
-                            
-                            // Making the overlapping geometry into an annotation object
-                            def overlapObj = PathObjects.createAnnotationObject( overlapROI, getPathClass( newClass ) )
-                            
-                            // Inserting the annotation based on user preference
-                            def parent
-                            switch (codePreferences.nestBehavior) {
-                                case (NestStrings.CLASS1):
-                                    parent = class1Anno
-                                    break
-                                
-                                case (NestStrings.CLASS1_PARENT):
-                                    parent = class1Anno.getParent()
-                                    break
-                                    
-                                case (NestStrings.NONE):
-                                    parent = hierarchy.getRootObject()
-                                    break
+            // Build index + cache geometries once before the loop
+            def class2GeomCache = class2Annos.collect { it.getROI().getGeometry() }
+            def class2Tree = new STRtree()
+            // Enveloping the annos to reduce comparisons
+            // by avoiding ones that are geometrically impossible
+            class2Annos.eachWithIndex { anno, i ->
+                class2Tree.insert( class2GeomCache[i].getEnvelopeInternal(), i )
+            }
+            
+            int numClass1 = class1Annos.size()
+            def overlapResults = new Object[ numClass1 ]
+            def doneCount = new AtomicInteger( 0 )
+            
+            // Parallel geometry phase
+            def futures = (0..<numClass1).collect { idx ->
+                pool.submit({
+                    def class1Anno = class1Annos[ idx ]
+                    def class1Geom = class1Anno.getROI().getGeometry()
+                    def parent = (codePreferences.nestBehavior == NestStrings.CLASS1)        ? class1Anno :
+                                 (codePreferences.nestBehavior == NestStrings.CLASS1_PARENT) ? class1Anno.getParent() :
+                                                                                                hierarchy.getRootObject()
+                    def localResults = []
+                    class2Tree.query( class1Geom.getEnvelopeInternal() ).each { i ->
+                        def class2Geom = class2GeomCache[ i ]
+                        if (class1Geom.intersects( class2Geom )) {
+                            def overlapGeom = cleanForROI( class1Geom.intersection( class2Geom ) )
+                            if (!overlapGeom.isEmpty() && overlapGeom.getArea() > 1) {
+                                localResults << [ geom: overlapGeom, parent: parent, plane: class1Anno.getROI().getImagePlane() ]
                             }
-                            
-                            hierarchy.addObjectBelowParent( parent, overlapObj, false )
-                            overlapObj.setLocked( true )
                         }
                     }
-                    
-                    int percentDone = (compNum / totalComps) * 100
-                    updateProgressWindow( progressUI, [stepPer: percentDone] )
-                    compNum ++
+                    overlapResults[ idx ] = localResults
+            
+                    int pDone = ( doneCount.incrementAndGet() / numClass1 * 100 ) as int
+                    updateProgressWindow( progressUI, [ stepPer: pDone ] )
+                } as Callable)
+            }
+            futures.each { it.get() }
+            
+            // Serial hierarchy adds
+            runOnFxThreadAndWait {
+                overlapResults.each { localResults ->
+                    localResults?.each { r ->
+                        def overlapROI = GeometryTools.geometryToROI( r.geom, r.plane )
+                        def overlapObj = PathObjects.createAnnotationObject( overlapROI, getPathClass( newClass ) )
+                        hierarchy.addObjectBelowParent( r.parent, overlapObj, false )
+                        overlapObj.setLocked( true )
+                    }
                 }
             }
             step ++
@@ -768,13 +776,16 @@ for (image in imagesToRun) {
     updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
 }
 
+pool.shutdown()
+
 // Closing progress bar window
 Platform.runLater {
     progressUI.stage.close()
 }
 
 
-import java.util.concurrent.CountDownLatch
+import java.util.concurrent.*
+import java.util.concurrent.atomic.AtomicInteger
 import javafx.animation.*
 import javafx.application.Platform
 import javafx.beans.property.SimpleStringProperty
@@ -796,6 +807,7 @@ import org.locationtech.jts.operation.union.UnaryUnionOp
 
 import qupath.lib.gui.tools.IconFactory
 import org.controlsfx.glyphfont.FontAwesome
+import org.locationtech.jts.index.strtree.STRtree
 
 
 // Comments for tool launcher icon and tooltip
