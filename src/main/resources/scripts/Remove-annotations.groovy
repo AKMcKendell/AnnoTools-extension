@@ -1,7 +1,7 @@
 /*
  * Author: Alec McKendell
  * Date: 2026.6.8
- * Description: Script to remove objects by class
+ * Description: Script to remove objects by class.
 */
 
 
@@ -245,6 +245,7 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     def selectAllCB = makeSelectAllCB( checkboxes )
     
     def scrollPane = new ScrollPane( checkboxContainer )
+    VBox.setVgrow( scrollPane, Priority.ALWAYS )
     
     
     // Making scrollpane slide back to left if horizontally scrollable
@@ -417,9 +418,48 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     
+    // RIGHT PANEL: PathClass selection list
+    def projectPathClasses = project.getPathClasses().findAll { it?.getName() }
+    
+    def gson = new Gson()
+    def imageClassCounts = [:]  // imageName -> [className -> count]
+    def totalsByClass = [:]     // className -> total across all images
+    
+    project.getImageList().each { entry ->
+        def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+        def counts = [:]
+        if (Files.exists( summaryFile )) {
+            def raw = new String( Files.readAllBytes( summaryFile ) )
+            def summary = gson.fromJson( raw, Object )
+            summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
+                def n = k.toString()
+                counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                totalsByClass[ n ] = (totalsByClass[ n ] ?: 0) + counts[ n ]
+            }
+        }
+        imageClassCounts[ entry.getImageName() ] = counts
+    }
+    
+    // Sort: only classes with existing annotations in project by abundance
+    def highCounts = []
+    projectPathClasses.each { pc ->
+        def total = totalsByClass[ pc.getName() ] ?: 0
+        if (total > 0) { highCounts << [name: pc.getName(), num: total] }
+    }
+    highCounts.sort { -it.num }
+    def pathClassNamesAndNum = highCounts
+    List pathClassCBsMap = pathClassNamesAndNum.collect { [name: it.name, data: it.name] } // labels set by updateClassCounts
+    def pathClassBox = makeCheckboxBox( "Object classes", null, pathClassCBsMap, 200 )    
+    pathClassBox.header.getChildren().addAll( pathClassBox.title, pathClassBox.spacer, pathClassBox.clear )    
+    pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.objectClasses ) }
+    
+    root.right = pathClassBox.box
+    
+    
+    
     // CENTER PANEL: Image Selection
     def imageNames = project.getImageList().collect { it.getImageName() }
-    def imagesBox = makeCheckboxBox( "select images", "images", imageNames.collect { [name: it] } )
+    def imagesBox = makeCheckboxBox( "Select images", "images", imageNames.collect { [name: it] } )
     def currentImageCB = new CheckBox( "Current Image" )
     imagesBox.header.getChildren().addAll( imagesBox.selectAll, imagesBox.spacer, currentImageCB )
     imagesBox.CBs.each { it.setSelected( it.getText() in prePrefsMap.selectedImages  ) }
@@ -431,12 +471,12 @@ def codePreferences = runOnFxThreadAndWait {
             currentCB.selectedProperty()
         )
         
-        // Setting bright border on checkbox for current image 
+        // Setting bright border on checkbox for current image
         Platform.runLater { 
             currentCB.lookup( ".box" )?.setStyle("""
-                -fx-border-color: white;
-                -fx-border-width: 1.5;
-                -fx-border-radius: 3;
+                -fx-border-color: black;
+                -fx-border-width: 2;
+                -fx-border-radius: 1;
             """)
         }
         
@@ -458,27 +498,27 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     
-    // RIGHT PANEL: PathClass selection list
-    def viewer = getCurrentViewer()
-    def annos  = viewer ? getAnnotationObjects() : []
-    def projectPathClasses = project.getPathClasses().findAll { it?.getName() } // No null (those with a name)
-    def countsByClass = annos.countBy { it.getPathClass() } 
-    
-    // Organizing any pathclasses with objects in the open viewer to the top of the list
-    def highCounts = []
-    def lowCounts = []
-    projectPathClasses.each { pc ->
-        def entry = [name: pc.getName(), num: countsByClass[ pc ] ?: 0]
-        (entry.num > 0 ? highCounts : lowCounts) << entry
+    // Closure to update total and selected class counts
+    def updateClassCounts = {
+        def selectedNames = imagesBox.CBs.findAll { it.isSelected() }.collect { it.getText() } as Set
+        def selectedTotals = [:]
+        selectedNames.each { imgName ->
+            imageClassCounts[ imgName ]?.each { className, count ->
+                selectedTotals[ className ] = (selectedTotals[ className ] ?: 0) + count
+            }
+        }
+        pathClassBox.CBs.each { cb ->
+            def className = cb.getUserData()
+            def sel   = selectedTotals[ className ] ?: 0
+            def total = totalsByClass[ className ]  ?: 0
+            cb.setText( total > 0 ? "${className} [${sel} / ${total}]" : className )
+        }
     }
-    highCounts.sort { -it.num } // Sort for descending abundance
-    def pathClassNamesAndNum = highCounts + lowCounts
-    List pathClassCBsMap = pathClassNamesAndNum.collect { [name: (it.num > 0 ? "${it.name} [${it.num}]" : it.name), data: it.name] }
-    def pathClassBox = makeCheckboxBox( "Object classes", "classes", pathClassCBsMap, 275 )    
-    pathClassBox.header.getChildren().addAll( pathClassBox.selectAll, pathClassBox.spacer, pathClassBox.clear )    
-    pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.objectClasses ) }
     
-    root.right = pathClassBox.box
+    imagesBox.CBs.each { cb ->
+        cb.selectedProperty().addListener { obs, oldVal, newVal -> updateClassCounts() }
+    }
+    updateClassCounts()
     
     
     
@@ -616,6 +656,7 @@ Platform.runLater {
 }
 
 
+import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import javafx.util.Duration
 import javafx.animation.*

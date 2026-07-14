@@ -1,7 +1,7 @@
 /*
  * Author: Alec McKendell
  * Date: 2026.6.10
- * Description: Remove annotation measurements/metadata as desired
+ * Description: Remove annotation measurements/metadata as desired.
 */
 
 
@@ -242,6 +242,7 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     def selectAllCB = makeSelectAllCB( checkboxes )
     
     def scrollPane = new ScrollPane( checkboxContainer )
+    VBox.setVgrow( scrollPane, Priority.ALWAYS )
     
     
     // Making scrollpane slide back to left if horizontally scrollable
@@ -559,9 +560,49 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     
+    // CENTER PANEL: PathClass selection list
+    def projectPathClasses = project.getPathClasses().findAll { it?.getName() }
+    
+    def gson = new Gson()
+    def imageClassCounts = [:]  // imageName -> [className -> count]
+    def totalsByClass = [:]     // className -> total across all images
+    
+    project.getImageList().each { entry ->
+        def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+        def counts = [:]
+        if (Files.exists( summaryFile )) {
+            def raw = new String( Files.readAllBytes( summaryFile ) )
+            def summary = gson.fromJson( raw, Object )
+            summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
+                def n = k.toString()
+                counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                totalsByClass[ n ] = (totalsByClass[ n ] ?: 0) + counts[ n ]
+            }
+        }
+        imageClassCounts[ entry.getImageName() ] = counts
+    }
+    
+    // Sort: only classes with existing annotations in project by abundance
+    def highCounts = []
+    projectPathClasses.each { pc ->
+        def total = totalsByClass[ pc.getName() ] ?: 0
+        if (total > 0) { highCounts << [name: pc.getName(), num: total] }
+    }
+    highCounts.sort { -it.num }
+    def pathClassNamesAndNum = highCounts
+    List pathClassCBsMap = pathClassNamesAndNum.collect { [name: it.name, data: it.name] } // labels set by updateClassCounts
+    def pathClassBox = makeCheckboxBox( "Available classes", null, pathClassCBsMap, 200 )
+    pathClassBox.header.getChildren().addAll( pathClassBox.selectAll )
+    pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.objectClasses ) }
+    BorderPane.setMargin( pathClassBox.box, new Insets( 0, 15, 0, 0 ) )
+    
+    root.center = pathClassBox.box
+    
+    
+    
     // LEFT PANEL: Image Selection
     def imageNames = project.getImageList().collect { it.getImageName() }
-    def imagesBox = makeCheckboxBox( "Available images", "images", imageNames.collect { [name: it] } )
+    def imagesBox = makeCheckboxBox( "Select images", "images", imageNames.collect { [name: it] } )
     def currentImageCB = new CheckBox( "Current Image" )
     imagesBox.header.getChildren().addAll( imagesBox.selectAll, imagesBox.spacer, currentImageCB )
     imagesBox.CBs.each { it.setSelected( it.getText() in prePrefsMap.selectedImages  ) }
@@ -573,12 +614,12 @@ def codePreferences = runOnFxThreadAndWait {
             currentCB.selectedProperty()
         )
         
-        // Setting bright border on checkbox for current image 
+        // Setting bright border on checkbox for current image
         Platform.runLater { 
             currentCB.lookup( ".box" )?.setStyle("""
-                -fx-border-color: white;
-                -fx-border-width: 1.5;
-                -fx-border-radius: 3;
+                -fx-border-color: black;
+                -fx-border-width: 2;
+                -fx-border-radius: 1;
             """)
         }
         
@@ -600,9 +641,31 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     
-    // CENTER PANEL: PathClass selection list
-    def countsByClass
-    def pathClassBox
+    // Closure to update total and selected class counts
+    def updateClassCounts = {
+        def selectedNames = imagesBox.CBs.findAll { it.isSelected() }.collect { it.getText() } as Set
+        def selectedTotals = [:]
+        selectedNames.each { imgName ->
+            imageClassCounts[ imgName ]?.each { className, count ->
+                selectedTotals[ className ] = (selectedTotals[ className ] ?: 0) + count
+            }
+        }
+        pathClassBox.CBs.each { cb ->
+            def className = cb.getUserData()
+            def sel   = selectedTotals[ className ] ?: 0
+            def total = totalsByClass[ className ]  ?: 0
+            cb.setText( total > 0 ? "${className} [${sel} / ${total}]" : className )
+        }
+    }
+    
+    imagesBox.CBs.each { cb ->
+        cb.selectedProperty().addListener { obs, oldVal, newVal -> updateClassCounts() }
+    }
+    updateClassCounts()
+    
+    
+    
+    // RIGHT PANEL: Measurements and metadata
     def measurementsBox
     def metadataBox
     def bottomRightPanel = new HBox( 10 )
@@ -611,21 +674,8 @@ def codePreferences = runOnFxThreadAndWait {
         CBs.each { it.setSelected( it.getUserData() in matches ) }
     }
     
+    // Closure to generate available measurements and metadata options by selected object class
     def setRightBox = {
-        
-        def projectPathClasses = project.getPathClasses().findAll { it?.getName() } // No null (those with a name)
-        countsByClass = projectCache.index.classCounts ?: [:]
-        
-        // Organizing any pathclasses with objects in the project to the top of the list
-        def classesWithObjects = projectPathClasses
-            .findAll { countsByClass[ it.getName()] > 0 }
-            .collect { [name: it.getName(), num: countsByClass[ it.getName() ]] }
-        classesWithObjects.sort { -it.num } // Sort for descending abundance
-        List pathClassCBsMap = classesWithObjects.collect { [name: "${it.name} [${it.num as int}]", data: it.name] }
-        pathClassBox = makeCheckboxBox( "Available classes", null, pathClassCBsMap, 220 )    
-        pathClassBox.header.getChildren().addAll( pathClassBox.selectAll )
-        BorderPane.setMargin( pathClassBox.box, new Insets( 0, 15, 0, 0 ) )
-        
 
         def measurementsByClass = projectCache.index.measurementsByClass ?: [:]
         LinkedHashSet allMeasurements = new LinkedHashSet( (measurementsByClass.values() ?: []).collectMany { it ?: [] } )
@@ -663,15 +713,13 @@ def codePreferences = runOnFxThreadAndWait {
             cb.setSelected( !cb.isSelected() )
         }
         
-        bottomRightPanel.getChildren().setAll( pathClassBox.box, measurementsBox.box, metadataBox.box )
+        bottomRightPanel.getChildren().setAll( measurementsBox.box, metadataBox.box )
         
-        return [ pcCBs: pathClassBox.CBs,
-                 mmCBs: measurementsBox.CBs,
+        return [ mmCBs: measurementsBox.CBs,
                  mdCBs: metadataBox.CBs ]
     }
     
     def liveRightCBs = setRightBox()
-    selectSpecificCBs( liveRightCBs.pcCBs, prePrefsMap.objectClasses )
     selectSpecificCBs( liveRightCBs.mmCBs, prePrefsMap.measurements )
     selectSpecificCBs( liveRightCBs.mdCBs, prePrefsMap.metadata )
     
@@ -684,7 +732,7 @@ def codePreferences = runOnFxThreadAndWait {
     setTT( refreshBtn, "Re-scan project to update available object classes, measurements, and metadata.")
     def topRow = new HBox( 10, refreshBtn, timeStamp )
     
-    def rightPanel = new VBox( 10, topRow, bottomRightPanel)
+    def rightPanel = new VBox( 10, topRow, bottomRightPanel )
     
     root.right = rightPanel
     
@@ -726,8 +774,7 @@ def codePreferences = runOnFxThreadAndWait {
     refreshBtn.setOnAction { e ->
         refreshBtn.setDisable( true )
         def dialogStage = dialog.getDialogPane().getScene().getWindow() as Stage
-    
-        List classesSelected      = pathClassBox.CBs.findResults { it.isSelected() ? it.getUserData() : null }
+        
         List measurementsSelected = measurementsBox.CBs.findResults { it.isSelected() ? it.getText() : null }
         List metadataSelected     = metadataBox.CBs.findResults { it.isSelected() ? it.getText() : null }
         
@@ -737,7 +784,6 @@ def codePreferences = runOnFxThreadAndWait {
             Platform.runLater {
                 projectCache = newCache
                 liveRightCBs = setRightBox()
-                selectSpecificCBs( liveRightCBs.pcCBs, classesSelected )
                 selectSpecificCBs( liveRightCBs.mmCBs, measurementsSelected )
                 selectSpecificCBs( liveRightCBs.mdCBs, metadataSelected )
                 timeStamp.setText( " Last refresh: ${projectCache.timeStamp}  [CURRENT DATA]" )
@@ -900,7 +946,7 @@ Platform.runLater {
 }
 
 
-
+import java.nio.file.Files
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicInteger
 import javafx.util.Duration
