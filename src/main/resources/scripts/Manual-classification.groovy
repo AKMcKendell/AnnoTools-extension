@@ -160,6 +160,20 @@ class settings {
 def viewerSettings = new settings()
 
 
+@groovy.transform.Canonical
+class ImageCheckResult {
+    def image
+    String imageName
+    boolean hasNoAnnos
+    boolean anyMissingClassifierKeys
+    boolean anyMissingUserKey
+    boolean anyUserKey
+    boolean anyAnnosToCheck
+    Set<String> missingUsers
+    Map<String, Set<String>> incompleteUsersByImage
+}
+
+
 // --- Functions ---
 
 // FX-safe helper function
@@ -1487,7 +1501,7 @@ def addIcon( node, iconCode, int size ) {
 }
 
 // Function to get user preferences for run
-def getCodePreferences( ViewerSessionVars session ) {
+def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
     def currentImageData = getCurrentImageData()
     def project = getProject()
     
@@ -1860,24 +1874,44 @@ def getCodePreferences( ViewerSessionVars session ) {
         addIcon( annoClassLabel, FontAwesome.Glyph.STAR_HALF_ALT, 14 )
         def annoClassField = new ComboBox()
         annoClassField.setMaxWidth( Double.MAX_VALUE )
-        setTT( [annoClassLabel, annoClassField], "Class of annotations to be classified. \n If missing, add to QuPath class list." )
+        setTT( [annoClassLabel, annoClassField], "Class of annotations to be classified. \n If missing, add to QuPath class list and/or add annotations of that class." )
         annoClassField.setStyle( missingStyle ) // Start with red border
         lockDimensions( annoClassField )
         
         def projectPathClasses = project.getPathClasses().findAll { it?.getName() }    
-        def currentImageAnnos = currentImageData ? getAnnotationObjects() : []
-        def countsByClass = currentImageAnnos.countBy { it.getPathClass() }
+        def summaryGson = new Gson()
+        def imageClassCounts = [:]  // imageName -> [className -> count]
+        def totalsByClass = [:]     // className -> total across all images
         
-        // Organizing any pathclasses with objects in the dropdown to the top of the list
-        def highCounts = []
-        def lowCounts = []
-        projectPathClasses.each { pc ->
-            def entry = [name: pc.getName(), num: countsByClass[ pc ] ?: 0]
-            (entry.num > 0 ? highCounts : lowCounts) << entry
+        project.getImageList().each { entry ->
+            def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+            def counts = [:]
+            if (Files.exists( summaryFile )) {
+                def raw = new String( Files.readAllBytes( summaryFile ) )
+                def summary = summaryGson.fromJson( raw, Object )
+                summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
+                    def n = k.toString()
+                    counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                    totalsByClass[ n ] = (totalsByClass[ n ] ?: 0) + counts[ n ]
+                }
+            }
+            
+            imageClassCounts[ entry.getImageName() ] = counts
         }
         
-        highCounts.sort { -it.num } // Sort for descending abundance
-        def pathClassEntries = highCounts + lowCounts
+        def currentImageName = currentImageData?.getServer()?.getMetadata()?.getName()
+        def currentImageCounts = currentImageName ? (imageClassCounts[ currentImageName ] ?: [:]) : null
+        
+        // Sort: only classes with existing annotations in project by abundance
+        def highCounts = []
+        projectPathClasses.each { pc ->
+            def total = totalsByClass[ pc.getName() ] ?: 0
+            if (total > 0) { 
+                highCounts << [name: pc.getName(), num: total, imageNum: currentImageCounts?[ pc.getName() ] ?: 0] 
+            }
+        }
+        highCounts.sort { -it.num }
+        def pathClassEntries = highCounts
         
         // Set dropdown selection to show counts
         annoClassField.setCellFactory {
@@ -1888,21 +1922,22 @@ def getCodePreferences( ViewerSessionVars session ) {
                     if (empty || item == null) {
                         setText( null )
                     } else {
-                        def pc = item.name
-                        def num = item.num
-                        setText( num > 0 ? "${pc} [${num}]" : "${pc}" )
+                        def label = currentImageCounts != null
+                            ? "${item.name}  [${item.imageNum} / ${item.num}]"
+                            : "${item.name}  [${item.num}]"
+                        
+                        setText( label )
                     }
                 }
             }
         }
         
-        // Set actual pathclass name to be passed to script (no number)
+        // Set selection to show same counts as dropdown
         annoClassField.setConverter( new StringConverter() {     
             String toString( def item ) {
-                def pc  = item.name
-                def num = item.num
-                
-                return num > 0 ? "${pc} [${num}]" : "${pc}"
+                def label = currentImageCounts != null
+                    ? "${item.name}  [${item.imageNum} / ${item.num}]"
+                    : "${item.name}  [${item.num}]"
             }
             
             def fromString( String string ) {
@@ -2110,10 +2145,21 @@ def getCodePreferences( ViewerSessionVars session ) {
         // --- CENTER: scrollable list of channels (max 3 allowed) ---
         // Create all channel checkboxes
         // Getting comomon available channels across project images
-        def image1 = project.getImageList()[0]
-        def image1Server = image1.readImageData().getServer()
-        List image1Channels = image1Server.getMetadata().getChannels().collect { it.getName() }
-        def channelCheckboxes = image1Channels.collect { channelName ->
+        def serverGson = new Gson()
+        def commonChannels = null
+        
+        project.getImageList().each { entry ->
+            def summaryFile = entry.getEntryPath().resolve( "server.json" )
+            if (Files.exists( summaryFile )) {
+                def raw = new String( Files.readAllBytes( summaryFile ) )
+                def server = serverGson.fromJson( raw, Object )
+                def channels = server?.metadata?.channels?.collect { it.name } ?: []
+                commonChannels = commonChannels == null ? channels : commonChannels.intersect( channels )
+            }
+        }
+        commonChannels = commonChannels ?: []
+        
+        def channelCheckboxes = commonChannels.collect { channelName ->
             new CheckBox( channelName )
         }
         
@@ -3310,13 +3356,15 @@ def getCodePreferences( ViewerSessionVars session ) {
             
             rebuildStateColorMap()
             
-            if (pMap.size() > 1L) {
-                if (nonUpdatedPrefs.isEmpty()) {
-                    Dialogs.showInfoNotification( "", "Successfully updated preferences." )
-                
-                } else {
-                    String notification = nonUpdatedPrefs.collect { "  - $it" }.join( "\n" )
-                    Dialogs.showWarningNotification( "", "UNABLE TO UPDATE: \n${notification}" )
+            if (firstPrompt) {
+                if (pMap.size() > 1L) {
+                    if (nonUpdatedPrefs.isEmpty()) {
+                        Dialogs.showInfoNotification( "", "Successfully updated preferences." )
+                    
+                    } else {
+                        String notification = nonUpdatedPrefs.collect { "  - $it" }.join( "\n" )
+                        Dialogs.showWarningNotification( "", "UNABLE TO UPDATE: \n${notification}" )
+                    }
                 }
             }
         }
@@ -3460,10 +3508,13 @@ def getCodePreferences( ViewerSessionVars session ) {
 // === GETTING AND CHECKING USER PREFERENCES ===
 Map codePreferences
 
+boolean firstPrompt = true
+
 preferencesLoop:
 while (true) {
     // Collect user preferences
-    codePreferences = getCodePreferences( session )
+    codePreferences = getCodePreferences( session, firstPrompt )
+    firstPrompt = false
     
     // Writing full project matrix + image matrix to external file to "remember" prefs in project
     if (codePreferences != null) {    
@@ -3530,73 +3581,96 @@ while (true) {
     def usersWithIncompleteClassifications = [] as LinkedHashSet
     def incompleteUsersByImage = [:].withDefault { [] as LinkedHashSet }
     
-    for (image in imageOrder) {
-        
-        def imageAnnos = image.readImageData()
-            .getHierarchy()
-            .getAnnotationObjects()
-            .findAll { it.getPathClass()?.getName() == session.annoClass }
-        
-        if (imageAnnos.isEmpty()) {
-            imagesWithoutAnnos << image
-            continue
-        }
-        
-        // Collect which users are missing classifications in reviewer mode
-        def annosMissingClassifierKeys = []
-        if ( session.reviewerMode ) {
-            imageAnnos.each { anno ->
-                def missingUsers = session.classifierKeys.findAll { !anno.getMetadata().containsKey( it ) }
-                                                         .collect { getUserFromKey( it ) }
-                if ( missingUsers ) {
-                    annosMissingClassifierKeys << anno
-                    usersWithIncompleteClassifications.addAll( missingUsers )
-                    incompleteUsersByImage[ image.getImageName() ].addAll( missingUsers )
+    
+    def pool = java.util.concurrent.Executors.newFixedThreadPool(
+        Math.min( imageOrder.size(), Runtime.getRuntime().availableProcessors() * 2 )
+    )
+    def futures = imageOrder.collect { image ->
+        pool.submit({
+            def imageAnnos = image.readImageData()
+                .getHierarchy()
+                .getAnnotationObjects()
+                .findAll { it.getPathClass()?.getName() == session.annoClass }
+                
+            if (imageAnnos.isEmpty()) {
+                return new ImageCheckResult(image: image, imageName: image.getImageName(), hasNoAnnos: true,
+                    anyMissingClassifierKeys: false, anyMissingUserKey: false, anyUserKey: false,
+                    anyAnnosToCheck: false, missingUsers: [] as Set, incompleteUsersByImage: [:])
+            }
+            
+            def missingUsers = [] as LinkedHashSet
+            def incompleteByImage = [:].withDefault { [] as LinkedHashSet }
+            def annosMissingClassifierKeys = []
+            
+            if (session.reviewerMode) {
+                imageAnnos.each { anno ->
+                    def missing = session.classifierKeys.findAll { !anno.getMetadata().containsKey(it) }
+                                                        .collect { getUserFromKey(it) }
+                    if (missing) {
+                        annosMissingClassifierKeys << anno
+                        missingUsers.addAll(missing)
+                        incompleteByImage[image.getImageName()].addAll(missing)
+                    }
                 }
             }
-        }
-        boolean anyMissingClassifierKeys = !annosMissingClassifierKeys.isEmpty()
-        
-        boolean anyMissingUserKey = imageAnnos.any { anno ->
-            if (session.reviewerMode) {
-                matchesMdClassification(
-                    anno,
-                    session.reviewerCriteria.all,
-                    session.reviewerCriteria.any,
-                    session.reviewerCriteria.different,
-                    session
-                ) && !containsUserKey( anno, session )
-            } else {
-                !containsUserKey( anno, session )
-            }
-        }
-        
-        boolean anyUserKey = imageAnnos.any { containsUserKey( it, session ) }
-        
-        boolean anyAnnosToCheck = session.reviewerMode ?
-            findAnnosByMdClassification(
-                imageAnnos,
-                all     = session.reviewerCriteria.all,
-                any     = session.reviewerCriteria.any,
-                diff    = session.reviewerCriteria.different,
-                session = session
-            ) : true
             
+            boolean anyMissingUserKey = imageAnnos.any { anno ->
+                if (session.reviewerMode) {
+                    matchesMdClassification(
+                        anno,
+                        session.reviewerCriteria.all,
+                        session.reviewerCriteria.any,
+                        session.reviewerCriteria.different,
+                        session
+                    ) && !containsUserKey( anno, session )
+                } else {
+                    !containsUserKey( anno, session )
+                }
+            }
+            
+            boolean anyUserKey = imageAnnos.any { containsUserKey( it, session ) }
+            
+            boolean anyAnnosToCheck = session.reviewerMode ?
+                findAnnosByMdClassification(
+                    imageAnnos,
+                    all     = session.reviewerCriteria.all,
+                    any     = session.reviewerCriteria.any,
+                    diff    = session.reviewerCriteria.different,
+                    session = session
+                ) : true
+                
+            return new ImageCheckResult(
+                image: image, imageName: image.getImageName(), hasNoAnnos: false,
+                anyMissingClassifierKeys: !annosMissingClassifierKeys.isEmpty(),
+                anyMissingUserKey: anyMissingUserKey, anyUserKey: anyUserKey,
+                anyAnnosToCheck: anyAnnosToCheck,
+                missingUsers: missingUsers, incompleteUsersByImage: incompleteByImage
+            )
+        } as java.util.concurrent.Callable)
+    }
+    pool.shutdown()
+    
+    // Serial merge — order preserved via futures list order
+    futures.each { f ->
+        def r = f.get()
+        if (r.hasNoAnnos) { imagesWithoutAnnos << r.image; return }
         if (session.reviewerMode) {
-            (anyMissingClassifierKeys ? notFullyClassifiedImages : fullyClassifiedImages) << image
+            (r.anyMissingClassifierKeys ? notFullyClassifiedImages : fullyClassifiedImages) << r.image
         }
+        usersWithIncompleteClassifications.addAll(r.missingUsers)
+        r.incompleteUsersByImage.each { k, v -> incompleteUsersByImage[k].addAll(v) }
         
-        if (anyAnnosToCheck) {
-            if (anyMissingUserKey) {
-                userIncompleteImages << image
+        if (r.anyAnnosToCheck) {
+            if (r.anyMissingUserKey) {
+                userIncompleteImages << r.image
             } else {
                 userCompleteImages << [
-                    image     : image,
-                    userInput : anyUserKey
+                    image     : r.image,
+                    userInput : r.anyUserKey
                 ]
             }
         } else {
-            imagesWithNoReviewableAnnos << image
+            imagesWithNoReviewableAnnos << r.image
         }
     }
     
@@ -4455,6 +4529,7 @@ import java.awt.event.AWTEventListener
 import java.awt.MouseInfo
 import java.awt.geom.Point2D
 import java.awt.Color as AwtColor
+import java.nio.file.Files
 import java.util.Collections
 import javafx.util.StringConverter
 import java.util.concurrent.CountDownLatch
