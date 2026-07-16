@@ -216,7 +216,7 @@ def fillAnnoHoles( List annoGeoms ) {
             }
             filledGeom = geomFactory.createMultiPolygon( polys as Polygon[] )
         } else {
-            filledGeom = annoGeom // fallback
+            filledGeom = toPolygonGeometry( annoGeom ) // fallback
         }    
         filledGeomsList << filledGeom
     }    
@@ -273,7 +273,8 @@ def simplifyGeom( Geometry g_simple, int targetMaxPoints = 1000 ) {
     def env = g_simple.getEnvelopeInternal()
     double diag = Math.sqrt( env.getWidth()**2 + env.getHeight()**2 )
     double tol = diag / targetMaxPoints
-    return TopologyPreservingSimplifier.simplify( g_simple, tol )
+    def result = TopologyPreservingSimplifier.simplify( g_simple, tol )
+    return result.isValid() ? result : result.buffer( 0 )
 }
 
 // Function to break shape into parts if multiple in a mask (speeds up processing)
@@ -1040,7 +1041,8 @@ for (image in imagesToRun) {
                     def b = currentGeoms[ pairs[pi][1] ]
                     def resultIdx = pi
                     pool.submit({
-                        roundResults[ resultIdx ] = toPolygonGeometry( a.union( b ) )
+                        def merged = toPolygonGeometry( a.union( b ) )
+                        roundResults[ resultIdx ] = merged.isValid() ? merged : merged.buffer( 0 )
                     } as Callable)
                 }
                 mergeFutures.each { it.get() }
@@ -1072,14 +1074,18 @@ for (image in imagesToRun) {
                         objGroup.cleanedAllGeoms[ level + 1 ]
             
                     if (!combinedInnerMask.isEmpty() && ringGeom.intersects( combinedInnerMask )) {
-                        ringGeom = cleanForROI( ringGeom.difference( combinedInnerMask ) )
+                        def mask = combinedInnerMask.isValid() ? combinedInnerMask : combinedInnerMask.buffer( 0 )
+                        def ring = ringGeom.isValid() ? ringGeom : ringGeom.buffer( 0 )
+                        ringGeom = cleanForROI( ring.difference( mask ) )
                     }
             
                     if (codePreferences.constrainToParent) {
                         def parentGeom = objGroup.parentGeom
                         if (parentGeom != null && !ringGeom.isEmpty() && ringGeom.getArea() > 0
                                 && !parentGeom.covers( ringGeom )) {
-                            ringGeom = cleanForROI( ringGeom.intersection( parentGeom ) )
+                            def parent = parentGeom.isValid() ? parentGeom : parentGeom.buffer( 0 )
+                            def ring = ringGeom.isValid() ? ringGeom : ringGeom.buffer( 0 )
+                            ringGeom = cleanForROI( ring.intersection( parent ) )
                         }
                     }
             
