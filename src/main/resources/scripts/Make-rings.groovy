@@ -148,7 +148,7 @@ def createProgressWindow( String title, int totalImages ) {
         timeline.play()
         
         // Signal to cancel script
-        def cancelFlag = new java.util.concurrent.atomic.AtomicBoolean( false )
+        def cancelFlag = new AtomicBoolean( false )
         def cancelUpdateLabel = new Label( "Cancelling after image..." )
         cancelUpdateLabel.setPadding( new Insets( 4 ) )
         cancelBtn.setOnAction {
@@ -282,7 +282,10 @@ def bufferGeom( Geometry g_buff, double dist, bufParams ) {
     if (n <= 1) { return BufferOp.bufferOp( g_buff, dist, bufParams ) }
     def parts = (0..<n).collect { g_buff.getGeometryN( it ) }
     def buffered = parts.parallelStream()
-        .map { part -> BufferOp.bufferOp( part, dist, bufParams ) }
+        .map { part ->
+            def b = BufferOp.bufferOp( part, dist, bufParams )
+            return b.isValid() ? b : b.buffer( 0 )
+        }
         .collect( java.util.stream.Collectors.toList() )
     return toPolygonGeometry( CascadedPolygonUnion.union( buffered ) )
 }
@@ -969,7 +972,7 @@ for (image in imagesToRun) {
         def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), numBaseObjs )
         def pool = Executors.newFixedThreadPool( nThreads )
         def expansionsMap = new Object[ numBaseObjs ]
-        def doneCount = new java.util.concurrent.atomic.AtomicInteger( 0 )
+        def doneCount = new AtomicInteger( 0 )
         
         def futures = (0..<numBaseObjs).collect { idx ->
             pool.submit({
@@ -1019,8 +1022,8 @@ for (image in imagesToRun) {
             
             def innerGeomsAtLevel = expansionsMapList.collect { it.cleanedAllGeoms[ level ] }
             def geoms = Collections.synchronizedList( codePreferences.simplifyGeometry ?
-                                                          innerGeomsAtLevel.collect { simplifyGeom( it, codePreferences.maxVertices ) } :
-                                                          innerGeomsAtLevel )
+                innerGeomsAtLevel.collect { toPolygonGeometry( simplifyGeom( it, codePreferences.maxVertices ) ) } :
+                innerGeomsAtLevel )
             int totalGeoms = geoms.size()
             
             while (geoms.size() > 1) {
@@ -1037,7 +1040,7 @@ for (image in imagesToRun) {
                     def b = currentGeoms[ pairs[pi][1] ]
                     def resultIdx = pi
                     pool.submit({
-                        roundResults[ resultIdx ] = a.union( b )
+                        roundResults[ resultIdx ] = toPolygonGeometry( a.union( b ) )
                     } as Callable)
                 }
                 mergeFutures.each { it.get() }
@@ -1065,8 +1068,8 @@ for (image in imagesToRun) {
                 pool.submit({
                     def objGroup = expansionsMapList[ idx ]
                     def ringGeom = codePreferences.simplifyGeometry ? 
-                                       simplifyGeom( objGroup.cleanedAllGeoms[ level + 1 ], codePreferences.maxVertices ) :
-                                       objGroup.cleanedAllGeoms[ level + 1 ]
+                        simplifyGeom( objGroup.cleanedAllGeoms[ level + 1 ], codePreferences.maxVertices ) :
+                        objGroup.cleanedAllGeoms[ level + 1 ]
             
                     if (!combinedInnerMask.isEmpty() && ringGeom.intersects( combinedInnerMask )) {
                         ringGeom = cleanForROI( ringGeom.difference( combinedInnerMask ) )
@@ -1143,7 +1146,7 @@ Platform.runLater {
 
 import java.nio.file.Files
 import java.util.concurrent.*
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.*
 import javafx.util.Duration
 import javafx.animation.*
 import javafx.application.Platform

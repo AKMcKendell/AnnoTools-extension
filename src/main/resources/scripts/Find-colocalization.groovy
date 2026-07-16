@@ -158,7 +158,7 @@ def createProgressWindow( String title, int totalImages ) {
         timeline.play()
         
         // Signal to cancel script
-        def cancelFlag = new java.util.concurrent.atomic.AtomicBoolean( false )
+        def cancelFlag = new AtomicBoolean( false )
         def cancelUpdateLabel = new Label( "Cancelling after image..." )
         cancelUpdateLabel.setPadding( new Insets( 4 ) )
         cancelBtn.setOnAction {
@@ -868,7 +868,7 @@ Platform.runLater {
 
 import java.nio.file.Files
 import java.util.concurrent.*
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.*
 import javafx.util.Duration
 import javafx.animation.*
 import javafx.application.Platform
