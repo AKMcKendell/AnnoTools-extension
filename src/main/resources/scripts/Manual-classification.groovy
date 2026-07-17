@@ -1,7 +1,7 @@
 /*
  * Author: Alec McKendell
  * Date: 2026.2.4
- * Description: Manually classify many objects
+ * Description: Manually classify many objects.
 */
 
 
@@ -257,25 +257,25 @@ def makeClassesSummaryBtn( Map group, elements uiElements, ViewerSessionVars ses
         cssColor = intToFx( group.colorU ).toString().replace( "0x", "#" )
     }
     
-    def standardStyle   = "-fx-border-color: ${cssColor}; -fx-border-width: 1.5; -fx-border-radius: 3;"
-    def unselectedStyle = "-fx-opacity: 0.5; -fx-effect: innershadow(gaussian, rgba(0,0,0,1), 8, 0.3, 2, 2);"
-    def selectedStyle   = "-fx-border-color: yellow; -fx-border-width: 1.5; -fx-border-radius: 3;"
+    def standardStateSummaryStyle   = "-fx-border-color: ${cssColor}; -fx-border-width: 1.5; -fx-border-radius: 3;"
+    def unselectedStateSummaryStyle = "-fx-opacity: 0.5; -fx-effect: innershadow(gaussian, rgba(0,0,0,1), 8, 0.3, 2, 2);"
+    def selectedStateSummaryStyle   = "-fx-border-color: yellow; -fx-border-width: 1.5; -fx-border-radius: 3;"
     
     def stateButton = new ToggleButton( "${stateName}  (${group.count})" )
     stateButton.setPadding( new Insets( 5, 10, 5, 10 ) )
     stateButton.setFocusTraversable( false )
     stateButton.setToggleGroup( uiElements.classesSummaryToggleGroup )
-    stateButton.setStyle( standardStyle )
-    uiElements.classesSummaryStyleMap[ stateButton ] = standardStyle
+    stateButton.setStyle( standardStateSummaryStyle )
+    uiElements.classesSummaryStyleMap[ stateButton ] = standardStateSummaryStyle
     
     stateButton.selectedProperty().addListener { obs, wasSelected, isSelected ->
         Platform.runLater {
             colorAnnosFromMap( session, session.classifierMode ? [session.userKey] : session.classifierKeys )
             def currentGroup = session.highlightStatesAndColorsMap.find { it.state.toString() == stateName }
             if (isSelected) {
-                stateButton.setStyle( selectedStyle )
+                stateButton.setStyle( selectedStateSummaryStyle )
                 uiElements.classesSummaryBtns.each { btn ->
-                    if (btn !== stateButton) { btn.setStyle( unselectedStyle ) }
+                    if (btn !== stateButton) { btn.setStyle( unselectedStateSummaryStyle ) }
                 }
                 if (currentGroup) {
                     selectObjects( currentGroup.annos )
@@ -785,9 +785,9 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
             entry.cssColor = cssColor
             entry.btn.setText( labelText )
             
-            def unselectedStyle = "-fx-border-color: ${cssColor}; -fx-border-width: 1.5; -fx-border-radius: 3;"
-            uiElements.classesSummaryStyleMap[ entry.btn ] = unselectedStyle
-            if (!entry.btn.isSelected()) entry.btn.setStyle( unselectedStyle )
+            def channelUnselectedStyle = "-fx-border-color: ${cssColor}; -fx-border-width: 1.5; -fx-border-radius: 3;"
+            uiElements.classesSummaryStyleMap[ entry.btn ] = channelUnselectedStyle
+            if (!entry.btn.isSelected()) entry.btn.setStyle( channelUnselectedStyle )
             lockDimensions( entry.btn )
         }
         
@@ -801,7 +801,7 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
     
     
     // Creating channel button styles
-    def standardStyle = """
+    def channelStandardStyle = """
         -fx-padding: 6 10 6 10;
         -fx-border-radius: 6;
         -fx-background-radius: 6;
@@ -813,8 +813,8 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
         def c = new AwtColor( chan.getColor(), true )
         return "-fx-effect: dropshadow(gaussian, rgba(${c.red},${c.green},${c.blue},1), 10, 0.2, 0, 0);"
     }
-    def selectedStyle = "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 10, 0.2, 0, 0);" // Channel on style
-    def unselectedStyle = "-fx-effect: innershadow(gaussian, rgba(0,0,0,0.9), 100, 0, 0, 0);" // Channel off style
+    def channelSelectedStyle = "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 10, 0.2, 0, 0);" // Channel on style
+    def channelUnselectedStyle = "-fx-effect: innershadow(gaussian, rgba(0,0,0,0.9), 100, 0, 0, 0);" // Channel off style
     
     // Set channel button updated style
     session.channelSpecifics.each { ch ->
@@ -827,8 +827,8 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
         
         // Adding their style
         boolean highlighted = (ch.channel == session.channelToChange) && (!session.freeView || session.freeViewMode != ActionStrings.ZOOM) // Setting initial style
-        def buttonStyle = highlighted ? highlightedStyle( ch.channel ) : btn.isSelected() ? selectedStyle : unselectedStyle
-        btn.setStyle( standardStyle + buttonStyle )
+        def channelButtonStyle = highlighted ? highlightedStyle( ch.channel ) : btn.isSelected() ? channelSelectedStyle : channelUnselectedStyle
+        btn.setStyle( channelStandardStyle + channelButtonStyle )
         
         def chBtnTooltipText = highlighted ? "Toggle ${ch.name} \n \n Scroll on viewer to change brightness" : "Toggle ${ch.name}"
         setTT( btn, chBtnTooltipText )
@@ -1292,21 +1292,19 @@ def switchFVmode( ViewerSessionVars session, settings viewerSettings ) {
 }
 
 // Function to generate classifier/reviewer key for metadata
-def generateMdKey( ViewerSessionVars session, String user, String classKey ) {
-    String mdKey = "${session.toolKeyPrefix}_${user}_${classKey}"
+def generateUserKey( ViewerSessionVars session, modeString, String user ) {
+    String mdKey = "${session.toolKeyPrefix}_${modeString}_${user}_${session.classifyingName}"
     return mdKey
 }
 
 // Function to get user from key
 def getUserFromKey( String key ) {
-    String user = key.split( "_" )[1]
-    return user
+    return key.split( "_" )[2]
 }
 
 // Function to get classifying name from key
 def getClassifyingNameFromKey( String key ) {
-    String classifyingName = key.split( "_" )[2]
-    return classifyingName
+    return key.split( "_" )[3]
 }
 
 // Function to show a temporary message that fades out
@@ -1504,11 +1502,38 @@ def addIcon( node, iconCode, int size ) {
 def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
     def currentImageData = getCurrentImageData()
     def project = getProject()
+    def projectImages = getProject().getImageList()
     
-    def missingStyle = """
+    // Multi-used styles
+    def outlineRedStyle = """
         -fx-border-color: red;
         -fx-border-radius: 3;
     """
+    def underlineRedStyle = """
+        -fx-border-color: red;
+        -fx-border-width: 0 0 1 0;
+    """
+    def newCellStyle = """
+        -fx-border-color: #5a8a5a; 
+        -fx-border-width: 2;
+    """
+    def redFadeMessageStyle = """
+        -fx-font-size: 12px;
+        -fx-text-fill: #ff6b6b;
+    """
+    def greenFadeMessageStyle = """
+        -fx-font-size: 12px;
+        -fx-text-fill: #5cb85c;
+    """
+    def userSelectedStyle = """
+        -fx-border-color: black;
+        -fx-border-width: 1;
+        -fx-font-weight: bold;
+        -fx-background-color: derive(-fx-base, -30%);
+    """ 
+    def userUnelectedStyle = "-fx-opacity: 0.7;"
+    def chanBoxStyle = "-fx-border-color: #000000"
+    
     
     // Make/get prefs folder as needed
     def projectDirectory = project.getBaseDirectory()
@@ -1558,7 +1583,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def root = new BorderPane()
         root.setPrefSize( 400, 350 )
         
-        // define shared column constraints
+        // Define shared column constraints
         def colGrow = new ColumnConstraints()
         colGrow.setHgrow( Priority.ALWAYS )
         def colFixed = new ColumnConstraints()
@@ -1585,21 +1610,12 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         classifierModeBtn.setToggleGroup( modeButtons )
         reviewerModeBtn.setToggleGroup( modeButtons )
         
-        def selectedStyle =
-            "-fx-border-color: black;" +
-            "-fx-border-width: 1;" +
-            "-fx-font-weight: bold;" +
-            "-fx-background-color: derive(-fx-base, -30%);"
-        
-        def unselectedStyle =
-            "-fx-opacity: 0.7;"
-        
         def updateModeButtonStyles = {
             classifierModeBtn.setStyle(
-                classifierModeBtn.isSelected() ? selectedStyle : unselectedStyle
+                classifierModeBtn.isSelected() ? userSelectedStyle : userUnelectedStyle
             )
             reviewerModeBtn.setStyle(
-                reviewerModeBtn.isSelected() ? selectedStyle : unselectedStyle
+                reviewerModeBtn.isSelected() ? userSelectedStyle : userUnelectedStyle
             )
         }
         
@@ -1623,7 +1639,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         // Make bounding box, add children, assign to UI and set spacing
         def topRow = new HBox( 10 )
         topRow.setPadding( new Insets( 8 ) )
-        topRow.getChildren().setAll(
+        topRow.getChildren().addAll(
             classifierModeBtn,
             reviewerModeBtn,
             topRowSpacer,
@@ -1640,8 +1656,9 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         
         
         // --- LEFT: dropdown (user box) + text fields ---
-        def userLabel = new Label( " User:" )
+        def userLabel = new Label()
         addIcon( userLabel, FontAwesome.Glyph.USER, 14 )
+        lockDimensions( userLabel )
         
         def userFieldNotice = new Label()
         userFieldNotice.setPadding( new Insets( 0, 0, 0, 10 ) )
@@ -1656,7 +1673,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         users.setMaxWidth( Double.MAX_VALUE )
         HBox.setHgrow( users, Priority.ALWAYS )
         setTT( [userLabel, users], classifierModeBtn.isSelected() ? "Select a classifier" : "Select a reviewer" )
-        users.setStyle( missingStyle ) // Start with red border (cleared if selection)
+        users.setStyle( outlineRedStyle ) // Start with red border (cleared if selection)
         lockDimensions( users )
         
         def userInputField = new TextField()
@@ -1675,12 +1692,38 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         removeUserDropdown.setMaxWidth( Double.MAX_VALUE )
         HBox.setHgrow( removeUserDropdown, Priority.ALWAYS )
         
-        def userRow = new HBox( 5, users, addUserBtn, removeUserBtn )
+        def populateUsersBtn = new Button()
+        setTT( populateUsersBtn, "Populate classifier/reviewer options from existing annotations in project." )
+        addIcon( populateUsersBtn, FontAwesome.Glyph.SEARCH, 12 )
+        lockDimensions( populateUsersBtn )
+        
+        def userRow = new HBox( 5, users, addUserBtn, removeUserBtn, populateUsersBtn )
         lockDimensions( userRow )
         
         // Red border if no value
         users.valueProperty().addListener { obs, oldVal, newVal ->
-            users.setStyle( newVal ? null : missingStyle )
+            users.setStyle( newVal ? null : outlineRedStyle )
+        }
+        
+        // Coloring new users with green border
+        def newUsers = []
+        users.setCellFactory { _ ->
+            new ListCell<String>() {
+                @Override
+                protected void updateItem( String item, boolean empty ) {
+                    super.updateItem( item, empty )
+                    if (empty || item == null) {
+                        setText( null )
+                        setStyle( "" )
+                    } else if (item in newUsers) {
+                        setText( item )
+                        setStyle( newCellStyle )
+                    } else {
+                        setText( item )
+                        setStyle( "" )
+                    }
+                }
+            }
         }
         
         // Set remove user option cells style
@@ -1738,8 +1781,8 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         
         
         
-        def classifierOptions
-        def reviewerOptions   
+        def classifierOptions = FXCollections.observableArrayList()
+        def reviewerOptions   = FXCollections.observableArrayList()
         
         boolean addedUser = false
         
@@ -1754,20 +1797,22 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                     reviewerOptions << newUser
                 } else {
                     userInputField.clear()
-                    userFieldNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                    userFieldNotice.setStyle( redFadeMessageStyle )
                     userFieldNotice.setText( "*User exists*" )  
                     showFadeOutMessage( userFieldNotice )
                     return
                 }
                 
-                userFieldNotice.setStyle( "-fx-text-fill: #5cb85c;" )
+                newUsers << newUser
+                
+                userFieldNotice.setStyle( greenFadeMessageStyle )
                 userFieldNotice.setText( "*Added ${newUser}*" )              
                 showFadeOutMessage( userFieldNotice )
                 
                 userRow.getChildren().set( 0, users )
                 
                 userInputField.clear()
-                addUserBtn.setDisabled( false )
+                addUserBtn.setDisable( false )
                 users.setValue( newUser )
                 addedUser = true
             }
@@ -1779,7 +1824,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             if (!newVal.matches( "[A-Za-z0-9]*" )) {
                 userInputField.setText( oldVal )
                 
-                userFieldNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                userFieldNotice.setStyle( redFadeMessageStyle )
                 userFieldNotice.setText( "*Letters/numbers*" )           
                 showFadeOutMessage( userFieldNotice )
                 return
@@ -1790,7 +1835,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 userInputField.setText( oldVal )
                 
                 userFieldNotice.setText( "*15 chrs max*" )
-                userFieldNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                userFieldNotice.setStyle( redFadeMessageStyle )
                 showFadeOutMessage( userFieldNotice )
                 return
             }
@@ -1798,7 +1843,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         
         // Set field to add a user when button clicked
         addUserBtn.setOnAction {
-            addUserBtn.setDisabled( true )
+            addUserBtn.setDisable( true )
             userRow.getChildren().set( 0, userInputField )
             userInputField.requestFocus()
             addedUser = false
@@ -1808,7 +1853,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         preferencesDialog.getDialogPane().addEventFilter( MouseEvent.MOUSE_PRESSED ) { e ->
             if (!userInputField.isHover()) {
                 if (!addedUser) {
-                    addUserBtn.setDisabled( false )
+                    addUserBtn.setDisable( false )
                     userRow.getChildren().set( 0, users )
                 }
             }
@@ -1826,7 +1871,9 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                     reviewerOptions.remove( newVal )
                 }
                 
-                userFieldNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                newUsers.remove( newVal )
+                
+                userFieldNotice.setStyle( redFadeMessageStyle )
                 userFieldNotice.setText( "*Removed ${newVal}*" )           
                 showFadeOutMessage( userFieldNotice )
                 removedUser = true
@@ -1835,13 +1882,13 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             removeUserDropdown.valueProperty().removeListener( removeUserListener )
             userRow.getChildren().set( 0, users )
             users.show()
-            removeUserBtn.setDisabled( false )
+            removeUserBtn.setDisable( false )
         }
         
         // Action when remove user button is clicked
         String prevSelectedUser
         removeUserBtn.setOnAction {
-            removeUserBtn.setDisabled( true )
+            removeUserBtn.setDisable( true )
             removedUser = false
             
             prevSelectedUser = users.getValue()
@@ -1863,9 +1910,89 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             if (wasShowing && !isShowing && !removedUser) {
                 removeUserDropdown.valueProperty().removeListener( removeUserListener )
                 userRow.getChildren().set( 0, users )
-                removeUserBtn.setDisabled( false )
+                removeUserBtn.setDisable( false )
             }
         }
+        
+        // Running through project and populating user options and sending notice (parallel)
+        populateUsersBtn.setOnAction {
+            def scene = QuPathGUI.getInstance().getStage().getScene()
+            scene.setCursor( Cursor.WAIT )
+            populateUsersBtn.setDisable( true )
+        
+            Thread.start {
+                def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), projectImages.size() )
+                def pool = Executors.newFixedThreadPool( nThreads )
+                
+                def futures = projectImages.collect { entry ->
+                    pool.submit({
+                        def imageData = null
+                        try {
+                            imageData = entry.readImageData()
+                            return imageData.getHierarchy().getAnnotationObjects().collectMany { anno ->
+                                anno.getMetadata().keySet().findAll { it.contains( session.toolKeyPrefix ) }
+                            }
+                        } catch (Exception ignored) {
+                            return []
+                        } finally {
+                            try { imageData?.close() } catch (Exception ignored2) {}
+                        }
+                    } as Callable)
+                }
+                
+                def uniqueUsers = futures.collectMany { it.get() }
+                    .unique()
+                    .collect { [user: it.split( "_" )[2], mode: it.split( "_" )[1]] }
+                    .unique()
+                    
+                pool.shutdown()
+                
+                Platform.runLater {
+                    def newNamesSet = uniqueUsers.toSet()
+                    List newClassifiers = []
+                    List newReviewers = []
+                    
+                    uniqueUsers.each {
+                        if (it.mode == ActionStrings.CLASSIFIER_MODE) {
+                            classifierOptions << it.user
+                            newClassifiers << it.user
+                        
+                        } else {
+                            reviewerOptions << it.user
+                            newReviewers << it.user
+                        }
+                        
+                        newUsers << it.user
+                    }
+                    
+                    classifierOptions = classifierOptions.unique()
+                    reviewerOptions = reviewerOptions.unique()
+                    
+                    
+                    if ( !users.getItems().isEmpty() ) {
+                        users.setValue( users.getItems().first() )
+                    }
+                    
+                    if ( !uniqueUsers.isEmpty() ) {
+                        def msgParts = []
+                        if (newClassifiers) { msgParts << "${newClassifiers.size()} classifiers" }
+                        if (newReviewers) { msgParts << "${newReviewers.size()} reviewers" }
+                        def msg = "*Added: ${msgParts.join(', ')}*"
+                        userFieldNotice.setText( msg )
+                        userFieldNotice.setStyle( greenFadeMessageStyle )
+                        users.show()
+                        
+                    } else {
+                        userFieldNotice.setText( "*None found*" )
+                        userFieldNotice.setStyle( redFadeMessageStyle )
+                    }
+                    
+                    showFadeOutMessage( userFieldNotice )
+                    scene.setCursor( Cursor.DEFAULT )
+                }
+            }
+        }
+        
         
         
         // New text fields
@@ -1875,7 +2002,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def annoClassField = new ComboBox()
         annoClassField.setMaxWidth( Double.MAX_VALUE )
         setTT( [annoClassLabel, annoClassField], "Class of annotations to be classified. \n If missing, add to QuPath class list and/or add annotations of that class." )
-        annoClassField.setStyle( missingStyle ) // Start with red border
+        annoClassField.setStyle( outlineRedStyle ) // Start with red border
         lockDimensions( annoClassField )
         
         def projectPathClasses = project.getPathClasses().findAll { it?.getName() }    
@@ -1883,20 +2010,38 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def imageClassCounts = [:]  // imageName -> [className -> count]
         def totalsByClass = [:]     // className -> total across all images
         
-        project.getImageList().each { entry ->
-            def summaryFile = entry.getEntryPath().resolve( "summary.json" )
-            def counts = [:]
-            if (Files.exists( summaryFile )) {
-                def raw = new String( Files.readAllBytes( summaryFile ) )
-                def summary = summaryGson.fromJson( raw, Object )
-                summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
-                    def n = k.toString()
-                    counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
-                    totalsByClass[ n ] = (totalsByClass[ n ] ?: 0) + counts[ n ]
+        def imageList = project.getImageList()
+        def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
+        def summaryPool = Executors.newFixedThreadPool( nThreads )
+        def resultMap = new java.util.concurrent.ConcurrentHashMap()
+        
+        // Parallel finding anno summaries
+        def summaryFutures = imageList.collect { entry ->
+            summaryPool.submit({
+                def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+                def counts = [:]
+                if (Files.exists( summaryFile )) {
+                    try {
+                        def raw = new String( Files.readAllBytes( summaryFile ) )
+                        def summary = summaryGson.fromJson( raw, Object )
+                        summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
+                            def n = k.toString()
+                            counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                        }
+                    } catch (Exception ignored) {}
                 }
+                resultMap[ entry.getImageName() ] = counts
+            } as Callable)
+        }
+        summaryFutures.each { it.get() }
+        summaryPool.shutdown()
+        
+        // Merge into imageClassCounts and totalsByClass
+        resultMap.each { imgName, counts ->
+            imageClassCounts[ imgName ] = counts
+            counts.each { className, count ->
+                totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
             }
-            
-            imageClassCounts[ entry.getImageName() ] = counts
         }
         
         def currentImageName = currentImageData?.getServer()?.getMetadata()?.getName()
@@ -1949,7 +2094,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         
         // Red border if empty
         annoClassField.valueProperty().addListener { obs, oldVal, newVal ->
-            annoClassField.setStyle( newVal ? null : missingStyle )
+            annoClassField.setStyle( newVal ? null : outlineRedStyle )
         }
         
         
@@ -1989,7 +2134,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 classifyingNameSelection.getEditor().setText( oldVal )
                 
                 classifyingNameNotice.setText( "*Letters/numbers*" )
-                classifyingNameNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                classifyingNameNotice.setStyle( redFadeMessageStyle )
                 showFadeOutMessage( classifyingNameNotice )
                 return
             }
@@ -1999,48 +2144,96 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 classifyingNameSelection.getEditor().setText( oldVal )
                 
                 classifyingNameNotice.setText( "*15 chrs max*" )
-                classifyingNameNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                classifyingNameNotice.setStyle( redFadeMessageStyle )
                 showFadeOutMessage( classifyingNameNotice )
                 return
             }
             
             // Red border if missing
-            classifyingNameSelection.setStyle( !newVal ? missingStyle : null )
+            classifyingNameSelection.setStyle( !newVal ? outlineRedStyle : null )
         }
         
         // Start with red border (cleared if added to)
-        classifyingNameSelection.setStyle( missingStyle )
+        classifyingNameSelection.setStyle( outlineRedStyle )
         lockDimensions( classifyingNameSelection )
         
-        // Running through project and populating classifying name options and sending notice
+        // Running through project and populating classifying name options and sending notice (parallel)
         populateClassifyingNamesBtn.setOnAction {
             def scene = QuPathGUI.getInstance().getStage().getScene()
             scene.setCursor( Cursor.WAIT )
             populateClassifyingNamesBtn.setDisable( true )
         
             Thread.start {
-                def uniqueNames = project.getImageList().collectMany { entry ->
-                    entry.readImageData().getHierarchy().getAnnotationObjects().collectMany { anno ->
-                        anno.getMetadata().keySet().findAll { it.contains( session.toolKeyPrefix ) }
-                    }
-                }.unique().collect { getClassifyingNameFromKey( it ) }.unique()
+                nThreads = Math.min( Runtime.getRuntime().availableProcessors(), projectImages.size() )
+                def pool = Executors.newFixedThreadPool( nThreads )
+                
+                def futures = projectImages.collect { entry ->
+                    pool.submit({
+                        def imageData = null
+                        try {
+                            imageData = entry.readImageData()
+                            return imageData.getHierarchy().getAnnotationObjects().collectMany { anno ->
+                                anno.getMetadata().keySet().findAll { it.contains( session.toolKeyPrefix ) }
+                            }
+                        } catch (Exception ignored) {
+                            return []
+                        } finally {
+                            try { imageData?.close() } catch (Exception ignored2) {}
+                        }
+                    } as Callable)
+                }
+                
+                def uniqueNames = futures.collectMany { it.get() }
+                    .unique()
+                    .collect { getClassifyingNameFromKey( it ) }
+                    .unique()
+                
+                pool.shutdown()
         
                 Platform.runLater {
+                    def newNamesSet = uniqueNames.toSet()
+                    
                     classifyingNameOptions.addAll( uniqueNames )
                     classifyingNameOptions = classifyingNameOptions.unique()
                     classifyingNameSelection.setItems( classifyingNameOptions )
+                    
+                    // Coloring added names through search with green border
+                    classifyingNameSelection.setCellFactory { _ ->
+                        new ListCell<String>() {
+                            @Override
+                            protected void updateItem( String item, boolean empty ) {
+                                super.updateItem( item, empty )
+                                if (empty || item == null) {
+                                    setText( null )
+                                    setStyle( "" )
+                                } else if (item in newNamesSet) {
+                                    setText( item )
+                                    setStyle( newCellStyle )
+                                } else {
+                                    setText( item )
+                                    setStyle( "" )
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Also style the button cell (what shows when dropdown is closed)
+                    classifyingNameSelection.setButtonCell( classifyingNameSelection.getCellFactory().call( null ) )
+                    
                     if ( !classifyingNameSelection.getItems().isEmpty() ) {
                         classifyingNameSelection.setValue( classifyingNameSelection.getItems().first() )
                     }
         
                     if ( !uniqueNames.isEmpty() ) {
                         classifyingNameNotice.setText( "*${uniqueNames.size()} added*" )
-                        classifyingNameNotice.setStyle( "-fx-text-fill: #5cb85c;" )
+                        classifyingNameNotice.setStyle( greenFadeMessageStyle )
+                        
+                        classifyingNameSelection.show()
                     } else {
-                        classifyingNameNotice.setText( "*None available*" )
-                        classifyingNameNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                        classifyingNameNotice.setText( "*None found*" )
+                        classifyingNameNotice.setStyle( redFadeMessageStyle )
                     }
-                    
+        
                     showFadeOutMessage( classifyingNameNotice )
                     scene.setCursor( Cursor.DEFAULT )
                 }
@@ -2057,12 +2250,12 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         setTT( [gridSizeLabel, gridSizeField], "Size of grouping grid (µm). Increasing this reduces the number of groups per image but increases objects per group." )
         
         def gridSizeNotice = new Label()
-        gridSizeNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+        gridSizeNotice.setStyle( redFadeMessageStyle )
         gridSizeNotice.setPadding( new Insets( 0, 0, 0, 10 ) )
         gridSizeNotice.setVisible( false )
         gridSizeNotice.setManaged( false )
         
-        gridSizeRow = new HBox( 2, gridSizeLabel, gridSizeNotice )
+        def gridSizeRow = new HBox( 2, gridSizeLabel, gridSizeNotice )
         gridSizeRow.setPadding( new Insets( 10, 0, 0, 0 ) )
         lockDimensions( gridSizeRow )
         
@@ -2101,7 +2294,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def leftBox = new VBox( 10 )
         leftBox.setPadding( new Insets( 5 ) )
         leftBox.setPrefWidth( 265 )
-        leftBox.getChildren().setAll(
+        leftBox.getChildren().addAll(
             userLabelRow, userRow,
             annoClassLabel, annoClassField,
             classifyingNameLabelRow, classifyingNameRow,
@@ -2121,7 +2314,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         
         def bottomRow = new HBox()
         bottomRow.setPadding( new Insets( 20, 10, 0, 0 ) )
-        bottomRow.getChildren().setAll( bottomRowSpacer, checkingWorkCheckbox )
+        bottomRow.getChildren().addAll( bottomRowSpacer, checkingWorkCheckbox )
         root.bottom = bottomRow
         
         // Changing applicable preferences live when switching between modes
@@ -2146,18 +2339,26 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         // Create all channel checkboxes
         // Getting comomon available channels across project images
         def serverGson = new Gson()
-        def commonChannels = null
+        def serverPool = Executors.newFixedThreadPool( nThreads )
         
-        project.getImageList().each { entry ->
-            def summaryFile = entry.getEntryPath().resolve( "server.json" )
-            if (Files.exists( summaryFile )) {
-                def raw = new String( Files.readAllBytes( summaryFile ) )
-                def server = serverGson.fromJson( raw, Object )
-                def channels = server?.metadata?.channels?.collect { it.name } ?: []
-                commonChannels = commonChannels == null ? channels : commonChannels.intersect( channels )
-            }
+        def serverFutures = projectImages.collect { entry ->
+            serverPool.submit({
+                def summaryFile = entry.getEntryPath().resolve( "server.json" )
+                if (Files.exists( summaryFile )) {
+                    try {
+                        def raw = new String( Files.readAllBytes( summaryFile ) )
+                        def server = serverGson.fromJson( raw, Object )
+                        return server?.metadata?.channels?.collect { it.name } ?: null
+                    } catch (Exception ignored) {}
+                }
+                return null
+            } as Callable)
         }
-        commonChannels = commonChannels ?: []
+        
+        def allChannelLists = serverFutures.collect { it.get() }.findAll { it != null }
+        serverPool.shutdown()
+        
+        def commonChannels = allChannelLists ? allChannelLists.inject { acc, channels -> acc.intersect( channels ) } : []
         
         def channelCheckboxes = commonChannels.collect { channelName ->
             new CheckBox( channelName )
@@ -2166,9 +2367,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         // Create bounding box for channels and relevant options
         def fullChannelsBox = new VBox( 5 )
         fullChannelsBox.setPadding( new Insets( 0, 5, 5, 5 ) )
-        fullChannelsBox.setStyle( missingStyle ) // Start with red border
-        
-        def chanBoxStyle = "-fx-border-color: #000000"
+        fullChannelsBox.setStyle( outlineRedStyle ) // Start with red border
         
         // Create bounding box for channel checkboxes
         def channelCBsBox =  new VBox( 5 )
@@ -2194,7 +2393,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         // Assemble top row and add as child of larger channel box
         def topChannelRow = new HBox( 5 )
         topChannelRow.setPadding( new Insets( 8 ) )
-        topChannelRow.getChildren().setAll( channelsLabel, fullChannelsBoxSpacer, clearChannelsBtn )
+        topChannelRow.getChildren().addAll( channelsLabel, fullChannelsBoxSpacer, clearChannelsBtn )
         lockDimensions( topChannelRow )
         
         // Add channel checkboxes and listeners to enforce max number
@@ -2218,7 +2417,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 }
                 
                 // Red border none selected
-                fullChannelsBox.setStyle( selectedCount ? chanBoxStyle : missingStyle )
+                fullChannelsBox.setStyle( selectedCount ? chanBoxStyle : outlineRedStyle )
             }
             channelCBsBox.getChildren().add( cb )
             cb.setFocusTraversable( false )
@@ -2232,7 +2431,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         // Adding all the pieces together
         def channelsScroll = new ScrollPane( channelCBsBox )
         channelsScroll.setFitToWidth( true )
-        fullChannelsBox.getChildren().setAll( topChannelRow, channelsScroll )
+        fullChannelsBox.getChildren().addAll( topChannelRow, channelsScroll )
         root.right = fullChannelsBox
         
         preferencesDialog.getDialogPane().content = root
@@ -2256,7 +2455,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         int maxReviewerStates = 3
         
         // Defaults
-        def defaultConfirmedColors = [
+        def defaultStateOrderAndConfirmedColors = [
             "false": Color.RED,
             "true" : Color.WHITE,
             "maybe": Color.GRAY
@@ -2269,11 +2468,11 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def stateColorMap = []
         
         // Locked in values (before pressing ok, changing in the window are temporary)
-        def lockedStateOrder = defaultStateOrder
+        def lockedStateOrder = defaultStateOrderAndConfirmedColors.keySet()
         def lockedReviewerStates = defaultReviewerStates
         def lockedConfirmedColors = [:]
         lockedStateOrder.each { stateName ->
-            lockedConfirmedColors[ stateName ] = defaultConfirmedColors[ stateName ] ?: Color.GRAY
+            lockedConfirmedColors[ stateName ] = defaultStateOrderAndConfirmedColors[ stateName ] ?: Color.GRAY
         }
         def lockedUnconfirmedColor = defaultUnconfirmedColor
         
@@ -2344,24 +2543,19 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             colorPickerU.setValue( tempUnconfirmedColor )
             colorPickerU.setPrefWidth( 140 )
             
-            def revClassMissingStyle = """
-                -fx-border-color: red;
-                -fx-border-width: 0 0 1 0;
-            
-            """
             
             int numRevCBsOn = reviewerCheckboxes.count { it.isSelected() }
             def reviewerClassHeader = new Label( "Reviewer classes (${minReviewerStates}-${maxReviewerStates}):" )
             reviewerClassHeader.setPadding( new Insets( 5, 0, 0, 0 ) )
             reviewerClassHeader.setPrefWidth( 140 )
-            reviewerClassHeader.setStyle( revClassMissingStyle )
+            reviewerClassHeader.setStyle( underlineRedStyle )
             
             def unconfirmedTailSpacer = new Region()
             unconfirmedTailSpacer.setPrefWidth( 65 )
             HBox.setHgrow( unconfirmedTailSpacer, Priority.ALWAYS )
             
             def draggableHeaderRow = new HBox( 6 )
-            draggableHeaderRow.getChildren().setAll(
+            draggableHeaderRow.getChildren().addAll(
                 dragHeaderSpacer,
                 comboHeaderSpacer,
                 confirmedHeader,
@@ -2384,7 +2578,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             def colUnconfirmedHeader = new ColumnConstraints()
             colUnconfirmedHeader.setHgrow( Priority.NEVER )
             
-            classColorGrid.getColumnConstraints().setAll(
+            classColorGrid.getColumnConstraints().addAll(
                 colLabels,
                 colDragArea,
                 colConfirmedHeader,
@@ -2428,7 +2622,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                     tempStateOrder.eachWithIndex { state, idx ->
                         
                         def sb = stateBoxes[ idx ]
-                        sb.getItems().setAll( states )
+                        sb.getItems().addAll( states )
                         sb.setEditable( true )
                         setTT( sb, "Select or type a state name" )
                         sb.setPromptText( "Type or select" )
@@ -2500,7 +2694,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 boolean wrongNumRevClasses = (numRevClasses < minReviewerStates || numRevClasses > maxReviewerStates)
                 
                 // Also highlighting label if wrong number
-                reviewerClassHeader.setStyle( wrongNumRevClasses ? revClassMissingStyle : null )
+                reviewerClassHeader.setStyle( wrongNumRevClasses ? underlineRedStyle : null )
                 
                 okButton.setDisable( rowN < minClassifierStates || rowN > maxClassifierStates ||
                                      wrongNumRevClasses ||anyEmptyValues ||
@@ -2579,11 +2773,10 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             }
             
             def RevCBListener = { obs, oldVal, newVal ->  
-                if (updatingSelections) return
+                if (updatingSelections) { return }
                 
                 updatingSelections = true
                 try {
-                    
                     updateOkButton()
                     syncMapsFromControls()
                 } finally {
@@ -2651,7 +2844,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 
                 // Getting rid of any convoluting keys to keep map correct size
                 tempConfirmedColors.keySet().retainAll( tempStateOrder )
-                tempConfirmedColors[ firstUnusedState ] = defaultConfirmedColors[ firstUnusedState ] && defaultConfirmedColors[ firstUnusedState ] !in usedColors ? defaultConfirmedColors[ firstUnusedState ] : firstUnusedColor
+                tempConfirmedColors[ firstUnusedState ] = defaultStateOrderAndConfirmedColors[ firstUnusedState ] && defaultStateOrderAndConfirmedColors[ firstUnusedState ] !in usedColors ? defaultStateOrderAndConfirmedColors[ firstUnusedState ] : firstUnusedColor
                 
                 formatControls()
                 syncControlsFromMaps()
@@ -2708,7 +2901,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             
             // Closure: Clear any style changes during state cell dragging
             def clearMarker = { ListView<Integer> lv ->
-                lv.lookupAll(".list-cell").each { it.setStyle( "" ) }
+                lv.lookupAll( ".list-cell" ).each { it.setStyle( "" ) }
             }
             
             // Closure: Create style of line to be shown when dragging states
@@ -2833,7 +3026,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                         
                         def row = new HBox( 10 )
                         row.setPadding( new Insets( 2, 0, 2, 0 ) )
-                        row.getChildren().setAll(
+                        row.getChildren().addAll(
                             dragHandle,
                             stateBoxes[ idx ],
                             colorPickers[ idx ],
@@ -2915,29 +3108,15 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             
             // Setup to restore default number and order of classes/colors
             restoreDefaultsBtn.setOnAction {
-                tempStateOrder = new ArrayList<>( defaultStateOrder )
                 
-                tempConfirmedColors = [:]
-                tempStateOrder.each { stateName ->
-                    tempConfirmedColors[ stateName ] = defaultConfirmedColors[ stateName ] ?: Color.GRAY
-                }
-                
-                stateBoxes = tempStateOrder.collect { createStateBox() }
-                colorPickers = tempStateOrder.collect { createColorPicker() }
-                
-                reviewerCheckboxes.each { it.selectedProperty().removeListener( RevCBListener ) }
-                reviewerCheckboxes.each { it.setSelected( false ) }
-                
-                tempConfirmedColors.eachWithIndex { state, color, idx ->
-                    stateBoxes[ idx ].setValue( state )
-                    colorPickers[ idx ].setValue( color )
-                    reviewerCheckboxes[ idx ].setSelected ( state in defaultReviewerStates )
-                }
-                
-                reviewerCheckboxes.each { it.selectedProperty().addListener( RevCBListener ) }
-                
+                tempStateOrder       = new ArrayList<>( defaultStateOrderAndConfirmedColors.keySet() )
+                tempConfirmedColors  = new LinkedHashMap<>( defaultStateOrderAndConfirmedColors )
+                tempRevStates        = new ArrayList<>( defaultReviewerStates )
                 tempUnconfirmedColor = defaultUnconfirmedColor
-                colorPickerU.setValue( tempUnconfirmedColor )
+                
+                stateBoxes         = defaultStateOrderAndConfirmedColors.collect { createStateBox() }
+                colorPickers       = defaultStateOrderAndConfirmedColors.collect { createColorPicker() }
+                reviewerCheckboxes = defaultStateOrderAndConfirmedColors.collect { createRevCB() }
                 
                 formatControls()
                 syncControlsFromMaps()
@@ -3053,14 +3232,14 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             
             def frequencySelectorLabel = new Label( "Frequency:" )
             frequencySelectorLabel.setPadding( new Insets( 5 ) )  
-            frequencySelectors.each { it.getItems().setAll( session.frequencies.values() ) }
+            frequencySelectors.each { it.getItems().addAll( session.frequencies.values() ) }
             frequencySelectors.each { it.setValue( it.getUserData() ) }
             String freqSelectorTTtext = "Select the frequency of an annotation being classified a specific state."
             setTT( [frequencySelectorLabel] + frequencySelectors, freqSelectorTTtext )
             
             def stateSelectorLabel = new Label( "State:" )
             stateSelectorLabel.setPadding( new Insets( 5 ) ) 
-            stateSelectors.each { it.getItems().setAll( states ) }
+            stateSelectors.each { it.getItems().addAll( states ) }
             stateSelectors.each { it.setEditable( true ) }
             stateSelectors.each { it.setPromptText( "Type or select" ) }
             stateSelectors.each { it.setValue( it.getUserData() ) }
@@ -3322,7 +3501,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             
             // Setting classification states, order, and colors
             def savedStates = pMap.statesAndColors?.state
-            lockedStateOrder = savedStates ? savedStates.unique() : defaultStateOrder
+            lockedStateOrder = savedStates ? savedStates.unique() : defaultStateOrderAndConfirmedColors.keySet()
             
             def missingStates = lockedStateOrder.findAll { !(it in states) }
             if (missingStates) {
@@ -3335,7 +3514,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 lockedConfirmedColors[ stateName ] =
                     savedColor instanceof Number ?
                         intToFx( savedColor as int ) :
-                        (defaultConfirmedColors[ stateName ] ?: Color.GRAY)
+                        (defaultStateOrderAndConfirmedColors[ stateName ] ?: Color.GRAY)
             }
             
             def savedUnconfirmed = pMap.statesAndColors?[0]?.colorU
@@ -3528,8 +3707,9 @@ while (true) {
     session.classifiers         = codePreferences.classifiers
     session.reviewers           = codePreferences.reviewers
     session.classifyingName     = codePreferences.classifyingName // Name of disease/marker being classified (for metadata)
-    session.userKey             = generateMdKey( session, session.userName, session.classifyingName )
-    session.classifierKeys      = session.classifiers.collect { generateMdKey( session, it, session.classifyingName ) } 
+    String modeKey              = session.classifierMode ? ActionStrings.CLASSIFIER_MODE : ActionStrings.REVIEWER_MODE
+    session.userKey             = generateUserKey( session, modeKey, session.userName )
+    session.classifierKeys      = session.classifiers.collect { generateUserKey( session, ActionStrings.CLASSIFIER_MODE, it ) } 
     session.checkingWork        = codePreferences.checkingWork // Set if the user is going back over their completed classifications
     session.toggleChannels      = codePreferences.selectedChannels // Channels to toggle for analysis (keep number of channels low)
     session.annoClass           = codePreferences.annoClass // Class of annotations to review
@@ -3572,19 +3752,27 @@ while (true) {
     
     
     // --- Checking image viability ---
+    def problemImageLists = []
+    
     def notFullyClassifiedImages = []
+    problemImageLists << notFullyClassifiedImages
     def fullyClassifiedImages = []
+    problemImageLists << fullyClassifiedImages
     def userIncompleteImages = []
+    problemImageLists << userIncompleteImages
     def userCompleteImages = []
+    problemImageLists << userCompleteImages
     def imagesWithoutAnnos = []
+    problemImageLists << imagesWithoutAnnos
     def imagesWithNoReviewableAnnos = []  
+    problemImageLists << imagesWithNoReviewableAnnos
     def usersWithIncompleteClassifications = [] as LinkedHashSet
     def incompleteUsersByImage = [:].withDefault { [] as LinkedHashSet }
     
+    // Parallel checks for speed
+    def nThreads = Math.min( Runtime.getRuntime().availableProcessors() * 2, imageOrder.size() )
+    def pool = Executors.newFixedThreadPool( nThreads )
     
-    def pool = java.util.concurrent.Executors.newFixedThreadPool(
-        Math.min( imageOrder.size(), Runtime.getRuntime().availableProcessors() * 2 )
-    )
     def futures = imageOrder.collect { image ->
         pool.submit({
             def imageAnnos = image.readImageData()
@@ -3604,12 +3792,12 @@ while (true) {
             
             if (session.reviewerMode) {
                 imageAnnos.each { anno ->
-                    def missing = session.classifierKeys.findAll { !anno.getMetadata().containsKey(it) }
-                                                        .collect { getUserFromKey(it) }
+                    def missing = session.classifierKeys.findAll { !anno.getMetadata().containsKey( it ) }
+                                                        .collect { getUserFromKey( it ) }
                     if (missing) {
                         annosMissingClassifierKeys << anno
-                        missingUsers.addAll(missing)
-                        incompleteByImage[image.getImageName()].addAll(missing)
+                        missingUsers.addAll( missing )
+                        incompleteByImage[ image.getImageName() ].addAll( missing )
                     }
                 }
             }
@@ -3646,7 +3834,7 @@ while (true) {
                 anyAnnosToCheck: anyAnnosToCheck,
                 missingUsers: missingUsers, incompleteUsersByImage: incompleteByImage
             )
-        } as java.util.concurrent.Callable)
+        } as Callable)
     }
     pool.shutdown()
     
@@ -3657,8 +3845,8 @@ while (true) {
         if (session.reviewerMode) {
             (r.anyMissingClassifierKeys ? notFullyClassifiedImages : fullyClassifiedImages) << r.image
         }
-        usersWithIncompleteClassifications.addAll(r.missingUsers)
-        r.incompleteUsersByImage.each { k, v -> incompleteUsersByImage[k].addAll(v) }
+        usersWithIncompleteClassifications.addAll( r.missingUsers )
+        r.incompleteUsersByImage.each { k, v -> incompleteUsersByImage[ k ].addAll( v ) }
         
         if (r.anyAnnosToCheck) {
             if (r.anyMissingUserKey) {
@@ -3697,6 +3885,18 @@ while (true) {
     List generalCriteria = ["User: ${session.userName}", 
                             "Object class: ${session.annoClass}", 
                             "Classifying name: ${session.classifyingName}"]
+    
+    // Ordering problem image lists to reflect or of images in project
+    def orderByName = [:]
+    imageList.eachWithIndex { entry, idx ->
+        orderByName[ entry.getImageName() ] = idx
+    }
+    problemImageLists.each { sublist ->
+        sublist.sort { entry ->
+            if (entry instanceof Map) { entry = entry.image }
+            orderByName[ entry.getImageName() ] ?: Integer.MAX_VALUE
+        }
+    }
     
     // - Creating specific checks + warnings -
     // User completion warnings
@@ -4368,15 +4568,15 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                 session.channelToChange = brightnessChannelState ? session.channelToChange : backupChannel
                             }
                             break
-                        
+                            
                         case (ActionStrings.BRIGHT_UP):
                             changeBrightness( "UP", session )
                             break
-                        
+                            
                         case (ActionStrings.BRIGHT_DOWN):
                             changeBrightness( "DOWN", session )
                             break
-                        
+                            
                         case (ActionStrings.TOGGLE_FREE_VIEW):
                             session.freeView = !session.freeView
                             
@@ -4532,10 +4732,8 @@ import java.awt.Color as AwtColor
 import java.nio.file.Files
 import java.util.Collections
 import javafx.util.StringConverter
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.*
+import java.util.concurrent.atomic.*
 
 import javafx.animation.AnimationTimer
 import javafx.animation.PauseTransition

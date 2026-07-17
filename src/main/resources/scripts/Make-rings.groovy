@@ -68,15 +68,16 @@ def createProgressWindow( String title, int totalImages ) {
         def bar = new ProgressBar( 0.0 )
         def barRow = new HBox( 10, bar )  
         
-        def cancelBtn = new Button( "Cancel" )
-        cancelBtn.setDisable( false )
+        def stopBtn = new Button( "Stop" )
+        def stopNowInsteadBtn = new Button( "Stop now" )
+        stopBtn.setDisable( false )
         def spacer = new Region()
         HBox.setHgrow( spacer, Priority.ALWAYS )
         def timerLabel = new Label( "Elapsed: 00:00:00" )       
-        def firstBottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
-        firstBottomRow.setAlignment( Pos.CENTER_LEFT )
+        def bottomRow = new HBox( 10, stopBtn, spacer, timerLabel )
+        bottomRow.setAlignment( Pos.CENTER_LEFT )
         
-        List rows = [stepRow, imageRow, barRow, firstBottomRow]
+        List rows = [stepRow, imageRow, barRow, bottomRow]
         
         def vbox = new VBox( 10 )
         vbox.getChildren().addAll( rows )
@@ -130,7 +131,7 @@ def createProgressWindow( String title, int totalImages ) {
         
         def timeline = new Timeline(
             new KeyFrame(
-                Duration.seconds( 1 ),
+                javafx.util.Duration.seconds( 1 ),
                 { evt ->
                     long elapsedNs = System.nanoTime() - startTime
                     long seconds = (long)( elapsedNs / 1_000_000_000L )
@@ -148,19 +149,61 @@ def createProgressWindow( String title, int totalImages ) {
         timeline.play()
         
         // Signal to cancel script
-        def cancelFlag = new AtomicBoolean( false )
-        def cancelUpdateLabel = new Label( "Cancelling after image..." )
-        cancelUpdateLabel.setPadding( new Insets( 4 ) )
-        cancelBtn.setOnAction {
-            firstBottomRow.getChildren().set(
-                firstBottomRow.getChildren().indexOf( cancelBtn ), cancelUpdateLabel
-            )
-            cancelFlag.set( true )
+        def stopNowFlag   = new AtomicBoolean( false )
+        def stopLaterFlag = new AtomicBoolean( false )
+        
+        def stopNowLabel = new Label( "Stopping after operation..." )
+        stopNowLabel.setPadding( new Insets( 4 ) )
+        def stopLaterLabel = new Label( "Stopping after image..." )
+        stopLaterLabel.setPadding( new Insets( 4 ) )
+        
+        def poolRef = new AtomicReference( null )
+
+        def showStopConfirmation = {
+            // Preventing a double show
+            if (stopNowFlag.get() || stopLaterFlag.get()) { return }
+            
+            def alert = new Alert( Alert.AlertType.CONFIRMATION )
+            alert.setTitle( "Stop confirmation" )
+            alert.setHeaderText( "Stop processing?" )
+            alert.initOwner( stage )
+            
+            alert.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.YES, ButtonType.CANCEL )
+            def stopAfterImageBtn = alert.getDialogPane().lookupButton( ButtonType.OK )
+            def stopNowBtn        = alert.getDialogPane().lookupButton( ButtonType.YES )
+            def backBtn           = alert.getDialogPane().lookupButton( ButtonType.CANCEL )
+            stopAfterImageBtn.setText( "Stop after image" )
+            stopNowBtn.setText( "Stop now" )
+            backBtn.setText( "Back" )
+            
+            def response = alert.showAndWait().orElse( null )
+            
+            if (response == ButtonType.YES) {
+                stopNowFlag.set( true )
+                bottomRow.getChildren().set( 0, stopNowLabel ) 
+                poolRef.get()?.shutdownNow()
+            
+            } else if (response == ButtonType.OK) {
+                stopLaterFlag.set( true )
+                bottomRow.getChildren().set( 0, stopLaterLabel )
+                bottomRow.getChildren().add( 1, stopNowInsteadBtn )
+            }
+        }
+
+        stopBtn.setOnAction {
+            showStopConfirmation()
         }
         stage.setOnCloseRequest { evt ->
-            cancelFlag.set( true )
+            evt.consume()
+            showStopConfirmation()
         }
-        
+        stopNowInsteadBtn.setOnAction {
+            stopNowFlag.set( true )
+            bottomRow.getChildren().set( 0, stopNowLabel )
+            bottomRow.getChildren().remove( 1 )
+            poolRef.get()?.shutdownNow()
+        }
+
         return [
             stage        : stage,
             stepNum      : stepNum,
@@ -170,7 +213,9 @@ def createProgressWindow( String title, int totalImages ) {
             imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            cancelFlag   : cancelFlag
+            stopNowFlag  : stopNowFlag,
+            stopLaterFlag: stopLaterFlag,
+            poolRef      : poolRef
         ]
     }
 }
@@ -523,7 +568,7 @@ def codePreferences = runOnFxThreadAndWait {
     def root = new BorderPane()
     root.setPrefHeight( 350 )
     
-    dialog.getDialogPane().buttonTypes.addAll( ButtonType.OK, ButtonType.CANCEL )
+    dialog.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.CANCEL )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
     okBtn.setText( "Make rings" )
     ButtonBar.setButtonUniformSize( okBtn, false )
@@ -536,8 +581,7 @@ def codePreferences = runOnFxThreadAndWait {
     
     // Parse comma-separated integers
     def parseIntegerList = { String text ->    
-        if (!text?.trim())
-            return []     
+        if (!text?.trim()) { return [] }  
         def values = []    
         text.split( "," ).each { part ->
             def trimmed = part.trim()
@@ -635,19 +679,38 @@ def codePreferences = runOnFxThreadAndWait {
     def imageClassCounts = [:]  // imageName -> [className -> count]
     def totalsByClass = [:]     // className -> total across all images
     
-    project.getImageList().each { entry ->
-        def summaryFile = entry.getEntryPath().resolve( "summary.json" )
-        def counts = [:]
-        if (Files.exists( summaryFile )) {
-            def raw = new String( Files.readAllBytes( summaryFile ) )
-            def summary = gson.fromJson( raw, Object )
-            summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
-                def n = k.toString()
-                counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
-                totalsByClass[ n ] = (totalsByClass[ n ] ?: 0) + counts[ n ]
+    def imageList = project.getImageList()
+    def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
+    def pool = Executors.newFixedThreadPool( nThreads )
+    def resultMap = new java.util.concurrent.ConcurrentHashMap()
+    
+    // Parallel finding anno summaries
+    def futures = imageList.collect { entry ->
+        pool.submit({
+            def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+            def counts = [:]
+            if (Files.exists( summaryFile )) {
+                try {
+                    def raw = new String( Files.readAllBytes( summaryFile ) )
+                    def summary = gson.fromJson( raw, Object )
+                    summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
+                        def n = k.toString()
+                        counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                    }
+                } catch (Exception ignored) {}
             }
+            resultMap[ entry.getImageName() ] = counts
+        } as Callable)
+    }
+    futures.each { it.get() }
+    pool.shutdown()
+    
+    // Merge into imageClassCounts and totalsByClass
+    resultMap.each { imgName, counts ->
+        imageClassCounts[ imgName ] = counts
+        counts.each { className, count ->
+            totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
         }
-        imageClassCounts[ entry.getImageName() ] = counts
     }
     
     // Sort: only classes with existing annotations in project by abundance
@@ -695,11 +758,13 @@ def codePreferences = runOnFxThreadAndWait {
         
         // Setting bright border on checkbox for current image
         Platform.runLater { 
-            currentCB.lookup( ".box" )?.setStyle("""
-                -fx-border-color: black;
-                -fx-border-width: 2;
-                -fx-border-radius: 1;
-            """)
+            [currentCB, currentImageCB].each {
+                it.lookup( ".box" )?.setStyle("""
+                    -fx-border-color: black;
+                    -fx-border-width: 2;
+                    -fx-border-radius: 1;
+                """)
+            }
         }
         
         // If current image was only one selected, will update to new image
@@ -903,7 +968,8 @@ def imagesToRun = project.getImageList().findAll { it.getImageName() in codePref
 
 def total = imagesToRun.size()
 def progressUI = createProgressWindow( "Processing", total )
-def cancelFlag = progressUI.cancelFlag
+def stopNowFlag   = progressUI.stopNowFlag
+def stopLaterFlag = progressUI.stopLaterFlag
 int processed = 0
 
 // Number of vertices calculated when buffering geometries (standard is 8)
@@ -911,10 +977,8 @@ def bufParams = new BufferParameters( codePreferences.simplifyGeometry ? 4 : 8 )
 
 imageLoop:
 for (image in imagesToRun) {
-    
-    if (cancelFlag.get()) {
-        break
-    }
+    // Stopping when requested
+    if (stopNowFlag.get() || stopLaterFlag.get()) { break }
     
     // Reporting current image
     updateProgressWindow( progressUI, [imageName: image] )
@@ -931,188 +995,239 @@ for (image in imagesToRun) {
     updateProgressWindow( progressUI, [stepMax: netSteps] )
     int step = 1
     
+    def pool = Executors.newFixedThreadPool( Runtime.getRuntime().availableProcessors() )
+    progressUI.poolRef.set( pool )
     
-    pathclassLoop:
-    for (objectClass in codePreferences.objectClasses) {
-        
-        // Get central objects
-        def baseObjs = hierarchy.getAnnotationObjects().findAll {
-            it.getPathClass()?.getName() == objectClass && 
-            it.getROI()?.getArea() > 0
-        }
-        baseObjs.each { it.setLocked( true ) }
-        
-        // Get expansion class names
-        def expansionClasses = codePreferences.expansionsMicrons.collect { exp ->
-            def expPathClassName = objectClass + "_" + exp
-            return expPathClassName
-        }
-        
-        // Clear previous expansions
-        def objectsToRemove = hierarchy.getAnnotationObjects().findAll { 
-            def pathClassName = it.getPathClass()?.getName()
-            pathClassName in expansionClasses ||
-            ( pathClassName.contains( objectClass + "_" ) && it.getParent() in baseObjs )
-        }
-        hierarchy.removeObjects( objectsToRemove, false )
-        
-        // Making sure new class(es) are in project classes
-        def availableClasses = getQuPath().getAvailablePathClasses()
-        def missingClasses = expansionClasses
-                .collect { getPathClass( it ) }
-                .findAll { it !in availableClasses }
-        availableClasses.addAll( missingClasses )
-        
-        
-        // --- RING GENERATION ---
-        // Getting map with central object and relevant expansion geometries
-        updateProgressWindow( progressUI, [stepNum: step, stepName: "Generating expansion map for ${objectClass}"] )
-        
-        // Parallelize execution
-        int numBaseObjs = baseObjs.size()
-        def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), numBaseObjs )
-        def pool = Executors.newFixedThreadPool( nThreads )
-        def expansionsMap = new Object[ numBaseObjs ]
-        def doneCount = new AtomicInteger( 0 )
-        
-        def futures = (0..<numBaseObjs).collect { idx ->
-            pool.submit({
-                def annoCentral = baseObjs[ idx ]
-                def geomCentral = codePreferences.simplifyGeometry ?
-                    simplifyGeom( toPolygonGeometry( annoCentral.getROI().getGeometry() ), codePreferences.maxVertices ) :
-                    toPolygonGeometry( annoCentral.getROI().getGeometry() )
-                
-                if (codePreferences.expandOnlyOutward) {
-                    geomCentral = toPolygonGeometry( fillAnnoHoles( [geomCentral] )[0] )
-                }
-                
-                def geomsAll = [ geomCentral ]
-                codePreferences.expansionsMicrons.each { exp ->
-                    double expandPixels = exp / pixelSize
-                    geomsAll << toPolygonGeometry( bufferGeom( geomCentral, expandPixels, bufParams ) )
-                }
-                expansionsMap[ idx ] = [ centerObj: annoCentral, allGeoms: geomsAll ]
-                
-                int pDone = ( doneCount.incrementAndGet() / numBaseObjs * 100 ) as int
-                updateProgressWindow( progressUI, [ stepPer: pDone ] )
-            } as Callable)
-        }
-        futures.each { it.get() }
-        
-        def expansionsMapList = expansionsMap.toList()
-        
-        
-        // Prep each group: geometries are already normalized by above so no re-cleaning needed.
-        // Parent geometry is cached here once so it isn't recomputed on every ring level below.
-        expansionsMapList.each { objGroup ->
-            objGroup.cleanedAllGeoms = objGroup.allGeoms
-            objGroup.ringObjs = []
-            if (codePreferences.constrainToParent) {
-                def parent = objGroup.centerObj.getParent()
-                objGroup.parentGeom = (parent?.getROI() != null) ? cleanForROI( parent.getROI().getGeometry() ) : null
+    try {
+        pathclassLoop:
+        for (objectClass in codePreferences.objectClasses) {
+            
+            // Get central objects
+            def baseObjs = hierarchy.getAnnotationObjects().findAll {
+                it.getPathClass()?.getName() == objectClass && 
+                it.getROI()?.getArea() > 0
             }
-        }
-        
-        
-        // Creating rings and nesting under central object
-        expansionClasses.eachWithIndex { expClass, level ->
+            baseObjs.each { it.setLocked( true ) }
             
-            // Reporting current step
-            step ++
-            updateProgressWindow( progressUI, [stepName: "Building ${expClass} inner mask", stepPer: 0] )
+            // Get expansion class names
+            def expansionClasses = codePreferences.expansionsMicrons.collect { exp ->
+                def expPathClassName = objectClass + "_" + exp
+                return expPathClassName
+            }
             
-            def innerGeomsAtLevel = expansionsMapList.collect { it.cleanedAllGeoms[ level ] }
-            def geoms = Collections.synchronizedList( codePreferences.simplifyGeometry ?
-                innerGeomsAtLevel.collect { toPolygonGeometry( simplifyGeom( it, codePreferences.maxVertices ) ) } :
-                innerGeomsAtLevel )
-            int totalGeoms = geoms.size()
+            // Clear previous expansions
+            def objectsToRemove = hierarchy.getAnnotationObjects().findAll { 
+                def pathClassName = it.getPathClass()?.getName()
+                pathClassName in expansionClasses ||
+                ( pathClassName.contains( objectClass + "_" ) && it.getParent() in baseObjs )
+            }
+            hierarchy.removeObjects( objectsToRemove, false )
             
-            while (geoms.size() > 1) {
-                def pairs = []
-                for (int i = 0; i < geoms.size() - 1; i += 2) {
-                    pairs << [i, i + 1]
-                }
-                
-                def roundResults = new Object[ pairs.size() + (geoms.size() % 2) ]
-                def currentGeoms = geoms
-                
-                def mergeFutures = pairs.indices.collect { pi ->
-                    def a = currentGeoms[ pairs[pi][0] ]
-                    def b = currentGeoms[ pairs[pi][1] ]
-                    def resultIdx = pi
+            // Making sure new class(es) are in project classes
+            def availableClasses = getQuPath().getAvailablePathClasses()
+            def missingClasses = expansionClasses
+                    .collect { getPathClass( it ) }
+                    .findAll { it !in availableClasses }
+            availableClasses.addAll( missingClasses )
+            
+            
+            // --- RING GENERATION ---
+            // Getting map with central object and relevant expansion geometries
+            updateProgressWindow( progressUI, [stepNum: step, stepName: "Generating expansion map for ${objectClass}"] )
+            
+            // Parallelize execution
+            int numBaseObjs = baseObjs.size()
+            def expansionsMap = new Object[ numBaseObjs ]
+            def doneCount = new AtomicInteger( 0 )
+            
+            def futures = (0..<numBaseObjs).collect { idx ->
+                if (stopNowFlag.get()) { return null }
+                try {
                     pool.submit({
-                        def merged = toPolygonGeometry( a.union( b ) )
-                        roundResults[ resultIdx ] = merged.isValid() ? merged : merged.buffer( 0 )
-                    } as Callable)
-                }
-                mergeFutures.each { it.get() }
-                
-                if (geoms.size() % 2 == 1) {
-                    roundResults[ pairs.size() ] = geoms.last()
-                }
-                
-                geoms = roundResults.toList()
-                int pDone = ((totalGeoms - geoms.size()) / totalGeoms * 100) as int
-                updateProgressWindow( progressUI, [stepPer: pDone] )
-            }
-            def combinedInnerMask = cleanForROI( geoms[0] )
-            
-            
-            step++
-            updateProgressWindow( progressUI, [stepNum: step, stepName: "Building ${expClass} rings", stepPer: 0] )
-            
-            // Parallel geometry phase
-            def ringResults = new Object[ expansionsMapList.size() ]
-            def doneRingCount = new AtomicInteger( 0 )
-            int numExpMapVals = expansionsMapList.size()
-            
-            def diffFutures = (0..<numExpMapVals).collect { idx ->
-                pool.submit({
-                    def objGroup = expansionsMapList[ idx ]
-                    def ringGeom = codePreferences.simplifyGeometry ? 
-                        simplifyGeom( objGroup.cleanedAllGeoms[ level + 1 ], codePreferences.maxVertices ) :
-                        objGroup.cleanedAllGeoms[ level + 1 ]
-            
-                    if (!combinedInnerMask.isEmpty() && ringGeom.intersects( combinedInnerMask )) {
-                        def mask = combinedInnerMask.isValid() ? combinedInnerMask : combinedInnerMask.buffer( 0 )
-                        def ring = ringGeom.isValid() ? ringGeom : ringGeom.buffer( 0 )
-                        ringGeom = cleanForROI( ring.difference( mask ) )
-                    }
-            
-                    if (codePreferences.constrainToParent) {
-                        def parentGeom = objGroup.parentGeom
-                        if (parentGeom != null && !ringGeom.isEmpty() && ringGeom.getArea() > 0
-                                && !parentGeom.covers( ringGeom )) {
-                            def parent = parentGeom.isValid() ? parentGeom : parentGeom.buffer( 0 )
-                            def ring = ringGeom.isValid() ? ringGeom : ringGeom.buffer( 0 )
-                            ringGeom = cleanForROI( ring.intersection( parent ) )
+                        def annoCentral = baseObjs[ idx ]
+                        def geomCentral = codePreferences.simplifyGeometry ?
+                            simplifyGeom( toPolygonGeometry( annoCentral.getROI().getGeometry() ), codePreferences.maxVertices ) :
+                            toPolygonGeometry( annoCentral.getROI().getGeometry() )
+                        
+                        if (codePreferences.expandOnlyOutward) {
+                            geomCentral = toPolygonGeometry( fillAnnoHoles( [geomCentral] )[0] )
                         }
-                    }
+                        
+                        def geomsAll = [ geomCentral ]
+                        codePreferences.expansionsMicrons.each { exp ->
+                            double expandPixels = exp / pixelSize
+                            geomsAll << toPolygonGeometry( bufferGeom( geomCentral, expandPixels, bufParams ) )
+                        }
+                        expansionsMap[ idx ] = [ centerObj: annoCentral, allGeoms: geomsAll ]
+                        
+                        int pDone = ( doneCount.incrementAndGet() / numBaseObjs * 100 ) as int
+                        updateProgressWindow( progressUI, [ stepPer: pDone ] )
+                    } as Callable)
+                } catch (RejectedExecutionException ignored) {
+                    null
+                }
+            }.findAll { it != null }
             
-                    ringResults[ idx ] = (!ringGeom.isEmpty() && ringGeom.getArea() > 0) ? ringGeom : null
-            
-                    int pDone = (doneRingCount.incrementAndGet() / numExpMapVals * 100) as int
-                    updateProgressWindow( progressUI, [ stepPer: pDone ] )
-                } as Callable)
+            // Allowing a live cancel to happen
+            try {
+                for (def f in futures) {
+                    f.get()
+                    if (stopNowFlag.get()) { continue imageLoop }
+                }
+            } catch (Exception e) {
+                if (stopNowFlag.get()) { continue imageLoop }
+                throw e
             }
-            diffFutures.each { it.get() }
             
-            // Serial hierarchy adds
-            runOnFxThreadAndWait {
-                ringResults.eachWithIndex { ringGeom, idx ->
-                    if (ringGeom == null) return
-                    def objGroup = expansionsMapList[ idx ]
-                    def centerObj = objGroup.centerObj
-                    def ringROI = GeometryTools.geometryToROI( ringGeom, centerObj.getROI().getImagePlane() )
-                    def ringObj = PathObjects.createAnnotationObject( ringROI, getPathClass( expClass ) )
-                    hierarchy.addObjectBelowParent( centerObj, ringObj, false )
-                    objGroup.ringObjs << ringObj
-                    ringObj.setLocked( true )
+            def expansionsMapList = expansionsMap.toList()
+            
+            
+            // Prep each group: geometries are already normalized by above so no re-cleaning needed.
+            // Parent geometry is cached here once so it isn't recomputed on every ring level below.
+            expansionsMapList.each { objGroup ->
+                objGroup.cleanedAllGeoms = objGroup.allGeoms
+                objGroup.ringObjs = []
+                if (codePreferences.constrainToParent) {
+                    def parent = objGroup.centerObj.getParent()
+                    objGroup.parentGeom = (parent?.getROI() != null) ? cleanForROI( parent.getROI().getGeometry() ) : null
+                }
+            }
+            
+            
+            // Creating rings and nesting under central object
+            for (int level = 0; level < expansionClasses.size(); level++) {
+                def expClass = expansionClasses[ level ]
+                
+                // Reporting current step
+                step ++
+                updateProgressWindow( progressUI, [stepName: "Building ${expClass} inner mask", stepPer: 0] )
+                
+                def innerGeomsAtLevel = expansionsMapList.collect { it.cleanedAllGeoms[ level ] }
+                def geoms = Collections.synchronizedList( codePreferences.simplifyGeometry ?
+                    innerGeomsAtLevel.collect { toPolygonGeometry( simplifyGeom( it, codePreferences.maxVertices ) ) } :
+                    innerGeomsAtLevel )
+                int totalGeoms = geoms.size()
+                
+                while (geoms.size() > 1) {
+                    if (stopNowFlag.get()) { continue imageLoop }
+                    
+                    def pairs = []
+                    for (int i = 0; i < geoms.size() - 1; i += 2) {
+                        pairs << [i, i + 1]
+                    }
+                    
+                    def roundResults = new Object[ pairs.size() + (geoms.size() % 2) ]
+                    def currentGeoms = geoms
+                    
+                    def mergeFutures = pairs.indices.collect { pi ->
+                        if (stopNowFlag.get()) { return null }
+                        try {
+                            def a = currentGeoms[ pairs[pi][0] ]
+                            def b = currentGeoms[ pairs[pi][1] ]
+                            def resultIdx = pi
+                            pool.submit({
+                                def merged = toPolygonGeometry( a.union( b ) )
+                                roundResults[ resultIdx ] = merged.isValid() ? merged : merged.buffer( 0 )
+                            } as Callable)
+                        } catch (RejectedExecutionException ignored) {
+                            null
+                        }
+                    }.findAll { it != null }
+                    
+                    // Allowing live cancel
+                    try {
+                        for (def f in mergeFutures) {
+                            f.get()
+                            if (stopNowFlag.get()) { continue imageLoop }
+                        }
+                    } catch (Exception e) {
+                        if (stopNowFlag.get()) { continue imageLoop }
+                        throw e
+                    }
+                    
+                    if (geoms.size() % 2 == 1) {
+                        roundResults[ pairs.size() ] = geoms.last()
+                    }
+                    
+                    geoms = roundResults.toList()
+                    int pDone = ((totalGeoms - geoms.size()) / totalGeoms * 100) as int
+                    updateProgressWindow( progressUI, [stepPer: pDone] )
+                }
+                def combinedInnerMask = cleanForROI( geoms[0] )
+                
+                
+                step++
+                updateProgressWindow( progressUI, [stepNum: step, stepName: "Building ${expClass} rings", stepPer: 0] )
+                
+                // Parallel geometry phase
+                def ringResults = new Object[ expansionsMapList.size() ]
+                def doneRingCount = new AtomicInteger( 0 )
+                int numExpMapVals = expansionsMapList.size()
+                
+                def diffFutures = (0..<numExpMapVals).collect { idx ->
+                    if (stopNowFlag.get()) { return null }
+                    try {
+                        pool.submit({
+                            def objGroup = expansionsMapList[ idx ]
+                            def ringGeom = codePreferences.simplifyGeometry ? 
+                                simplifyGeom( objGroup.cleanedAllGeoms[ level + 1 ], codePreferences.maxVertices ) :
+                                objGroup.cleanedAllGeoms[ level + 1 ]
+                    
+                            if (!combinedInnerMask.isEmpty() && ringGeom.intersects( combinedInnerMask )) {
+                                def mask = combinedInnerMask.isValid() ? combinedInnerMask : combinedInnerMask.buffer( 0 )
+                                def ring = ringGeom.isValid() ? ringGeom : ringGeom.buffer( 0 )
+                                ringGeom = cleanForROI( ring.difference( mask ) )
+                            }
+                    
+                            if (codePreferences.constrainToParent) {
+                                def parentGeom = objGroup.parentGeom
+                                if (parentGeom != null && !ringGeom.isEmpty() && ringGeom.getArea() > 0
+                                        && !parentGeom.covers( ringGeom )) {
+                                    def parent = parentGeom.isValid() ? parentGeom : parentGeom.buffer( 0 )
+                                    def ring = ringGeom.isValid() ? ringGeom : ringGeom.buffer( 0 )
+                                    ringGeom = cleanForROI( ring.intersection( parent ) )
+                                }
+                            }
+                    
+                            ringResults[ idx ] = (!ringGeom.isEmpty() && ringGeom.getArea() > 0) ? ringGeom : null
+                    
+                            int pDone = (doneRingCount.incrementAndGet() / numExpMapVals * 100) as int
+                            updateProgressWindow( progressUI, [ stepPer: pDone ] )
+                        } as Callable)
+                    } catch (RejectedExecutionException ignored) {
+                        null
+                    }
+                }.findAll { it != null }
+                
+                // Allowing live cancel
+                try {
+                    for (def f in diffFutures) {
+                        f.get()
+                        if (stopNowFlag.get()) { continue imageLoop }
+                    }
+                } catch (Exception e) {
+                    if (stopNowFlag.get()) { continue imageLoop }
+                    throw e
+                }
+                
+                // Serial hierarchy adds
+                runOnFxThreadAndWait {
+                    ringResults.eachWithIndex { ringGeom, idx ->
+                        if (ringGeom == null) { return }
+                        def objGroup = expansionsMapList[ idx ]
+                        def centerObj = objGroup.centerObj
+                        def ringROI = GeometryTools.geometryToROI( ringGeom, centerObj.getROI().getImagePlane() )
+                        def ringObj = PathObjects.createAnnotationObject( ringROI, getPathClass( expClass ) )
+                        hierarchy.addObjectBelowParent( centerObj, ringObj, false )
+                        objGroup.ringObjs << ringObj
+                        ringObj.setLocked( true )
+                    }
                 }
             }
         }
-        
+    } finally {
         pool.shutdown()
+        progressUI.poolRef.set( null )
     }
     
     

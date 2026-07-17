@@ -5,6 +5,8 @@
 */
 
 
+def omittedMdKeys = ["Parent_ID", "Parent_Name"]
+
 // --- FUNCTIONS ---
 // Function: Helper to run on FX thread
 def runOnFxThreadAndWait( Closure fxCode ) {
@@ -64,12 +66,12 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         
         def barRow = new HBox( 10, bar )
         
-        def cancelBtn = new Button( "Cancel" )
-        cancelBtn.setDisable( false )
+        def stopBtn = new Button( "Stop" )
+        stopBtn.setDisable( false )
         def spacer = new Region()
         HBox.setHgrow( spacer, Priority.ALWAYS )
         def timerLabel = new Label( "Elapsed: 00:00:00" )       
-        def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
+        def bottomRow = new HBox( 10, stopBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
         List rows = [imageRow, barRow, bottomRow]
@@ -141,18 +143,34 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         timeline.setCycleCount( Animation.INDEFINITE )
         timeline.play()
         
-        // Signal to cancel script
-        def cancelFlag = new AtomicBoolean( false )
-        def cancelUpdateLabel = new Label( "Cancelling after image..." )
-        cancelUpdateLabel.setPadding( new Insets( 4 ) )
-        cancelBtn.setOnAction {
-            bottomRow.getChildren().set(
-                bottomRow.getChildren().indexOf( cancelBtn ), cancelUpdateLabel
-            )
-            cancelFlag.set( true )
+        // Signal to stop script
+        def stopLaterFlag = new AtomicBoolean( false )
+        
+        def stopLaterLabel = new Label( "Stopping after image..." )
+        stopLaterLabel.setPadding( new Insets( 4 ) )
+        
+        def showStopConfirmation = {
+            if (stopLaterFlag.get()) { return }
+            
+            def alert = new Alert( Alert.AlertType.CONFIRMATION )
+            alert.setTitle( "Stop confirmation" )
+            alert.setHeaderText( "Stop processing?" )
+            alert.initOwner( stage )
+            
+            def response = alert.showAndWait().orElse( null )
+            
+            if (response == ButtonType.OK) {
+                stopLaterFlag.set( true )
+                bottomRow.getChildren().set( 0, stopLaterLabel )
+            }
+        }
+
+        stopBtn.setOnAction {
+            showStopConfirmation()
         }
         stage.setOnCloseRequest { evt ->
-            cancelFlag.set( true )
+            evt.consume()
+            showStopConfirmation()
         }
         
         return [
@@ -160,7 +178,7 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
             imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            cancelFlag   : cancelFlag
+            stopLaterFlag: stopLaterFlag
         ]
     }
 }
@@ -412,13 +430,14 @@ def addIcon( node, iconCode, int size ) {
 }
 
 // Function: Scan the entire project to collect annotation field availability by class
-def collectProjectAnnotationIndex( project, Stage ownerStage = null ) {
+def collectProjectAnnotationIndex( project, Stage ownerStage = null, Collection omittedMdKeys = [] ) {
     List projectImages = project.getImageList()
     def collectingUI = createProgressWindow( "Getting project specifics", projectImages.size(), true, ownerStage )
     def imagesScanned = new AtomicInteger( 0 )
     int total = projectImages.size()
 
-    def pool = Executors.newFixedThreadPool( Math.min( 8, total ) ) // cap at 8 — I/O bound
+    def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), total )
+    def pool = Executors.newFixedThreadPool( nThreads )
 
     def futures = projectImages.collect { entry ->
         pool.submit({
@@ -436,7 +455,9 @@ def collectProjectAnnotationIndex( project, Stage ownerStage = null ) {
                         if (className) {
                             localClassCounts[ className ]++
                             obj.getMeasurementList()?.getMeasurementNames()?.each { localMeasurements[ className ] << it }
-                            obj.getMetadata()?.keySet()?.each { localMetadata[ className ] << it }
+                            obj.getMetadata()?.keySet()?.each { 
+                                if (!(it in omittedMdKeys)) { localMetadata[ className ] << it }
+                            }
                         }
                     }
                 }
@@ -526,7 +547,7 @@ def loadProjectCache = { proj, File cacheFile, boolean forceReload = false, Stag
         }
     }
 
-    def builtIndex = collectProjectAnnotationIndex( proj, ownerStage )
+    def builtIndex = collectProjectAnnotationIndex( proj, ownerStage, omittedMdKeys )
     def timestamp = LocalDateTime.now().format(
         DateTimeFormatter.ofPattern( "yyyy-MM-dd HH:mm:ss" )
     )
@@ -553,7 +574,7 @@ def codePreferences = runOnFxThreadAndWait {
     def root = new BorderPane()
     root.setPrefHeight( 350 )
     
-    dialog.getDialogPane().buttonTypes.addAll( ButtonType.OK, ButtonType.CANCEL )
+    dialog.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.CANCEL )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
     okBtn.setText( "Remove Data" )
     ButtonBar.setButtonUniformSize( okBtn, false )
@@ -567,19 +588,38 @@ def codePreferences = runOnFxThreadAndWait {
     def imageClassCounts = [:]  // imageName -> [className -> count]
     def totalsByClass = [:]     // className -> total across all images
     
-    project.getImageList().each { entry ->
-        def summaryFile = entry.getEntryPath().resolve( "summary.json" )
-        def counts = [:]
-        if (Files.exists( summaryFile )) {
-            def raw = new String( Files.readAllBytes( summaryFile ) )
-            def summary = gson.fromJson( raw, Object )
-            summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
-                def n = k.toString()
-                counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
-                totalsByClass[ n ] = (totalsByClass[ n ] ?: 0) + counts[ n ]
+    def imageList = project.getImageList()
+    def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
+    def pool = Executors.newFixedThreadPool( nThreads )
+    def resultMap = new java.util.concurrent.ConcurrentHashMap()
+    
+    // Parallel finding anno summaries
+    def futures = imageList.collect { entry ->
+        pool.submit({
+            def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+            def counts = [:]
+            if (Files.exists( summaryFile )) {
+                try {
+                    def raw = new String( Files.readAllBytes( summaryFile ) )
+                    def summary = gson.fromJson( raw, Object )
+                    summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
+                        def n = k.toString()
+                        counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                    }
+                } catch (Exception ignored) {}
             }
+            resultMap[ entry.getImageName() ] = counts
+        } as Callable)
+    }
+    futures.each { it.get() }
+    pool.shutdown()
+    
+    // Merge into imageClassCounts and totalsByClass
+    resultMap.each { imgName, counts ->
+        imageClassCounts[ imgName ] = counts
+        counts.each { className, count ->
+            totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
         }
-        imageClassCounts[ entry.getImageName() ] = counts
     }
     
     // Sort: only classes with existing annotations in project by abundance
@@ -592,7 +632,7 @@ def codePreferences = runOnFxThreadAndWait {
     def pathClassNamesAndNum = highCounts
     List pathClassCBsMap = pathClassNamesAndNum.collect { [name: it.name, data: it.name] } // labels set by updateClassCounts
     def pathClassBox = makeCheckboxBox( "Available classes", null, pathClassCBsMap, 200 )
-    pathClassBox.header.getChildren().addAll( pathClassBox.selectAll )
+    pathClassBox.header.getChildren().add( pathClassBox.selectAll )
     pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.objectClasses ) }
     BorderPane.setMargin( pathClassBox.box, new Insets( 0, 15, 0, 0 ) )
     
@@ -616,11 +656,13 @@ def codePreferences = runOnFxThreadAndWait {
         
         // Setting bright border on checkbox for current image
         Platform.runLater { 
-            currentCB.lookup( ".box" )?.setStyle("""
-                -fx-border-color: black;
-                -fx-border-width: 2;
-                -fx-border-radius: 1;
-            """)
+            [currentCB, currentImageCB].each {
+                it.lookup( ".box" )?.setStyle("""
+                    -fx-border-color: black;
+                    -fx-border-width: 2;
+                    -fx-border-radius: 1;
+                """)
+            }
         }
         
         // If current image was only one selected, will update to new image
@@ -681,14 +723,14 @@ def codePreferences = runOnFxThreadAndWait {
         LinkedHashSet allMeasurements = new LinkedHashSet( (measurementsByClass.values() ?: []).collectMany { it ?: [] } )
         def allMeasurementsMap = allMeasurements.collect { [name: it] }
         measurementsBox = makeCheckboxBox( "Available measurements", "available measurements within objects of the selected classes", allMeasurementsMap, 350 )
-        measurementsBox.header.getChildren().setAll( measurementsBox.selectAll )
+        measurementsBox.header.getChildren().add( measurementsBox.selectAll )
         measurementsBox.box.setMinWidth( Region.USE_PREF_SIZE )
         
         def metadataByClass = projectCache.index.metadataByClass ?: [:]
         LinkedHashSet allMetadata = new LinkedHashSet( (metadataByClass.values() ?: []).collectMany { it ?: [] } )
         def allMetadataMap = allMetadata.collect { [name: it] }
         metadataBox = makeCheckboxBox( "Available metadata", "available metadata within objects of the selected classes", allMetadataMap, 250 )
-        metadataBox.header.getChildren().setAll( metadataBox.selectAll )
+        metadataBox.header.getChildren().add( metadataBox.selectAll )
         metadataBox.box.setMinWidth( Region.USE_PREF_SIZE )
         
         pathClassBox.CBs.each { cb ->
@@ -866,7 +908,7 @@ def imagesToRun = project.getImageList().findAll { it.getImageName() in codePref
 
 def total = imagesToRun.size()
 def progressUI = createProgressWindow( "Processing", total )
-def cancelFlag = progressUI.cancelFlag
+def stopLaterFlag = progressUI.stopLaterFlag
 int processed = 0
 
 // Making a matrix for all images
@@ -875,53 +917,64 @@ List headerRow = []
 List emptyImages = []
 
 
-imageLoop:
-for (image in imagesToRun) {
-    
-    if (cancelFlag.get()) break
-    
-    // Reporting current image
-    updateProgressWindow( progressUI, [imageName: image] )
-    
-    
-    // If working on current image, modifying respective image data
-    def imageData = image == currentEntry ? currentImageData : image.readImageData()
-    def hierarchy = imageData.getHierarchy()
-    def annotations = hierarchy.getAnnotationObjects().findAll { it.getPathClass()?.getName() in codePreferences.objectClasses }
-    
+def nThreads = Math.min( Runtime.getRuntime().availableProcessors() * 2, imagesToRun.size() )
+def pool = Executors.newFixedThreadPool( nThreads )
+def doneCount = new AtomicInteger( 0 )
+
+// Parallel processing images
+def futures = imagesToRun.findAll { it != currentEntry }.collect { image ->
+    if (stopLaterFlag.get()) return null
+    pool.submit({
+        def imageData = image.readImageData()
+        try {
+            def hierarchy = imageData.getHierarchy()
+            def annotations = hierarchy.getAnnotationObjects().findAll {
+                it.getPathClass()?.getName() in codePreferences.objectClasses
+            }
+            annotations.each { anno ->
+                codePreferences.metadata.each { anno.getMetadata().remove( it ) }
+                codePreferences.measurements.each { anno.getMeasurements().remove( it ) }
+            }
+            image.saveImageData( imageData )
+        } finally {
+            imageData.close()
+        }
+        
+        int done = doneCount.incrementAndGet()
+        updateProgressWindow( progressUI, [
+            imageName: image,
+            imagePer : done / total,
+            imageNum : done + 1
+        ])
+    } as Callable)
+}.findAll { it != null }
+
+futures.each { it.get() }
+pool.shutdown()
+
+// Current image handled serially after
+if (!stopLaterFlag.get() && currentEntry in imagesToRun) {
+    def hierarchy = currentImageData.getHierarchy()
+    def annotations = hierarchy.getAnnotationObjects().findAll {
+        it.getPathClass()?.getName() in codePreferences.objectClasses
+    }
     annotations.each { anno ->
         codePreferences.metadata.each { anno.getMetadata().remove( it ) }
         codePreferences.measurements.each { anno.getMeasurements().remove( it ) }
     }
-    
-    
-    
-    
-    // Saving data
-    image.saveImageData( imageData )
-    
-    // Ensure current viewer updates its annotation list when working on the current image
-    if (image == currentEntry) {
-        runOnFxThreadAndWait {
-            def viewer = getCurrentViewer()
-            if (viewer != null) {
-                // Re-assign the same ImageData to force a UI refresh
-                imageData.getHierarchy().fireHierarchyChangedEvent( this )
-                viewer.setImageData( imageData )
-            }
+    currentEntry.saveImageData( currentImageData )
+    runOnFxThreadAndWait {
+        def viewer = getCurrentViewer()
+        if (viewer != null) {
+            currentImageData.getHierarchy().fireHierarchyChangedEvent( this )
+            viewer.setImageData( currentImageData )
         }
     }
-    
-    // Closing background imagedata for non-current image
-    if (image != currentEntry) {
-        imageData.close()
-    }
-    
-    
-    // - Reporting progress -
-    processed++
-    double frac = processed / total 
-    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed+1] )
+    int done = doneCount.incrementAndGet()
+    updateProgressWindow( progressUI, [
+        imagePer: done / total,
+        imageNum: done + 1
+    ])
 }
 
 

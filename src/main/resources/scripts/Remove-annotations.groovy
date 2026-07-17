@@ -64,12 +64,12 @@ def createProgressWindow( String title, int totalImages ) {
         
         def barRow = new HBox( 10, bar )
         
-        def cancelBtn = new Button( "Cancel" )
-        cancelBtn.setDisable( false )
+        def stopBtn = new Button( "Stop" )
+        stopBtn.setDisable( false )
         def spacer = new Region()
         HBox.setHgrow( spacer, Priority.ALWAYS )
         def timerLabel = new Label( "Elapsed: 00:00:00" )       
-        def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
+        def bottomRow = new HBox( 10, stopBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
         List rows = [imageRow, barRow, bottomRow]
@@ -138,18 +138,34 @@ def createProgressWindow( String title, int totalImages ) {
         timeline.setCycleCount( Animation.INDEFINITE )
         timeline.play()
         
-        // Signal to cancel script
-        def cancelFlag = new AtomicBoolean( false )
-        def cancelUpdateLabel = new Label( "Cancelling after image..." )
-        cancelUpdateLabel.setPadding( new Insets( 4 ) )
-        cancelBtn.setOnAction {
-            bottomRow.getChildren().set(
-                bottomRow.getChildren().indexOf( cancelBtn ), cancelUpdateLabel
-            )
-            cancelFlag.set( true )
+        // Signal to stop script
+        def stopLaterFlag = new AtomicBoolean( false )
+        
+        def stopLaterLabel = new Label( "Stopping after image..." )
+        stopLaterLabel.setPadding( new Insets( 4 ) )
+        
+        def showStopConfirmation = {
+            if (stopLaterFlag.get()) { return }
+            
+            def alert = new Alert( Alert.AlertType.CONFIRMATION )
+            alert.setTitle( "Stop confirmation" )
+            alert.setHeaderText( "Stop processing?" )
+            alert.initOwner( stage )
+            
+            def response = alert.showAndWait().orElse( null )
+            
+            if (response == ButtonType.OK) {
+                stopLaterFlag.set( true )
+                bottomRow.getChildren().set( 0, stopLaterLabel )
+            }
+        }
+
+        stopBtn.setOnAction {
+            showStopConfirmation()
         }
         stage.setOnCloseRequest { evt ->
-            cancelFlag.set( true )
+            evt.consume()
+            showStopConfirmation()
         }
         
         return [
@@ -157,7 +173,7 @@ def createProgressWindow( String title, int totalImages ) {
             imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            cancelFlag   : cancelFlag
+            stopLaterFlag: stopLaterFlag
         ]
     }
 }
@@ -411,7 +427,7 @@ def codePreferences = runOnFxThreadAndWait {
     def root = new BorderPane()
     root.setPrefHeight( 350 )
     
-    dialog.getDialogPane().buttonTypes.addAll( ButtonType.OK, ButtonType.CANCEL )
+    dialog.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.CANCEL )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
     okBtn.setText( "Remove Objects" )
     ButtonBar.setButtonUniformSize( okBtn, false )
@@ -425,19 +441,38 @@ def codePreferences = runOnFxThreadAndWait {
     def imageClassCounts = [:]  // imageName -> [className -> count]
     def totalsByClass = [:]     // className -> total across all images
     
-    project.getImageList().each { entry ->
-        def summaryFile = entry.getEntryPath().resolve( "summary.json" )
-        def counts = [:]
-        if (Files.exists( summaryFile )) {
-            def raw = new String( Files.readAllBytes( summaryFile ) )
-            def summary = gson.fromJson( raw, Object )
-            summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
-                def n = k.toString()
-                counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
-                totalsByClass[ n ] = (totalsByClass[ n ] ?: 0) + counts[ n ]
+    def imageList = project.getImageList()
+    def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
+    def pool = Executors.newFixedThreadPool( nThreads )
+    def resultMap = new java.util.concurrent.ConcurrentHashMap()
+    
+    // Parallel finding anno summaries
+    def futures = imageList.collect { entry ->
+        pool.submit({
+            def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+            def counts = [:]
+            if (Files.exists( summaryFile )) {
+                try {
+                    def raw = new String( Files.readAllBytes( summaryFile ) )
+                    def summary = gson.fromJson( raw, Object )
+                    summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
+                        def n = k.toString()
+                        counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                    }
+                } catch (Exception ignored) {}
             }
+            resultMap[ entry.getImageName() ] = counts
+        } as Callable)
+    }
+    futures.each { it.get() }
+    pool.shutdown()
+    
+    // Merge into imageClassCounts and totalsByClass
+    resultMap.each { imgName, counts ->
+        imageClassCounts[ imgName ] = counts
+        counts.each { className, count ->
+            totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
         }
-        imageClassCounts[ entry.getImageName() ] = counts
     }
     
     // Sort: only classes with existing annotations in project by abundance
@@ -450,7 +485,7 @@ def codePreferences = runOnFxThreadAndWait {
     def pathClassNamesAndNum = highCounts
     List pathClassCBsMap = pathClassNamesAndNum.collect { [name: it.name, data: it.name] } // labels set by updateClassCounts
     def pathClassBox = makeCheckboxBox( "Object classes", null, pathClassCBsMap, 200 )    
-    pathClassBox.header.getChildren().addAll( pathClassBox.title, pathClassBox.spacer, pathClassBox.clear )    
+    pathClassBox.header.getChildren().addAll( pathClassBox.selectAll )    
     pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.objectClasses ) }
     
     root.right = pathClassBox.box
@@ -473,11 +508,13 @@ def codePreferences = runOnFxThreadAndWait {
         
         // Setting bright border on checkbox for current image
         Platform.runLater { 
-            currentCB.lookup( ".box" )?.setStyle("""
-                -fx-border-color: black;
-                -fx-border-width: 2;
-                -fx-border-radius: 1;
-            """)
+            [currentCB, currentImageCB].each {
+                it.lookup( ".box" )?.setStyle("""
+                    -fx-border-color: black;
+                    -fx-border-width: 2;
+                    -fx-border-radius: 1;
+                """)
+            }
         }
         
         // If current image was only one selected, will update to new image
@@ -599,55 +636,65 @@ def imagesToRun = project.getImageList().findAll { it.getImageName() in codePref
 
 def total = imagesToRun.size()
 def progressUI = createProgressWindow( "Processing", total )
-def cancelFlag = progressUI.cancelFlag
+def stopLaterFlag = progressUI.stopLaterFlag
 int processed = 0
 
 
-imageLoop:
-for (image in imagesToRun) {
-    
-    if (cancelFlag.get()) break
-    
-    // Reporting current image
-    updateProgressWindow( progressUI, [imageName: image] )
-    
-    // If working on current image, modifying respective image data
-    def imageData = image == currentEntry ? currentImageData : image.readImageData()
-    def hierarchy = imageData.getHierarchy()
-    
-    
-    // Area for execution
+def nThreads = Math.min(
+    Runtime.getRuntime().availableProcessors() * 2, // *2 since I/O-bound threads spend time waiting
+    imagesToRun.size()
+)
+def pool = Executors.newFixedThreadPool( nThreads )
+def doneCount = new AtomicInteger( 0 )
+
+// Parallel running images
+def futures = imagesToRun.findAll { it != currentEntry }.collect { image ->
+    if (stopLaterFlag.get()) return null
+    pool.submit({
+        def imageData = image.readImageData()
+        try {
+            def hierarchy = imageData.getHierarchy()
+            def objectsToRemove = hierarchy.getAnnotationObjects().findAll {
+                it.getPathClass()?.getName() in codePreferences.objectClasses
+            }
+            hierarchy.removeObjects( objectsToRemove, false )
+            image.saveImageData( imageData )
+        } finally {
+            imageData.close()
+        }
+        
+        int done = doneCount.incrementAndGet()
+        updateProgressWindow( progressUI, [
+            imageName: image,
+            imagePer : done / total,
+            imageNum : done + 1
+        ])
+    } as Callable)
+}.findAll { it != null }
+
+futures.each { it.get() }
+pool.shutdown()
+
+// Current image handled serially after
+if (!stopLaterFlag.get() && currentEntry in imagesToRun) {
+    def hierarchy = currentImageData.getHierarchy()
     def objectsToRemove = hierarchy.getAnnotationObjects().findAll {
         it.getPathClass()?.getName() in codePreferences.objectClasses
     }
     hierarchy.removeObjects( objectsToRemove, false )
-    
-    
-    // Saving data
-    image.saveImageData( imageData )
-    
-    // Ensure current viewer updates its annotation list when working on the current image
-    if (image == currentEntry) {
-        runOnFxThreadAndWait {
-            def viewer = getCurrentViewer()
-            if (viewer != null) {
-                // Re-assign the same ImageData to force a UI refresh
-                imageData.getHierarchy().fireHierarchyChangedEvent( this )
-                viewer.setImageData( imageData )
-            }
+    currentEntry.saveImageData( currentImageData )
+    runOnFxThreadAndWait {
+        def viewer = getCurrentViewer()
+        if (viewer != null) {
+            currentImageData.getHierarchy().fireHierarchyChangedEvent( this )
+            viewer.setImageData( currentImageData )
         }
     }
-    
-    // Closing background imagedata for non-current image
-    if (image != currentEntry) {
-        imageData.close()
-    }
-    
-    
-    // - Reporting progress -
-    processed++
-    double frac = processed / total 
-    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed+1] )
+    int done = doneCount.incrementAndGet()
+    updateProgressWindow( progressUI, [
+        imagePer: done / total,
+        imageNum: done + 1
+    ])
 }
 
 // Closing progress bar window

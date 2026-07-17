@@ -64,12 +64,12 @@ def createProgressWindow( String title, int totalImages ) {
         
         def barRow = new HBox( 10, bar )
         
-        def cancelBtn = new Button( "Cancel" )
-        cancelBtn.setDisable( false )
+        def stopBtn = new Button( "Stop" )
+        stopBtn.setDisable( false )
         def spacer = new Region()
         HBox.setHgrow( spacer, Priority.ALWAYS )
         def timerLabel = new Label( "Elapsed: 00:00:00" )       
-        def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
+        def bottomRow = new HBox( 10, stopBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
         List rows = [imageRow, barRow, bottomRow]
@@ -138,18 +138,34 @@ def createProgressWindow( String title, int totalImages ) {
         timeline.setCycleCount( Animation.INDEFINITE )
         timeline.play()
         
-        // Signal to cancel script
-        def cancelFlag = new AtomicBoolean( false )
-        def cancelUpdateLabel = new Label( "Cancelling after image..." )
-        cancelUpdateLabel.setPadding( new Insets( 4 ) )
-        cancelBtn.setOnAction {
-            bottomRow.getChildren().set(
-                bottomRow.getChildren().indexOf( cancelBtn ), cancelUpdateLabel
-            )
-            cancelFlag.set( true )
+        // Signal to stop script
+        def stopLaterFlag = new AtomicBoolean( false )
+        
+        def stopLaterLabel = new Label( "Stopping after image..." )
+        stopLaterLabel.setPadding( new Insets( 4 ) )
+        
+        def showStopConfirmation = {
+            if (stopLaterFlag.get()) { return }
+            
+            def alert = new Alert( Alert.AlertType.CONFIRMATION )
+            alert.setTitle( "Stop confirmation" )
+            alert.setHeaderText( "Stop processing?" )
+            alert.initOwner( stage )
+            
+            def response = alert.showAndWait().orElse( null )
+            
+            if (response == ButtonType.OK) {
+                stopLaterFlag.set( true )
+                bottomRow.getChildren().set( 0, stopLaterLabel )
+            }
+        }
+
+        stopBtn.setOnAction {
+            showStopConfirmation()
         }
         stage.setOnCloseRequest { evt ->
-            cancelFlag.set( true )
+            evt.consume()
+            showStopConfirmation()
         }
         
         return [
@@ -157,7 +173,7 @@ def createProgressWindow( String title, int totalImages ) {
             imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            cancelFlag   : cancelFlag
+            stopLaterFlag: stopLaterFlag
         ]
     }
 }
@@ -579,7 +595,7 @@ def codePreferences = runOnFxThreadAndWait {
     // BOTTOM: Ok, cancel, and resolve hierarchy buttons
     def resolveHierarchyBtnType = new ButtonType( " Nest existing objects", ButtonBar.ButtonData.LEFT )
     
-    dialog.getDialogPane().buttonTypes.addAll( ButtonType.OK, ButtonType.CANCEL, resolveHierarchyBtnType )
+    dialog.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.CANCEL, resolveHierarchyBtnType )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
     def resolveHierarchyBtn = dialog.getDialogPane().lookupButton( resolveHierarchyBtnType )
     addIcon( resolveHierarchyBtn, FontAwesome.Glyph.SIGN_IN, 14 )
@@ -597,19 +613,38 @@ def codePreferences = runOnFxThreadAndWait {
     def imageClassCounts = [:]  // imageName -> [className -> count]
     def totalsByClass = [:]     // className -> total across all images
     
-    project.getImageList().each { entry ->
-        def summaryFile = entry.getEntryPath().resolve( "summary.json" )
-        def counts = [:]
-        if (Files.exists( summaryFile )) {
-            def raw = new String( Files.readAllBytes( summaryFile ) )
-            def summary = gson.fromJson( raw, Object )
-            summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
-                def n = k.toString()
-                counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
-                totalsByClass[ n ] = (totalsByClass[ n ] ?: 0) + counts[ n ]
+    def imageList = project.getImageList()
+    def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
+    def pool = Executors.newFixedThreadPool( nThreads )
+    def resultMap = new java.util.concurrent.ConcurrentHashMap()
+    
+    // Parallel finding anno summaries
+    def futures = imageList.collect { entry ->
+        pool.submit({
+            def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+            def counts = [:]
+            if (Files.exists( summaryFile )) {
+                try {
+                    def raw = new String( Files.readAllBytes( summaryFile ) )
+                    def summary = gson.fromJson( raw, Object )
+                    summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
+                        def n = k.toString()
+                        counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                    }
+                } catch (Exception ignored) {}
             }
+            resultMap[ entry.getImageName() ] = counts
+        } as Callable)
+    }
+    futures.each { it.get() }
+    pool.shutdown()
+    
+    // Merge into imageClassCounts and totalsByClass
+    resultMap.each { imgName, counts ->
+        imageClassCounts[ imgName ] = counts
+        counts.each { className, count ->
+            totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
         }
-        imageClassCounts[ entry.getImageName() ] = counts
     }
     
     // Sort: only classes with existing annotations in project by abundance
@@ -645,11 +680,13 @@ def codePreferences = runOnFxThreadAndWait {
         
         // Setting bright border on checkbox for current image
         Platform.runLater { 
-            currentCB.lookup( ".box" )?.setStyle("""
-                -fx-border-color: black;
-                -fx-border-width: 2;
-                -fx-border-radius: 1;
-            """)
+            [currentCB, currentImageCB].each {
+                it.lookup( ".box" )?.setStyle("""
+                    -fx-border-color: black;
+                    -fx-border-width: 2;
+                    -fx-border-radius: 1;
+                """)
+            }
         }
         
         // If current image was only one selected, will update to new image
@@ -1046,7 +1083,7 @@ def progressUI = createProgressWindow(
     (codePreferences.mode == "resolveHierarchy") ? "Nesting objects..." : 
     (codePreferences.mode == "export") ? "Exporting..." : 
     "Importing...", total)
-def cancelFlag = progressUI.cancelFlag
+def stopLaterFlag = progressUI.stopLaterFlag
 int processed = 0
 
 // Checks on removing current objs
@@ -1058,8 +1095,8 @@ boolean anyNestingProblems = false
 
 imageLoop:
 for (image in imagesToRun) { 
-    
-    if (cancelFlag.get()) break
+    // Stopping when requested
+    if (stopLaterFlag.get()) { break }
     
     boolean skipImage = false
     boolean nestingProblem = false

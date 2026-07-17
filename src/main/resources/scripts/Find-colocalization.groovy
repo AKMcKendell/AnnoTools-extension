@@ -78,12 +78,13 @@ def createProgressWindow( String title, int totalImages ) {
         def bar = new ProgressBar( 0.0 )
         def barRow = new HBox( 10, bar )  
         
-        def cancelBtn = new Button( "Cancel" )
-        cancelBtn.setDisable( false )
+        def stopBtn = new Button( "Stop" )
+        def stopNowInsteadBtn = new Button( "Stop now" )
+        stopBtn.setDisable( false )
         def spacer = new Region()
         HBox.setHgrow( spacer, Priority.ALWAYS )
         def timerLabel = new Label( "Elapsed: 00:00:00" )       
-        def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
+        def bottomRow = new HBox( 10, stopBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
         List rows = [stepRow, imageRow, barRow, bottomRow]
@@ -158,19 +159,61 @@ def createProgressWindow( String title, int totalImages ) {
         timeline.play()
         
         // Signal to cancel script
-        def cancelFlag = new AtomicBoolean( false )
-        def cancelUpdateLabel = new Label( "Cancelling after image..." )
-        cancelUpdateLabel.setPadding( new Insets( 4 ) )
-        cancelBtn.setOnAction {
-            bottomRow.getChildren().set(
-                bottomRow.getChildren().indexOf( cancelBtn ), cancelUpdateLabel
-            )
-            cancelFlag.set( true )
+        def stopNowFlag   = new AtomicBoolean( false )
+        def stopLaterFlag = new AtomicBoolean( false )
+        
+        def stopNowLabel = new Label( "Stopping after operation..." )
+        stopNowLabel.setPadding( new Insets( 4 ) )
+        def stopLaterLabel = new Label( "Stopping after image..." )
+        stopLaterLabel.setPadding( new Insets( 4 ) )
+        
+        def poolRef = new AtomicReference( null )
+
+        def showStopConfirmation = {
+            // Preventing a double show
+            if (stopNowFlag.get() || stopLaterFlag.get()) { return }
+            
+            def alert = new Alert( Alert.AlertType.CONFIRMATION )
+            alert.setTitle( "Stop confirmation" )
+            alert.setHeaderText( "Stop processing?" )
+            alert.initOwner( stage )
+            
+            alert.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.YES, ButtonType.CANCEL )
+            def stopAfterImageBtn = alert.getDialogPane().lookupButton( ButtonType.OK )
+            def stopNowBtn        = alert.getDialogPane().lookupButton( ButtonType.YES )
+            def backBtn           = alert.getDialogPane().lookupButton( ButtonType.CANCEL )
+            stopAfterImageBtn.setText( "Stop after image" )
+            stopNowBtn.setText( "Stop now" )
+            backBtn.setText( "Back" )
+            
+            def response = alert.showAndWait().orElse( null )
+            
+            if (response == ButtonType.YES) {
+                stopNowFlag.set( true )
+                bottomRow.getChildren().set( 0, stopNowLabel ) 
+                poolRef.get()?.shutdownNow()
+            
+            } else if (response == ButtonType.OK) {
+                stopLaterFlag.set( true )
+                bottomRow.getChildren().set( 0, stopLaterLabel )
+                bottomRow.getChildren().add( 1, stopNowInsteadBtn )
+            }
+        }
+
+        stopBtn.setOnAction {
+            showStopConfirmation()
         }
         stage.setOnCloseRequest { evt ->
-            cancelFlag.set( true )
+            evt.consume()
+            showStopConfirmation()
         }
-        
+        stopNowInsteadBtn.setOnAction {
+            stopNowFlag.set( true )
+            bottomRow.getChildren().set( 0, stopNowLabel )
+            bottomRow.getChildren().remove( stopNowInsteadBtn )
+            poolRef.get()?.shutdownNow()
+        }
+
         return [
             stage        : stage,
             stepNum      : stepNum,
@@ -180,7 +223,9 @@ def createProgressWindow( String title, int totalImages ) {
             imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            cancelFlag   : cancelFlag
+            stopNowFlag  : stopNowFlag,
+            stopLaterFlag: stopLaterFlag,
+            poolRef      : poolRef
         ]
     }
 }
@@ -464,7 +509,7 @@ def codePreferences = runOnFxThreadAndWait {
     def root = new BorderPane()
     root.setPrefHeight( 350 )
     
-    dialog.getDialogPane().buttonTypes.addAll( ButtonType.OK, ButtonType.CANCEL )
+    dialog.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.CANCEL )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
     okBtn.setText( "Make Objects" )
     ButtonBar.setButtonUniformSize( okBtn, false )
@@ -521,19 +566,38 @@ def codePreferences = runOnFxThreadAndWait {
     def imageClassCounts = [:]  // imageName -> [className -> count]
     def totalsByClass = [:]     // className -> total across all images
     
-    project.getImageList().each { entry ->
-        def summaryFile = entry.getEntryPath().resolve( "summary.json" )
-        def counts = [:]
-        if (Files.exists( summaryFile )) {
-            def raw = new String( Files.readAllBytes( summaryFile ) )
-            def summary = gson.fromJson( raw, Object )
-            summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
-                def n = k.toString()
-                counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
-                totalsByClass[ n ] = (totalsByClass[ n ] ?: 0) + counts[ n ]
+    def imageList = project.getImageList()
+    def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
+    def pool = Executors.newFixedThreadPool( nThreads )
+    def resultMap = new java.util.concurrent.ConcurrentHashMap()
+    
+    // Parallel finding anno summaries
+    def futures = imageList.collect { entry ->
+        pool.submit({
+            def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+            def counts = [:]
+            if (Files.exists( summaryFile )) {
+                try {
+                    def raw = new String( Files.readAllBytes( summaryFile ) )
+                    def summary = gson.fromJson( raw, Object )
+                    summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
+                        def n = k.toString()
+                        counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                    }
+                } catch (Exception ignored) {}
             }
+            resultMap[ entry.getImageName() ] = counts
+        } as Callable)
+    }
+    futures.each { it.get() }
+    pool.shutdown()
+    
+    // Merge into imageClassCounts and totalsByClass
+    resultMap.each { imgName, counts ->
+        imageClassCounts[ imgName ] = counts
+        counts.each { className, count ->
+            totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
         }
-        imageClassCounts[ entry.getImageName() ] = counts
     }
     
     // Sort: only classes with existing annotations in project by abundance
@@ -597,11 +661,13 @@ def codePreferences = runOnFxThreadAndWait {
         
         // Setting bright border on checkbox for current image 
         Platform.runLater { 
-            currentCB.lookup( ".box" )?.setStyle("""
-                -fx-border-color: black;
-                -fx-border-width: 2;
-                -fx-border-radius: 1;
-            """)
+            [currentCB, currentImageCB].each {
+                it.lookup( ".box" )?.setStyle("""
+                    -fx-border-color: black;
+                    -fx-border-width: 2;
+                    -fx-border-radius: 1;
+                """)
+            }
         }
         
         // If current image was only one selected, will update to new image
@@ -712,17 +778,19 @@ def imagesToRun = project.getImageList().findAll { it.getImageName() in codePref
 
 def total = imagesToRun.size()
 def progressUI = createProgressWindow( "Processing", total )
-def cancelFlag = progressUI.cancelFlag
+def stopNowFlag = progressUI.stopNowFlag
+def stopLaterFlag = progressUI.stopLaterFlag
 int processed = 0
 int netSteps = codePreferences.objectClasses1.size() * codePreferences.objectClasses2.size()
 
 // Pool for parallel processing
 def pool = Executors.newFixedThreadPool( Runtime.getRuntime().availableProcessors() )
+progressUI.poolRef.set( pool )
 
 imageLoop:
 for (image in imagesToRun) {
-    
-    if (cancelFlag.get()) { break }
+    // Stopping when requested
+    if (stopNowFlag.get() || stopLaterFlag.get()) { break }
     
     // Reporting current image
     updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image] )
@@ -731,6 +799,7 @@ for (image in imagesToRun) {
     def imageData = image == currentEntry ? currentImageData : image.readImageData()
     def hierarchy = imageData.getHierarchy()
     def annotations = hierarchy.getAnnotationObjects()
+    def annosByClass = annotations.groupBy { it.getPathClass()?.getName() }
     
     int step = 1
     
@@ -764,56 +833,81 @@ for (image in imagesToRun) {
             
                 
             // Getting objects from each class
-            def class1Annos = annotations.findAll {
-                it.getPathClass()?.getName() == class1
-            }
-            def class2Annos = annotations.findAll {
-                it.getPathClass()?.getName() == class2
-            }
-            
-            
-            
+            def class1Annos = annosByClass[ class1 ] ?: []
+            def class2Annos = annosByClass[ class2 ] ?: []
+
+
+
             // Skipping the loop if either class has no objects
             if (class1Annos.isEmpty() || class2Annos.isEmpty()) { continue }
-            
+
             // Build index + cache geometries once before the loop
-            def class2GeomCache = class2Annos.collect { it.getROI().getGeometry() }
+            def class2GeomCache = class2Annos.collect { cleanForROI( it.getROI().getGeometry() ) }
             def class2Tree = new STRtree()
             // Enveloping the annos to reduce comparisons
             // by avoiding ones that are geometrically impossible
             class2Annos.eachWithIndex { anno, i ->
-                class2Tree.insert( class2GeomCache[i].getEnvelopeInternal(), i )
+                def geom = class2GeomCache[i]
+                if (geom != null && !geom.isEmpty()) {
+                    class2Tree.insert( geom.getEnvelopeInternal(), i )
+                }
             }
-            
+
             int numClass1 = class1Annos.size()
             def overlapResults = new Object[ numClass1 ]
             def doneCount = new AtomicInteger( 0 )
-            
+
             // Parallel geometry phase
             def futures = (0..<numClass1).collect { idx ->
-                pool.submit({
-                    def class1Anno = class1Annos[ idx ]
-                    def class1Geom = class1Anno.getROI().getGeometry()
-                    def parent = (codePreferences.nestBehavior == NestStrings.CLASS1)        ? class1Anno :
-                                 (codePreferences.nestBehavior == NestStrings.CLASS1_PARENT) ? class1Anno.getParent() :
-                                                                                                hierarchy.getRootObject()
-                    def localResults = []
-                    class2Tree.query( class1Geom.getEnvelopeInternal() ).each { i ->
-                        def class2Geom = class2GeomCache[ i ]
-                        if (class1Geom.intersects( class2Geom )) {
-                            def overlapGeom = cleanForROI( class1Geom.intersection( class2Geom ) )
-                            if (!overlapGeom.isEmpty() && overlapGeom.getArea() > 1) {
-                                localResults << [ geom: overlapGeom, parent: parent, plane: class1Anno.getROI().getImagePlane() ]
+                if (stopNowFlag.get()) { return null }
+                try {
+                    pool.submit({
+                        def class1Anno = class1Annos[ idx ]
+                        def class1Geom = cleanForROI( class1Anno.getROI().getGeometry() )
+                        def parent = (codePreferences.nestBehavior == NestStrings.CLASS1)        ? class1Anno :
+                                     (codePreferences.nestBehavior == NestStrings.CLASS1_PARENT) ? class1Anno.getParent() :
+                                                                                                    hierarchy.getRootObject()
+                        def localResults = []
+                        if (class1Geom != null && !class1Geom.isEmpty()) {
+                            class2Tree.query( class1Geom.getEnvelopeInternal() ).each { i ->
+                                def class2Geom = class2GeomCache[ i ]
+                                if (class2Geom != null && !class2Geom.isEmpty() && class1Geom.intersects( class2Geom )) {
+                                    try {
+                                        def overlapGeom = cleanForROI( class1Geom.intersection( class2Geom ) )
+                                        if (overlapGeom != null && !overlapGeom.isEmpty() && overlapGeom.getArea() > 1) {
+                                            localResults << [ geom: overlapGeom, parent: parent, plane: class1Anno.getROI().getImagePlane() ]
+                                        }
+                                    } catch (Exception e) {
+                                        logger.warn( "Skipping invalid intersection between ${class1Anno.getName()} and ${class2Annos[i]?.getName()}: ${e.getMessage()}" )
+                                    }
+                                }
                             }
                         }
-                    }
-                    overlapResults[ idx ] = localResults
+                        overlapResults[ idx ] = localResults
             
-                    int pDone = ( doneCount.incrementAndGet() / numClass1 * 100 ) as int
-                    updateProgressWindow( progressUI, [ stepPer: pDone ] )
-                } as Callable)
-            }
-            futures.each { it.get() }
+                        int pDone = ( doneCount.incrementAndGet() / numClass1 * 100 ) as int
+                        updateProgressWindow( progressUI, [ stepPer: pDone ] )
+                    } as Callable)
+                } catch (RejectedExecutionException ignored) {
+                    null
+                }
+            }.findAll { it != null }
+            
+            // Allowing live cancel
+            try {
+                for (def f in futures) {
+                    f.get()
+                    if (stopNowFlag.get()) {
+                        pool.shutdownNow()
+                        continue imageLoop
+                    }
+                }
+            } catch (Exception e) {
+                if (stopNowFlag.get()) {
+                    continue imageLoop
+                }
+                throw e
+            }            
             
             // Serial hierarchy adds
             runOnFxThreadAndWait {
@@ -855,7 +949,7 @@ for (image in imagesToRun) {
     // - Reporting progress -
     processed++
     double frac = processed / total 
-    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
+    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed+1] )
 }
 
 pool.shutdown()

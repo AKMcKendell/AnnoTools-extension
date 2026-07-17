@@ -68,12 +68,13 @@ def createProgressWindow( String title, int totalImages ) {
         def bar = new ProgressBar( 0.0 )
         def barRow = new HBox( 10, bar )  
         
-        def cancelBtn = new Button( "Cancel" )
-        cancelBtn.setDisable( false )
+        def stopBtn = new Button( "Stop" )
+        def stopNowInsteadBtn = new Button( "Stop now" )
+        stopBtn.setDisable( false )
         def spacer = new Region()
         HBox.setHgrow( spacer, Priority.ALWAYS )
         def timerLabel = new Label( "Elapsed: 00:00:00" )       
-        def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
+        def bottomRow = new HBox( 10, stopBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
         List rows = [stepRow, imageRow, barRow, bottomRow]
@@ -147,18 +148,59 @@ def createProgressWindow( String title, int totalImages ) {
         timeline.setCycleCount( Animation.INDEFINITE )
         timeline.play()
         
-        // Signal to cancel script
-        def cancelFlag = new AtomicBoolean( false )
-        def cancelUpdateLabel = new Label( "Cancelling after image..." )
-        cancelUpdateLabel.setPadding( new Insets( 4 ) )
-        cancelBtn.setOnAction {
-            bottomRow.getChildren().set(
-                bottomRow.getChildren().indexOf( cancelBtn ), cancelUpdateLabel
-            )
-            cancelFlag.set( true )
+        // Signal to stop script
+        def stopNowFlag   = new AtomicBoolean( false )
+        def stopLaterFlag = new AtomicBoolean( false )
+        
+        def stopNowLabel = new Label( "Stopping after operation..." )
+        stopNowLabel.setPadding( new Insets( 4 ) )
+        def stopLaterLabel = new Label( "Stopping after image..." )
+        stopLaterLabel.setPadding( new Insets( 4 ) )
+        
+        def poolRef = new AtomicReference( null )
+
+        def showStopConfirmation = {
+            if (stopNowFlag.get() || stopLaterFlag.get()) { return }
+            
+            def alert = new Alert( Alert.AlertType.CONFIRMATION )
+            alert.setTitle( "Stop confirmation" )
+            alert.setHeaderText( "Stop processing?" )
+            alert.initOwner( stage )
+            
+            alert.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.YES, ButtonType.CANCEL )
+            def stopAfterImageBtn = alert.getDialogPane().lookupButton( ButtonType.OK )
+            def stopNowBtn        = alert.getDialogPane().lookupButton( ButtonType.YES )
+            def backBtn           = alert.getDialogPane().lookupButton( ButtonType.CANCEL )
+            stopAfterImageBtn.setText( "Stop after image" )
+            stopNowBtn.setText( "Stop now" )
+            backBtn.setText( "Back" )
+            
+            def response = alert.showAndWait().orElse( null )
+            
+            if (response == ButtonType.YES) {
+                stopNowFlag.set( true )
+                bottomRow.getChildren().set( 0, stopNowLabel )
+                poolRef.get()?.shutdownNow()
+            
+            } else if (response == ButtonType.OK) {
+                stopLaterFlag.set( true )
+                bottomRow.getChildren().set( 0, stopLaterLabel )
+                bottomRow.getChildren().add( 1, stopNowInsteadBtn )
+            }
+        }
+
+        stopBtn.setOnAction {
+            showStopConfirmation()
         }
         stage.setOnCloseRequest { evt ->
-            cancelFlag.set( true )
+            evt.consume()
+            showStopConfirmation()
+        }
+        stopNowInsteadBtn.setOnAction {
+            stopNowFlag.set( true )
+            bottomRow.getChildren().set( 0, stopNowLabel )
+            bottomRow.getChildren().remove( stopNowInsteadBtn )
+            poolRef.get()?.shutdownNow()
         }
         
         return [
@@ -170,7 +212,9 @@ def createProgressWindow( String title, int totalImages ) {
             imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            cancelFlag   : cancelFlag
+            stopNowFlag  : stopNowFlag,
+            stopLaterFlag: stopLaterFlag,
+            poolRef      : poolRef
         ]
     }
 }
@@ -400,7 +444,7 @@ def currentEntry = currentImageData ? project.getEntry( currentImageData ) : nul
 def projectDirectory = project.getBaseDirectory()
 
 // Folder and file names of where preferences are stored in directory
-def scriptPrefsFolderName = "Scripts_Preferences"
+def scriptPrefsFolderName = "AnnoTools-Data"
 def scriptPrefsFileName   = "AddingMeasurements_Preferences" + ".json"
 
 def prefsFolder = new File( projectDirectory, scriptPrefsFolderName )
@@ -423,7 +467,6 @@ if (prefsFile.length() > 0L && prefsFile.getText() != "null") {
 // --- PREFERENCES POPUP ---
 def codePreferences = runOnFxThreadAndWait {
     
-    
     // Making the basic popup
     def dialog = new Dialog()
     dialog.setTitle( "What measurements should be added?" )
@@ -431,7 +474,7 @@ def codePreferences = runOnFxThreadAndWait {
     def root = new BorderPane()
     root.setPrefHeight( 500 )
     
-    dialog.getDialogPane().buttonTypes.addAll( ButtonType.OK, ButtonType.CANCEL )
+    dialog.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.CANCEL )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
     okBtn.setText( "Add Measurements" )
     ButtonBar.setButtonUniformSize( okBtn, false )
@@ -446,19 +489,38 @@ def codePreferences = runOnFxThreadAndWait {
     def imageClassCounts = [:]  // imageName -> [className -> count]
     def totalsByClass = [:]     // className -> total across all images
     
-    project.getImageList().each { entry ->
-        def summaryFile = entry.getEntryPath().resolve( "summary.json" )
-        def counts = [:]
-        if (Files.exists( summaryFile )) {
-            def raw = new String( Files.readAllBytes( summaryFile ) )
-            def summary = gson.fromJson( raw, Object )
-            summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
-                def n = k.toString()
-                counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
-                totalsByClass[ n ] = (totalsByClass[ n ] ?: 0) + counts[ n ]
+    def imageList = project.getImageList()
+    def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
+    def pool = Executors.newFixedThreadPool( nThreads )
+    def resultMap = new java.util.concurrent.ConcurrentHashMap()
+    
+    // Parallel finding anno summaries
+    def futures = imageList.collect { entry ->
+        pool.submit({
+            def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+            def counts = [:]
+            if (Files.exists( summaryFile )) {
+                try {
+                    def raw = new String( Files.readAllBytes( summaryFile ) )
+                    def summary = gson.fromJson( raw, Object )
+                    summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
+                        def n = k.toString()
+                        counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                    }
+                } catch (Exception ignored) {}
             }
+            resultMap[ entry.getImageName() ] = counts
+        } as Callable)
+    }
+    futures.each { it.get() }
+    pool.shutdown()
+    
+    // Merge into imageClassCounts and totalsByClass
+    resultMap.each { imgName, counts ->
+        imageClassCounts[ imgName ] = counts
+        counts.each { className, count ->
+            totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
         }
-        imageClassCounts[ entry.getImageName() ] = counts
     }
     
     // Sort: only classes with existing annotations in project by abundance
@@ -472,7 +534,7 @@ def codePreferences = runOnFxThreadAndWait {
     List pathClassCBsMap = pathClassNamesAndNum.collect { [name: it.name, data: it.name] } // labels set by updateClassCounts
     def pathClassBox = makeCheckboxBox( "Object classes", null, pathClassCBsMap, 200 )    
     pathClassBox.header.getChildren().addAll( pathClassBox.title, pathClassBox.spacer, pathClassBox.clear )    
-    pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.objectClasses ) }
+    pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.pathClasses ) }
     BorderPane.setMargin( pathClassBox.box, new Insets( 0, 15, 0, 0 ) )
     
     root.center = pathClassBox.box
@@ -495,11 +557,13 @@ def codePreferences = runOnFxThreadAndWait {
         
         // Setting bright border on checkbox for current image 
         Platform.runLater { 
-            currentCB.lookup( ".box" )?.setStyle("""
-                -fx-border-color: black;
-                -fx-border-width: 2;
-                -fx-border-radius: 1;
-            """)
+            [currentCB, currentImageCB].each {
+                it.lookup( ".box" )?.setStyle("""
+                    -fx-border-color: black;
+                    -fx-border-width: 2;
+                    -fx-border-radius: 1;
+                """)
+            }
         }
         
         // If current image was only one selected, will update to new image
@@ -612,6 +676,10 @@ def codePreferences = runOnFxThreadAndWait {
         { imagesBox.CBs.any { it.isSelected() } },
         *imagesBox.CBs.collect { it.selectedProperty() }
     )
+    def anySelectedClass = Bindings.createBooleanBinding(
+        { pathClassBox.CBs.any { it.isSelected() } },
+        *pathClassBox.CBs.collect { it.selectedProperty() }
+    )
     def anySelectedChannel = Bindings.createBooleanBinding(
         { intensityChannelsBox.CBs.any { it.isSelected() } },
         *intensityChannelsBox.CBs.collect { it.selectedProperty() }
@@ -627,6 +695,7 @@ def codePreferences = runOnFxThreadAndWait {
     
     okBtn.disableProperty().bind(
         anySelectedImage.not()
+        .or( anySelectedClass.not() )
         .or( addIntensityMeasurementsCB.selectedProperty().not()
             .and( addMorphologyMeasurementsCB.selectedProperty().not() ) )
         .or( addIntensityMeasurementsCB.selectedProperty()
@@ -686,98 +755,131 @@ def imagesToRun = project.getImageList().findAll { it.getImageName() in codePref
 
 def total = imagesToRun.size()
 def progressUI = createProgressWindow( "Processing", total )
-def cancelFlag = progressUI.cancelFlag
+def stopNowFlag   = progressUI.stopNowFlag
+def stopLaterFlag = progressUI.stopLaterFlag
 int processed = 0
 int netSteps = (codePreferences.addIntensityMeasurements ? 1 : 0) +
                (codePreferences.addMorphologyMeasurements ? 1 : 0)
 
-imageLoop:
-for (image in imagesToRun) {
-    
-    if (cancelFlag.get()) break
-    
-    // Reporting current image
-    updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image] )
-    
-    // If working on current image, modifying respective image data
-    def imageData = image == currentEntry ? currentImageData : image.readImageData()
-    
-    def server = imageData.getServer()
-    def metadata = server.getMetadata()
-    def channels = metadata.getChannels()
-    double pixelConversionFactor = metadata.getAveragedPixelSize()
-    
-    // Filter annotations of interest
-    List annotations = imageData.getHierarchy().getAnnotationObjects().findAll {
-        it.getPathClass()?.getName() in codePreferences.pathClasses
-    }
-    
-    int step = 1
-    
-    if (codePreferences.addIntensityMeasurements) {
+def pool = Executors.newFixedThreadPool( Runtime.getRuntime().availableProcessors() )
+progressUI.poolRef.set( pool )
+
+try {
+    imageLoop:
+    for (image in imagesToRun) {
+        // Stopping when requested
+        if (stopNowFlag.get() || stopLaterFlag.get()) { break }
         
-        updateProgressWindow( progressUI, [stepNum: step, stepName: "Adding intensity measurements"] )
+        // Reporting current image
+        updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image] )
         
-        // Create server with only the desired channels to reduce processing time (otherwise will do all channels)
-        def modifiedChannelServer = new TransformedServerBuilder( server )
-            .extractChannels( *codePreferences.intensityChannels )
-            .build()
+        // If working on current image, modifying respective image data
+        def imageData = image == currentEntry ? currentImageData : image.readImageData()
         
-        int numAnnos = annotations.size()
+        def server = imageData.getServer()
+        def metadata = server.getMetadata()
+        def channels = metadata.getChannels()
+        double pixelConversionFactor = metadata.getAveragedPixelSize()
         
-        annotations.eachWithIndex { anno, idx ->
-            ObjectMeasurements.addIntensityMeasurements(
-                    modifiedChannelServer,
-                    anno,
-                    pixelConversionFactor,
-                    codePreferences.intensityMeasurements,
-                    []
-            )
-            
-            int percentDone = ( (idx+1) / numAnnos ) * 100
-            updateProgressWindow( progressUI, [stepPer: percentDone] )
+        // Filter annotations of interest
+        List annotations = imageData.getHierarchy().getAnnotationObjects().findAll {
+            it.getPathClass()?.getName() in codePreferences.pathClasses
         }
         
-        step++
-    }
-    
-    // Adding morphology measurements
-    if (codePreferences.addMorphologyMeasurements) {
+        int step = 1
         
-        updateProgressWindow( progressUI, [stepNum: step, stepName: "Adding morphology measurements", stepPer: 0] )
+        if (codePreferences.addIntensityMeasurements) {
+            
+            updateProgressWindow( progressUI, [stepNum: step, stepName: "Adding intensity measurements"] )
+            
+            // Create server with only the desired channels to reduce processing time (otherwise will do all channels)
+            def modifiedChannelServer = new TransformedServerBuilder( server )
+                .extractChannels( *codePreferences.intensityChannels )
+                .build()
+            
+            def doneCount = new AtomicInteger( 0 )
+            int numAnnos = annotations.size()
+            int lastPct = -1
+            
+            // Parallel processing the measurements
+            def futures = annotations.collect { anno ->
+                if (stopNowFlag.get()) { return null }
+                try {
+                    pool.submit({
+                        ObjectMeasurements.addIntensityMeasurements(
+                            modifiedChannelServer,
+                            anno,
+                            pixelConversionFactor,
+                            codePreferences.intensityMeasurements,
+                            []
+                        )
+                        int pDone = ( doneCount.incrementAndGet() / numAnnos * 100 ) as int
+                        if (pDone != lastPct) {
+                            updateProgressWindow( progressUI, [stepPer: pDone] )
+                            lastPct = pDone
+                        }
+                    } as Callable)
+                } catch (RejectedExecutionException ignored) {
+                    null
+                }
+            }.findAll { it != null }
         
-        def pixelCalibration = server.getPixelCalibration()
-        ObjectMeasurements.addShapeMeasurements( annotations, pixelCalibration, codePreferences.morphologyMeasurements )
+            try {
+                for (def f in futures) {
+                    f.get()
+                    if (stopNowFlag.get()) {
+                        pool.shutdownNow()
+                        break
+                    }
+                }
+            } catch (Exception e) {
+                if (!stopNowFlag.get()) { throw e }
+            }
+            
+            step++
+        }
         
-        updateProgressWindow( progressUI, [stepName: "Adding morphology measurements", stepPer: 100] )
-    }
-    
-    
-    // Saving data
-    image.saveImageData( imageData )
-    
-    // Ensure current viewer updates its annotation list when working on the current image
-    if (image == currentEntry) {
-        runOnFxThreadAndWait {
-            def viewer = getCurrentViewer()
-            if (viewer != null) {
-                // Re-assign the same ImageData to force a UI refresh
-                imageData.getHierarchy().fireHierarchyChangedEvent( this )
-                viewer.setImageData( imageData )
+        // Adding morphology measurements
+        if (codePreferences.addMorphologyMeasurements) {
+            
+            updateProgressWindow( progressUI, [stepNum: step, stepName: "Adding morphology measurements", stepPer: 0] )
+            
+            def pixelCalibration = server.getPixelCalibration()
+            ObjectMeasurements.addShapeMeasurements( annotations, pixelCalibration, codePreferences.morphologyMeasurements )
+            
+            updateProgressWindow( progressUI, [stepName: "Adding morphology measurements", stepPer: 100] )
+        }
+        
+        
+        // Saving data
+        image.saveImageData( imageData )
+        
+        // Ensure current viewer updates its annotation list when working on the current image
+        if (image == currentEntry) {
+            runOnFxThreadAndWait {
+                def viewer = getCurrentViewer()
+                if (viewer != null) {
+                    // Re-assign the same ImageData to force a UI refresh
+                    imageData.getHierarchy().fireHierarchyChangedEvent( this )
+                    viewer.setImageData( imageData )
+                }
             }
         }
+        
+        // Closing background imagedata for non-current image
+        if (image != currentEntry) {
+            imageData.close()
+        }
+        
+        
+        // - Reporting progress -
+        processed++
+        double frac = processed / total  
+        updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
     }
-    
-    // Closing background imagedata for non-current image
-    if (image != currentEntry) {
-        imageData.close()
-    }
-    
-    
-    // - Reporting progress -
-    processed++
-    double frac = processed / total  
-    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
+} finally {
+    pool.shutdown()
+    progressUI.poolRef.set( null )
 }
 
 // Closing progress bar window
@@ -798,7 +900,7 @@ import javafx.scene.Scene
 import javafx.scene.control.*
 import javafx.scene.control.ButtonBar.ButtonData
 import javafx.scene.layout.*
-import javafx.scene.input.MouseEvent
+import javafx.scene.input.*
 import javafx.stage.*
 import javafx.beans.binding.Bindings
 import com.google.gson.GsonBuilder
