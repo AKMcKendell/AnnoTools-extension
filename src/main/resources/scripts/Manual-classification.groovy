@@ -1,12 +1,8 @@
 /*
  * Author: Alec McKendell
  * Date: 2026.2.4
- * Description: Manually classify many objects
+ * Description: Manually classify many objects.
 */
-
-// --- Parameters ---
-def dialogOffsetX = 25
-def dialogOffsetY = 25
 
 
 // --- Classes ---
@@ -14,9 +10,11 @@ def dialogOffsetY = 25
 class ViewerSessionVars {
     List<String> classifiers
     List<String> reviewers
-    def          viewer
+    ImageServer  server
+    QuPathViewer viewer
     def          view
-    def          overlayOptions
+    def          activeAnimation
+    def          alertRightEdge
     String       userName
     String       userKey
     String       classifyingName
@@ -34,18 +32,15 @@ class ViewerSessionVars {
     String       freeViewMode
     List         freeViewModes
     def          nonZoomedViewerState
-    String       scrollFilterKey
     boolean      instructions
     boolean      zoomed
     def          showing
-    def          annoStateMap
+    Map          annoStateMap
     def          statesAndColors
     def          channelSpecifics
     def          controllableChannels
     def          prevSelectedAnnos
     double       pixelSize
-    def          scrollBlocker
-    double       oldAnnoThickness
     List<String> reviewStateFreqs
     List<String> reviewStates
     Map          reviewerCriteria
@@ -60,9 +55,15 @@ class ViewerSessionVars {
     Map          codePreferences
     def          prefsFile
     List         imagesToProcess
+    def          currentEntry
     Map          frequencies
     Map          currentAnnoColorsMap
     List         highlightStatesAndColorsMap
+    int          viewerMoveTimeMS
+    boolean      groupDone
+    List         hoverAnnos
+    def          hoveredAnno
+    String       UI_COMMAND
     
     // Making mode variables that are permanently opposite
     private boolean _classifierMode = false
@@ -81,7 +82,10 @@ class ViewerSessionVars {
 def session = new ViewerSessionVars(
     toolKeyPrefix               : "AT-manual",
     currentAnnoColorsMap        : [:],
-    highlightStatesAndColorsMap : []
+    annoStateMap                : [:],
+    highlightStatesAndColorsMap : [],
+    viewerMoveTimeMS            : 300,
+    activeAnimation             : null
 )
 
 // Class for actions so they aren't passed as strings
@@ -97,6 +101,7 @@ class ActionStrings {
     static final String TOGGLE_FREE_VIEW      = "ToggleFreeView"
     static final String SWITCH_FREE_VIEW_MODE = "SwitchFreeViewMode"
     static final String TOGGLE_ANNOS          = "ToggleAnnos"
+    static final String TOGGLE_GRID           = "ToggleGrid"
     static final String TOGGLE_FOCUS          = "ToggleFocus"
     static final String TOGGLE_CLASS          = "ToggleClassification"
     static final String SET_CLASS             = "SetClassification"
@@ -112,13 +117,61 @@ class ActionStrings {
 
 // Class for UI elements to update when needed
 class elements {
-    GridPane grid
-    List     btnMap
-    VBox     headerBox
-    Map      channelEntryByChanName
+    VBox        grid
+    List        btnMap
+    VBox        headerBox
+    Map         channelEntryByChanName
+    HBox        classesGrid
+    HBox        classesSummaryGrid
+    HBox        channelGrid
+    HBox        revClassGrid
+    VBox        classesSection
+    VBox        classesSummarySection
+    VBox        channelSection
+    VBox        revClassSection
+    Map         classLabelByClassName
+    Map         classLabelSummaryByClassName
+    ToggleGroup classesSummaryToggleGroup
+    List        classesSummaryBtns
+    Map         classesSummaryStyleMap
+    Label       lastLabelHighlighted
+    String      lastHighlightStr
 }
 
 def uiElements = new elements()
+
+// Class for original viewer settings
+class settings {
+    AnimationTimer   hoverTimer
+    AWTEventListener clickListener
+    EventHandler     scrollBlocker
+    String           scrollFilterKey
+    double           lastMouseX
+    double           lastMouseY
+    boolean          hoverCheck
+    boolean          wasGridOn
+    double           oGridX
+    double           oGridY
+    boolean          wasOverviewOn
+    double           oldAnnoThickness
+    def              overlayOptions
+}
+
+def viewerSettings = new settings()
+
+
+@groovy.transform.Canonical
+class ImageCheckResult {
+    def image
+    String imageName
+    boolean hasNoAnnos
+    boolean anyMissingClassifierKeys
+    boolean anyMissingUserKey
+    boolean anyUserKey
+    boolean anyAnnosToCheck
+    Set<String> missingUsers
+    Map<String, Set<String>> incompleteUsersByImage
+}
 
 
 // --- Functions ---
@@ -149,55 +202,6 @@ def setTT( objs, String tooltip ) {
                 Tooltip.install( obj, newTT )
                 obj.getProperties().put( "tooltip", newTT )
             }
-        }
-    }
-}
-
-// Function to get euclidean distance between two packed RGB ints (ignores alpha)
-def colorDistance( int c1, int c2 ) {
-    def r1 = (c1 >> 16) & 0xFF
-    def g1 = (c1 >> 8)  & 0xFF
-    def b1 =  c1        & 0xFF
-    def r2 = (c2 >> 16) & 0xFF
-    def g2 = (c2 >> 8)  & 0xFF
-    def b2 =  c2        & 0xFF
-    Math.sqrt( (r1-r2)**2 + (g1-g2)**2 + (b1-b2)**2 )
-}
-
-// Function to generate visible color far from other existing colors
-def generateVisibleColor( List existingColors, List reservedColors, double minDistance = 80.0 ) {
-    Random rng = new Random()
-    int newColor
-    int attempts = 0
-
-    def allColors = (existingColors + reservedColors).unique()
-
-    do {
-        float hue        = rng.nextFloat()
-        float saturation = 0.55f + rng.nextFloat() * 0.35f
-        float lightness  = 0.35f + rng.nextFloat() * 0.25f
-
-        newColor = AwtColor.HSBtoRGB( hue, saturation, lightness )
-
-        attempts++
-        if (attempts > 500) break  // safety valve if palette is nearly exhausted
-
-    } while (
-        newColor in allColors ||
-        allColors.any { colorDistance(newColor, it) < minDistance }
-    )
-
-    return newColor
-}
-
-// Function to stop nodes from becoming highlighted when clicked
-def disableNonEditableFocusTraversal( Node node ) {
-    
-    node.setFocusTraversable( false )
-    
-    if (node instanceof Parent) {
-        node.getChildrenUnmodifiable().each {
-            disableNonEditableFocusTraversal( it )
         }
     }
 }
@@ -245,89 +249,221 @@ def makeLines( List<List> rows ) {
     return grid
 }
 
-// Function to generate instruction lines with colored circles
-def makeStateColorInstructions( List map ) {
-    boolean containsColorU = map.any { it.containsKey( "colorU" ) }
-    map.withIndex().collect { it, i ->
-        def row = ["", "${i+1}.", intToFx( it.color )]  // empty key -> number in desc column
-        if (it.containsKey( "colorU" )) { row += ["/", intToFx( it.colorU )] }
-        row << "-> ${it.state}"
-        if (it.containsKey( "count" )) { row << "(${it.count})" }
-        row
+// Function to build state summary buttons in free view mode
+def makeClassesSummaryBtn( Map group, elements uiElements, ViewerSessionVars session ) {
+    String stateName = group.state
+    String cssColor  = intToFx( group.color ).toString().replace( "0x", "#" )
+    if (group.containsKey( "colorU" ) && !session.groupDone) {
+        cssColor = intToFx( group.colorU ).toString().replace( "0x", "#" )
     }
+    
+    def standardStateSummaryStyle   = "-fx-border-color: ${cssColor}; -fx-border-width: 1.5; -fx-border-radius: 3;"
+    def unselectedStateSummaryStyle = "-fx-opacity: 0.5; -fx-effect: innershadow(gaussian, rgba(0,0,0,1), 8, 0.3, 2, 2);"
+    def selectedStateSummaryStyle   = "-fx-border-color: yellow; -fx-border-width: 1.5; -fx-border-radius: 3;"
+    
+    def stateButton = new ToggleButton( "${stateName}  (${group.count})" )
+    stateButton.setPadding( new Insets( 5, 10, 5, 10 ) )
+    stateButton.setFocusTraversable( false )
+    stateButton.setToggleGroup( uiElements.classesSummaryToggleGroup )
+    stateButton.setStyle( standardStateSummaryStyle )
+    uiElements.classesSummaryStyleMap[ stateButton ] = standardStateSummaryStyle
+    
+    stateButton.selectedProperty().addListener { obs, wasSelected, isSelected ->
+        Platform.runLater {
+            colorAnnosFromMap( session, session.classifierMode ? [session.userKey] : session.classifierKeys )
+            def currentGroup = session.highlightStatesAndColorsMap.find { it.state.toString() == stateName }
+            if (isSelected) {
+                stateButton.setStyle( selectedStateSummaryStyle )
+                uiElements.classesSummaryBtns.each { btn ->
+                    if (btn !== stateButton) { btn.setStyle( unselectedStateSummaryStyle ) }
+                }
+                if (currentGroup) {
+                    selectObjects( currentGroup.annos )
+                    session.allClassAnnos.each { anno ->
+                        if (!(anno in currentGroup.annos)) { anno.setColor( ColorTools.makeRGB( 0, 0, 0 ) ) }
+                    }
+                }
+            } else {
+                stateButton.setStyle( uiElements.classesSummaryStyleMap[ stateButton ] )
+                uiElements.classesSummaryBtns.each { btn ->
+                    if (btn !== stateButton) { btn.setStyle( uiElements.classesSummaryStyleMap[ btn ] ) }
+                }
+                resetSelection()
+            }
+        }
+    }
+    
+    def entry = [
+        name    : "${stateName}  (${group.count})",
+        clName  : stateName,
+        btn     : stateButton,
+        group   : "classesSummary",
+        active  : false,
+        cssColor: cssColor
+    ]
+    uiElements.btnMap << entry
+    uiElements.classLabelSummaryByClassName[ stateName ] = entry
+    uiElements.classesSummaryBtns << stateButton
 }
 
 // Function for buttons and response
-def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElements, queue ) {
-    uiElements.grid = new GridPane()
-    uiElements.grid.setHgap( 10 )
-    uiElements.grid.setVgap( 10 )
+def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElements, settings viewerSettings, queue ) {
+    uiElements.grid = new VBox( 20 )
     uiElements.grid.setPadding( new Insets( 10 ) )
     uiElements.grid.setAlignment( Pos.CENTER )
+    
+    uiElements.classesGrid = new HBox( 15 )
+    uiElements.classesGrid.setAlignment( Pos.CENTER )
+    uiElements.classesGrid.setPadding( new Insets( 6, 8, 6, 8 ) )
+    
+    uiElements.classesSummaryGrid = new HBox( 15 )
+    uiElements.classesSummaryGrid.setAlignment( Pos.CENTER )
+    uiElements.classesSummaryGrid.setPadding( new Insets( 6, 8, 6, 8 ) )
+    
+    uiElements.channelGrid = new HBox( 15 )
+    uiElements.channelGrid.setAlignment( Pos.CENTER )
+    uiElements.channelGrid.setPadding( new Insets( 6, 8, 6, 8 ) )
+    
+    uiElements.revClassGrid = new HBox( 15 )
+    uiElements.revClassGrid.setAlignment( Pos.CENTER )
+    uiElements.revClassGrid.setPadding( new Insets( 6, 8, 6, 8 ) )
+    
+    uiElements.classesSection = new VBox( 4 )
+    uiElements.classesSection.setAlignment( Pos.CENTER )
+    
+    uiElements.classesSummarySection = new VBox( 4 )
+    uiElements.classesSummarySection.setAlignment( Pos.CENTER )
+    
+    uiElements.channelSection = new VBox( 4 )
+    uiElements.channelSection.setAlignment( Pos.CENTER )
+    
+    uiElements.revClassSection = new VBox( 4 )
+    uiElements.revClassSection.setAlignment( Pos.CENTER )
+    
+    uiElements.grid.getChildren().addAll( uiElements.classesSection, uiElements.classesSummarySection,
+                                          uiElements.channelSection, uiElements.revClassSection )
+    
     alert.getDialogPane().setContent( uiElements.grid )
     
     
-    // --- Adding buttons, map, and shortcuts ---
+    // -- Creating map of all possible actions and their associated info --
+    // Including their button, key shortcut, click, etc.
     uiElements.btnMap = []
     
     uiElements.btnMap << [ name   : ActionStrings.CANCEL,
                            action : { queue.put( ActionStrings.CANCEL ) },
                            btnType: new ButtonType( "(C)ancel", ButtonData.HELP_2 ),
-                           key    : ["c", (KeyCode.ESCAPE)],
-                           active : false]
+                           key    : ["c", (KeyCode.ESCAPE)] ]
                            
     uiElements.btnMap << [ name   : ActionStrings.INSTRUCTIONS,
                            action : { queue.put( ActionStrings.INSTRUCTIONS ) },
-                           key    : "i",
-                           active : false ]
+                           key    : "i" ]
                            
     uiElements.btnMap << [ name   : ActionStrings.TOGGLE_ANNOS,
                            action : { queue.put( ActionStrings.TOGGLE_ANNOS ) },
                            key    : "a",
-                           click  : MouseButton.MIDDLE,
-                           active : false ]
+                           click  : MouseButton.MIDDLE ]
+                           
+    uiElements.btnMap << [ name   : ActionStrings.TOGGLE_GRID,
+                           action : { queue.put( ActionStrings.TOGGLE_GRID ) },
+                           key    : "g" ]
     
     uiElements.btnMap << [ name   : ActionStrings.TOGGLE_FOCUS,
                            action : { queue.put( ActionStrings.TOGGLE_FOCUS ) },
-                           click  : MouseButton.SECONDARY,
-                           active : false ]
+                           click  : MouseButton.SECONDARY ]
                            
     uiElements.btnMap << [ name   : ActionStrings.REMOVE,
                            action : { queue.put( ActionStrings.REMOVE ) },
                            btnType: new ButtonType( "(R)emove All", ButtonData.HELP_2 ),
                            btnTT  : "Remove current user's classifications from all objects in current group",
-                           key    : "r",
-                           active : false ]
+                           key    : "r" ]
                            
     uiElements.btnMap << [ name   : ActionStrings.BACK,
                            action : { queue.put( ActionStrings.BACK ) },
                            btnType: new ButtonType( "(B)ack", ButtonData.BACK_PREVIOUS ),
                            btnTT  : "Go back to previous ${session.classifierMode ? 'group' : 'annotation'}",
                            key    : "b",
-                           click  : MouseButton.BACK,
-                           active : false ]
+                           click  : MouseButton.BACK ]
                            
     uiElements.btnMap << [ name   : ActionStrings.NEXT,
                            action : { queue.put( ActionStrings.NEXT ) },
                            btnType: new ButtonType( "(N)ext", ButtonData.YES ),
                            btnTT  : "Lock in current classifications and move to next group",
                            key    : "n",
-                           click  : MouseButton.FORWARD,
-                           active : false ]
+                           click  : MouseButton.FORWARD ]
                            
-    uiElements.btnMap << [ name   : ActionStrings.TOGGLE_CLASS,
-                           action : { queue.put( ActionStrings.TOGGLE_CLASS ) },
-                           click  : MouseButton.PRIMARY,
-                           active : false ]
-                           
-    // Reviewer classification buttons
+    uiElements.btnMap << [ name  : ActionStrings.TOGGLE_CLASS,
+                           action: { queue.put( ActionStrings.TOGGLE_CLASS ) },
+                           click : MouseButton.PRIMARY ]
+    
+    
+    // - Classification labels -
+    def classLabel = new Label( "${session.classifyingName} classification:" )  
+    uiElements.classesSection.getChildren().addAll( classLabel, uiElements.classesGrid )
+    
+    uiElements.btnMap << [ name  : "Classification label",
+                           btn   : classLabel,
+                           group : "classes" ]
+    
+    session.statesAndColors.eachWithIndex { group, idx ->
+        String labelText = "${idx+1}. ${group.state}"
+        def stateLabel = new Label( labelText )
+        stateLabel.setPadding( new Insets( 5, 10, 5, 10 ) )
+        uiElements.classesGrid.getChildren().add( stateLabel )
+        
+        uiElements.btnMap << [
+            name  : labelText,
+            clName: group.state,
+            btn   : stateLabel,
+            group : "classes"
+        ]
+    }
+    
+    // Create a map for class labels
+    uiElements.classLabelByClassName = uiElements.btnMap
+        .findAll { it.group == "classes" }
+        .collectEntries { [(it.clName): it] }
+        
+        
+    // - Image classes summary labels -
+    def allClassesLabel = new Label( "SUMMARY: ${session.classifyingName} classifications from ${session.classifierMode ? session.userName : session.classifiers}:" )
+    
+    uiElements.classesSummaryToggleGroup  = new ToggleGroup()
+    uiElements.classesSummaryBtns         = []
+    uiElements.classesSummaryStyleMap     = [:]
+    uiElements.classLabelSummaryByClassName = [:]
+    
+    session.highlightStatesAndColorsMap.each { group ->
+        makeClassesSummaryBtn( group, uiElements, session )
+    }
+    
+    uiElements.classesSummaryGrid.getChildren().setAll( uiElements.classesSummaryBtns )
+    
+    uiElements.classesSummarySection.getChildren().addAll( allClassesLabel, uiElements.classesSummaryGrid )
+    
+    uiElements.btnMap << [ name  : "All user classifications label",
+                           btn   : allClassesLabel,
+                           group : "classesSummary" ]
+    
+    
+    
+    
+    // - Reviewer classification buttons -
+    def revClassLabel = new Label( "Set classification:" )
+    uiElements.revClassSection.getChildren().addAll( revClassLabel, uiElements.revClassGrid )
+    
+    uiElements.btnMap << [ name  : "Reviewer class label",
+                           btn   : revClassLabel,
+                           group : "revClass" ]
+    
     session.reviewerStates.eachWithIndex { state, idx ->
         String numberTrigger = (idx + 6)
         String btnText = "(${numberTrigger}) ${state}"
-        def revBtnType = new ButtonType( btnText, ButtonData.RIGHT )
+        def revClassBtn = new Button( btnText )
         int classColorInt = session.statesAndColors.find { it.state == state }.color
         def c = new AwtColor( classColorInt, true )
         def btnStyle = "-fx-effect: dropshadow(gaussian, rgba(${c.red},${c.green},${c.blue},1), 3, 0.4, 0, 0)"
+        uiElements.revClassGrid.getChildren().add( revClassBtn )
         
         String btnTT = "Set classification to \"${state}\""
         
@@ -338,99 +474,107 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
         
         uiElements.btnMap << [
             name    : btnText,
-            btnType : revBtnType,
+            btn     : revClassBtn,
             btnTT   : btnTT,
             btnStyle: btnStyle,
             key     : numberTrigger,
             action  : action,
-            group   : "revClass",
-            active  : false
+            group   : "revClass"
         ]
     }
     
-    // Channel-specific buttons
+    
+    // - Channel buttons -
+    def channelsLabel = new Label( "Channel controls:" )
+    uiElements.channelSection.getChildren().addAll( channelsLabel, uiElements.channelGrid )
+    
+    uiElements.btnMap << [ name   : "Channel label",
+                           btn    : channelsLabel,
+                           group  : "channel" ]
+    
     session.channelSpecifics.eachWithIndex { ch, idx ->
         String numberTrigger = (idx + 1)
-        
-        // Creating and adding them
+    
         String btnText = "(${idx+1}) ${ch.name}"
         ToggleButton btn = new ToggleButton( btnText )
-        
-        // Setting their functions
+        btn.setMnemonicParsing( false )
+        uiElements.channelGrid.getChildren().add( btn )
+    
         def action = {
             session.toggleChannel = ch.name
             queue.put( ActionStrings.TOGGLE_CHANNEL )
         }
-        
-        // Adding to button map
+    
         uiElements.btnMap << [
             name  : btnText,
             chName: ch.name,
             btn   : btn,
-            btnPos: [idx, 2],
             key   : numberTrigger,
             action: action,
-            group : "channel",
-            active: false
+            group : "channel"
         ]
     }
     
+    // Create a map for channel buttons
     uiElements.channelEntryByChanName = uiElements.btnMap
         .findAll { it.group == "channel" }
         .collectEntries { [(it.chName): it] }
     
-    // Wire ButtonType-backed buttons
+    
+    // - Set bottom button bar buttons -
     List btnTypes = uiElements.btnMap.findAll { it.containsKey( "btnType" ) }.btnType
     alert.getButtonTypes().setAll( btnTypes )
-
+    
+    // Modify buttons according to their specifics
     uiElements.btnMap.each {
-        if (it.containsKey( "btnType" )) { it.btn = alert.getDialogPane().lookupButton( it.btnType ) }
-        if (it.containsKey( "btnTT" ))   { setTT( it.btn, it.btnTT ) }
-        if (it.group == "revClass")      { ButtonBar.setButtonUniformSize( it.btn, false ) }
-        if (it.containsKey( "btnStyle" )){ it.btn.setStyle( it.btnStyle ) }
+        if (it.containsKey( "btnType" ))  { it.btn = alert.getDialogPane().lookupButton( it.btnType ) }
+        if (it.containsKey( "btnTT" ))    { setTT( it.btn, it.btnTT ) }
+        if (it.containsKey( "btnStyle" )) { it.btn.setStyle( it.btnStyle ) }
     }
-
-    // --- Wire button actions ONCE, guard with active flag ---
+    
+    // Set button actions
     uiElements.btnMap.each { entry ->
-        if (!entry.btn) return
-        if (entry.btn instanceof ToggleButton) {
-            entry.btn.setOnAction { if (entry.active) entry.action() }
-        } else {
-            entry.btn.addEventFilter( ActionEvent.ACTION ) { event ->
-                if (entry.active) entry.action()
+        if (!entry.btn) { return }
+        entry.btn.addEventFilter( ActionEvent.ACTION ) { event ->
+            if (entry.active) {  
+                entry.action()
                 event.consume()
             }
         }
     }
-
-    // --- Keyboard shortcuts ONCE ---
+    
+    
+    // -- Keyboard shortcuts going to control panel --
     def scene = alert.getDialogPane().getScene()
 
     def shiftDown        = new AtomicBoolean( false )
     def shiftLongPressed = new AtomicBoolean( false )
-    // Single PauseTransition, reused
     def shiftHoldTimer   = new PauseTransition( Duration.millis( 500 ) )
+    
+    // When key is pressed, start shift timer or run action
+    scene.setOnKeyPressed { event ->
+        def key = event.getText() ? event.getText().toLowerCase() : event.getCode()
+
+        if (key == KeyCode.SHIFT) {
+            if (shiftDown.getAndSet( true )) { return }
+            shiftLongPressed.set( false )
+            shiftHoldTimer.playFromStart()
+            return
+        }
+        
+        // Run key action if being used
+        uiElements.btnMap.find { it.active && key in it.key }?.action()
+    }
+    
+    // If shift has been held down long enough, enter free view
     shiftHoldTimer.setOnFinished {
         if (shiftDown.get() && !shiftLongPressed.get()) {
             shiftLongPressed.set( true )
             queue.put( ActionStrings.TOGGLE_FREE_VIEW )
         }
     }
-
-    scene.setOnKeyPressed { event ->
-        def key = event.getText() ? event.getText().toLowerCase() : event.getCode()
-
-        if (key == KeyCode.SHIFT) {
-            if (shiftDown.getAndSet( true )) return
-            shiftLongPressed.set( false )
-            shiftHoldTimer.playFromStart()
-            return
-        }
-
-        // Dynamic lookup — no rewiring needed on mode change
-        uiElements.btnMap.find { it.active && key in it.key }?.action()
-    }
-
+    
+    // Reset long shift timer
     scene.setOnKeyReleased { event ->
         if (event.getCode() == KeyCode.SHIFT) {
             shiftHoldTimer.stop()
@@ -441,59 +585,82 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
         }
     }
 
-    // --- Mouse dispatcher ONCE ---
+    // -- Mouse, scroll, and keyboard actions to viewer --
     def viewScene          = session.view.getScene()
-    def originalDispatcher = viewScene.getEventDispatcher()  // captured once, never stale
+    def originalDispatcher = viewScene.getEventDispatcher()
 
-    def handledClickEvent  = new AtomicBoolean( false )
-    def handledScrollEvent = new AtomicBoolean( false )
-
-    // outer scope
+    // Variables to check for panning in free view mode
     boolean isPanning = false
-    double panStartX = 0, panStartY = 0
+    double panStartX = 0
+    double panStartY = 0
     final double DRAG_THRESHOLD = 5.0
     
+    // Read the clicks/scrolls on the viewer and pass them properly
     viewScene.setEventDispatcher( new EventDispatcher() {
         Event dispatchEvent( Event event, EventDispatchChain tail ) {
-            if (alert.isShowing() && (event instanceof MouseEvent || event instanceof ScrollEvent)) {
-                if (event instanceof MouseEvent && event.getEventType() == MouseEvent.MOUSE_PRESSED) {
-                    panStartX = event.x
-                    panStartY = event.y
-                    isPanning = false
-                    // action deferred to MOUSE_RELEASED
-                }
-                if (event instanceof MouseEvent && event.getEventType() == MouseEvent.MOUSE_DRAGGED) {
-                    if (session.freeView) {
-                        double dx = event.x - panStartX
-                        double dy = event.y - panStartY
-                        if (Math.hypot(dx, dy) > DRAG_THRESHOLD) {
-                            isPanning = true
-                            session.viewer.setCenterPixelLocation(
-                                session.viewer.getCenterPixelX() - dx * session.viewer.getDownsampleFactor(),
-                                session.viewer.getCenterPixelY() - dy * session.viewer.getDownsampleFactor()
-                            )
-                            panStartX = event.x
-                            panStartY = event.y
+            def eventType = event.getEventType()
+            
+            if (alert.isShowing() && (event instanceof MouseEvent || 
+                                      event instanceof ScrollEvent || 
+                                      event instanceof KeyEvent)) {
+                
+                // Mouse event checks (click, drag, release)
+                if (event instanceof MouseEvent) {
+                    viewerSettings.hoverCheck = true // Checking mouse location for class labels
+                    
+                    if (eventType == MouseEvent.MOUSE_PRESSED) {
+                        panStartX = event.x
+                        panStartY = event.y
+                        isPanning = false
+                    }
+                    
+                    // If dragging in free view, let through to let user pan
+                    if (eventType == MouseEvent.MOUSE_DRAGGED) {
+                        if (session.freeView) {
+                            double dx = event.x - panStartX
+                            double dy = event.y - panStartY
+                            if (Math.hypot( dx, dy ) > DRAG_THRESHOLD) {
+                                isPanning = true
+                                session.viewer.setCenterPixelLocation(
+                                    session.viewer.getCenterPixelX() - dx * session.viewer.getDownsampleFactor(),
+                                    session.viewer.getCenterPixelY() - dy * session.viewer.getDownsampleFactor()
+                                )
+                                panStartX = event.x
+                                panStartY = event.y
+                            }
                         }
                     }
-                }
-                if (!handledClickEvent.get() && event instanceof MouseEvent
-                        && event.getEventType() == MouseEvent.MOUSE_RELEASED) {
-                    if (!isPanning) {
-                        uiElements.btnMap.find { it.active && it.click == event.getButton() }?.action()
+                    
+                    // When mouse is released, if not dragged, fire click action
+                    if (eventType == MouseEvent.MOUSE_RELEASED) {
+                        if (!isPanning) {
+                            uiElements.btnMap.find { it.active && it.click == event.getButton() }?.action()
+                        }
+                        isPanning = false
+                        
+                        def window = alert.getDialogPane().getScene().getWindow()
+                        Platform.runLater { window.requestFocus() } // So control panel keeps focus
                     }
-                    isPanning = false
-                    handledClickEvent.set( false )
                 }
-                if (!handledScrollEvent.get() && event instanceof ScrollEvent) {
+                
+                // If scrolling, change brightness or let through to zoom
+                if (event instanceof ScrollEvent) {           
+                    
+                    // Pass scrolls on to zoom in free view zoom mode. Block modifier keys
                     if (session.freeView && session.freeViewMode == ActionStrings.ZOOM) {
+                        if (event.isControlDown() || event.isMetaDown() || event.isAltDown() || event.isShiftDown()) {
+                            event.consume()
+                            return event
+                        }
                         return originalDispatcher.dispatchEvent( event, tail )
+                    
+                    // If not allowing for zoom, change brightness if scrolled enough
                     } else if (Math.abs( event.getDeltaY() ) >= 1) {
                         queue.put( event.getDeltaY() > 0 ? ActionStrings.BRIGHT_UP : ActionStrings.BRIGHT_DOWN )
-                        handledScrollEvent.set( true )
                     }
                 }
-                if (event instanceof ScrollEvent) { handledScrollEvent.set( false ) }
+                
+                // Block any other events (like keys)
                 event.consume()
                 return event
             }
@@ -501,12 +668,12 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
         }
     } )
 
-    // --- Restore dispatcher on close ---
+    // Restore normal dispatcher on close
     alert.setOnHidden {
         viewScene.setEventDispatcher( originalDispatcher )
     }
 
-    // --- Header box (built once, content replaced by updateUI) ---
+    // Header box (built once, content replaced by updateControlPanel)
     uiElements.headerBox = new VBox()
     uiElements.headerBox.setPadding( new Insets( 10 ) )
     uiElements.headerBox.setStyle("""
@@ -517,41 +684,124 @@ def buildAndWireAlertUI( Alert alert, ViewerSessionVars session, elements uiElem
 }
 
 // Function to update UI
-def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue ) { 
+def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiElements, settings viewerSettings, queue ) { 
     
-    // --- Determine active set ---
+    // Set which buttons should now be available
     Set availableBtns = [ActionStrings.INSTRUCTIONS, ActionStrings.CANCEL, ActionStrings.TOGGLE_ANNOS] as LinkedHashSet
     if (session.freeView) {
-        availableBtns.addAll( ActionStrings.INSTRUCTIONS, ActionStrings.TOGGLE_FOCUS )
+        availableBtns.addAll( ActionStrings.TOGGLE_FOCUS, ActionStrings.TOGGLE_GRID )
+        availableBtns.addAll( uiElements.btnMap.findAll { it.group == "classesSummary" }.name )
     } else if (session.classifierMode) {
         availableBtns.addAll( ActionStrings.REMOVE, ActionStrings.BACK, ActionStrings.NEXT, 
                               ActionStrings.TOGGLE_CLASS, ActionStrings.TOGGLE_FOCUS )
+        availableBtns.addAll( uiElements.btnMap.findAll { it.group == "classes" }.name )
     } else if (session.reviewerMode) {
         availableBtns.addAll( ActionStrings.CANCEL, ActionStrings.TOGGLE_ANNOS, ActionStrings.BACK )
-        uiElements.btnMap.findAll { it.group == "revClass" }.each { availableBtns << it.name }
+        availableBtns.addAll ( uiElements.btnMap.findAll { it.group == "revClass" }.name )
     }
-    uiElements.btnMap.findAll { it.group == "channel" }.each { availableBtns << it.name }
-
-    // --- Diff and update ---
-    List previouslyActive = uiElements.btnMap.findAll { it.active }.name
-
+    
+    availableBtns.addAll ( uiElements.btnMap.findAll { it.group == "channel" }.name )
+    
+    // Map which buttons are active and which need to change
     uiElements.btnMap.each { it.active = (it.name in availableBtns) }
-
+    
+    // Show/hide appropriate buttons
     uiElements.btnMap.each {
         it.btn?.setVisible( it.active )
         it.btn?.setManaged( it.active )
     }
-
-    // Grid membership: only touch entries that changed
-    uiElements.btnMap.findAll { it.containsKey( "btnPos" ) }.each {
-        boolean wasActive = it.name in previouslyActive
-        if (wasActive && !it.active) { uiElements.grid.getChildren().remove( it.btn ) }
-        if (!wasActive && it.active) { uiElements.grid.add( it.btn, *it.btnPos ) }
+    
+    // Collapse sections entirely when nothing in the group is active (avoids leftover gap)
+    boolean classesActive = uiElements.btnMap.any { it.group == "classes" && it.active }
+    uiElements.classesSection.setVisible( classesActive )
+    uiElements.classesSection.setManaged( classesActive )
+    
+    boolean classesSummaryActive = uiElements.btnMap.any { it.group == "classesSummary" && it.active }
+    uiElements.classesSummarySection.setVisible( classesSummaryActive )
+    uiElements.classesSummarySection.setManaged( classesSummaryActive )
+    
+    boolean channelsActive = uiElements.btnMap.any { it.group == "channel" && it.active }
+    uiElements.channelSection.setVisible( channelsActive )
+    uiElements.channelSection.setManaged( channelsActive )
+    
+    boolean revClassesActive = uiElements.btnMap.any { it.group == "revClass" && it.active }
+    uiElements.revClassSection.setVisible( revClassesActive )
+    uiElements.revClassSection.setManaged( revClassesActive )
+    
+    // Set labels for classifications in classifier mode
+    session.statesAndColors.each { group ->
+        def entry = uiElements.classLabelByClassName[ group.state ]
+        def label = entry.btn
+        
+        String cssColor = intToFx( group.color ).toString().replace( "0x", "#" )
+        
+        if (group.containsKey( "colorU" ) && !session.groupDone) {
+            cssColor = intToFx( group.colorU ).toString().replace( "0x", "#" )
+        }
+        
+        entry.cssColor = cssColor
+        
+        def labelStyle = """
+            -fx-border-color: ${cssColor};
+            -fx-border-width: 1.5;
+            -fx-border-radius: 3;
+        """
+        
+        label.setStyle( labelStyle )
+    }
+    
+    // Update class summary buttons if entering free view mode
+    if (session.UI_COMMAND == ActionStrings.TOGGLE_FREE_VIEW && session.freeView) {
+        def currentGroupsByState = session.highlightStatesAndColorsMap.collectEntries { [(it.state): it] }
+        Set existingStates = uiElements.classLabelSummaryByClassName.keySet() as Set
+        Set currentStates  = currentGroupsByState.keySet()
+        boolean structureChanged = (existingStates != currentStates)
+        
+        // Remove stale buttons
+        (existingStates - currentStates).each { state ->
+            def entry = uiElements.classLabelSummaryByClassName.remove( state )
+            uiElements.classesSummaryBtns.remove( entry.btn )
+            uiElements.classesSummaryStyleMap.remove( entry.btn )
+            entry.btn.setToggleGroup( null )
+            uiElements.btnMap.removeAll { it.is( entry ) }
+        }
+        
+        // Add new buttons
+        (currentStates - existingStates).each { state ->
+            makeClassesSummaryBtn( currentGroupsByState[ state ], uiElements, session )
+        }
+        
+        // Update text, style, and lock dimensions for all current buttons
+        currentGroupsByState.each { state, group ->
+            def entry = uiElements.classLabelSummaryByClassName[ state ]
+            if (!entry) return
+            
+            String cssColor = intToFx( group.color ).toString().replace( "0x", "#" )
+            if (group.containsKey( "colorU" ) && !session.groupDone)
+                cssColor = intToFx( group.colorU ).toString().replace( "0x", "#" )
+            
+            String labelText = "${state}  (${group.count})"
+            entry.name     = labelText
+            entry.cssColor = cssColor
+            entry.btn.setText( labelText )
+            
+            def channelUnselectedStyle = "-fx-border-color: ${cssColor}; -fx-border-width: 1.5; -fx-border-radius: 3;"
+            uiElements.classesSummaryStyleMap[ entry.btn ] = channelUnselectedStyle
+            if (!entry.btn.isSelected()) entry.btn.setStyle( channelUnselectedStyle )
+            lockDimensions( entry.btn )
+        }
+        
+        uiElements.classesSummaryGrid.getChildren().clear()
+        uiElements.classesSummaryGrid.getChildren().addAll( uiElements.classesSummaryBtns )
+        uiElements.classesSummaryBtns.each { 
+            it.setFocusTraversable( false )
+            lockDimensions( it )
+        }
     }
     
     
-    // Creating button styles
-    def standardStyle = """
+    // Creating channel button styles
+    def channelStandardStyle = """
         -fx-padding: 6 10 6 10;
         -fx-border-radius: 6;
         -fx-background-radius: 6;
@@ -563,12 +813,11 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue
         def c = new AwtColor( chan.getColor(), true )
         return "-fx-effect: dropshadow(gaussian, rgba(${c.red},${c.green},${c.blue},1), 10, 0.2, 0, 0);"
     }
-    def selectedStyle = "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 10, 0.2, 0, 0);" // Channel on style
-    def unselectedStyle = "-fx-effect: innershadow(gaussian, rgba(0,0,0,0.9), 100, 0, 0, 0);" // Channel off style
+    def channelSelectedStyle = "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 10, 0.2, 0, 0);" // Channel on style
+    def channelUnselectedStyle = "-fx-effect: innershadow(gaussian, rgba(0,0,0,0.9), 100, 0, 0, 0);" // Channel off style
     
-    // - Channel-specific buttons -
-    List chBtns = uiElements.btnMap.findAll { it.group == "channel" }
-    session.channelSpecifics.eachWithIndex { ch, i ->
+    // Set channel button updated style
+    session.channelSpecifics.each { ch ->
         
         // Creating and adding them
         def entry = uiElements.channelEntryByChanName[ ch.name ]
@@ -578,20 +827,21 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue
         
         // Adding their style
         boolean highlighted = (ch.channel == session.channelToChange) && (!session.freeView || session.freeViewMode != ActionStrings.ZOOM) // Setting initial style
-        def buttonStyle = highlighted ? highlightedStyle( ch.channel ) : btn.isSelected() ? selectedStyle : unselectedStyle
-        btn.setStyle( standardStyle + buttonStyle )
+        def channelButtonStyle = highlighted ? highlightedStyle( ch.channel ) : btn.isSelected() ? channelSelectedStyle : channelUnselectedStyle
+        btn.setStyle( channelStandardStyle + channelButtonStyle )
         
         def chBtnTooltipText = highlighted ? "Toggle ${ch.name} \n \n Scroll on viewer to change brightness" : "Toggle ${ch.name}"
         setTT( btn, chBtnTooltipText )
     }
     
     
-    
+    // - Update instructions -
     String brightnessChannel = session.channelToChange ? session.channelSpecifics.find { it.channel == session.channelToChange }.name : "none"
     String scrollInstructions = session.freeViewMode == ActionStrings.ZOOM ? "Zoom" : "Brightness [${brightnessChannel}]"
-    boolean annosOn = getAnnosVisibilityStatus( session )
-    List revClassKeys = uiElements.btnMap.findAll { it.group == "revClass" }.key
-    List channelKeys = uiElements.btnMap.findAll { it.group == "channel" }.key
+    boolean annosOn = getAnnosVisibilityStatus( viewerSettings )
+    boolean gridOn = viewerSettings.overlayOptions.getShowGrid()
+    List revClassKeys = uiElements.btnMap.findAll { it.group == "revClass" && it.key }.key
+    List channelKeys = uiElements.btnMap.findAll { it.group == "channel" && it.key }.key
     
     
     // Single-item = header/full-width row, two+ items = [key, ...description]
@@ -600,14 +850,15 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue
     
     // Instruction lines
     List toggleAnnosI  = [I("(A)",                          "Toggle annotations [${annosOn}]")]
+    List toggleGridI   = [I("(G)",                          "Toggle grid [${gridOn}]")]
     List removeAnnosI  = [I("(R)",                          "Remove group classifications")]
     List nextGroupI    = [I("(N)",                          "Save group and move to next")]
     List fvScrollI     = [I("(scroll)",                     "${scrollInstructions}")]
     List changeBrightI = [I("(scroll)",                     "Brightness [${brightnessChannel}]")]
-    List goBackI       = [I("(B)",                          "Return to previous ${session.reviewerMode ? 'annotation' : 'group'}")]
-    List cycleClassI   = [I("(left click)",                 "Cycle class/colors")]
-    List changeFocusI  = [I("(right click)",                "Focus on anno")]
-    List moveViewerI   = [I("(drag)",                       "Move viewer")]
+    List goBackI       = [I("(B)",                          "Back to previous ${session.reviewerMode ? 'annotation' : 'group'}")]
+    List cycleClassI   = [I("(left click anno)",            "Cycle class/colors")]
+    List changeFocusI  = [I("(right click anno)",           "Focus/unfocus on anno")]
+    List moveViewerI   = [I("(drag)",                       "Pan viewer")]
     List switchFvModeI = [I("(SHIFT)",                      "Switch scroll function")]
     List enterFvI      = [I("(hold SHIFT)",                 "Enter free view")]
     List exitFvI       = [I("(hold SHIFT)",                 "Exit free view")]
@@ -617,16 +868,12 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue
     List closedI       = [I("(I) Show instructions",        " ")]
     List emptyI        = [I("")]
     
-    List classColorsI     = makeStateColorInstructions( session.statesAndColors )
-    List showClassColorsI = makeStateColorInstructions( session.highlightStatesAndColorsMap )
-    List colorHeaderI     = [I( "${session.classifyingName} classifications from ${session.classifierMode ? session.userName : session.classifiers}:" )]
-    
     
     // Conditionally building instructions
     def instructionLines = !session.instructions ? closedI
-        : session.freeView    ? openI + emptyI + toggleAnnosI + moveViewerI + changeFocusI + switchFvModeI + fvScrollI + exitFvI + emptyI + colorHeaderI + showClassColorsI
+        : session.freeView    ? openI + emptyI + toggleAnnosI + toggleGridI + moveViewerI + changeFocusI + switchFvModeI + fvScrollI +  toggleChanI + emptyI + exitFvI
         : session.reviewerMode? openI + emptyI + toggleAnnosI + goBackI + toggleChanI + changeBrightI + setRevClassI + emptyI + enterFvI
-        :                       openI + emptyI + toggleAnnosI + nextGroupI + goBackI + removeAnnosI + toggleChanI + changeBrightI + changeFocusI + cycleClassI + classColorsI + emptyI + enterFvI
+        :                       openI + emptyI + toggleAnnosI + nextGroupI + goBackI + removeAnnosI + toggleChanI + changeBrightI + changeFocusI + cycleClassI + emptyI + enterFvI
     
     
     uiElements.headerBox.getChildren().setAll( makeLines( instructionLines ) )
@@ -634,59 +881,46 @@ def updateUI( Alert alert, ViewerSessionVars session, elements uiElements, queue
     def dialogPane = alert.getDialogPane()
     dialogPane.getScene()?.getWindow()?.sizeToScene()
     disableNonEditableFocusTraversal( dialogPane )
+    
+    viewerSettings.hoverCheck = true // Checking mouse location for class labels
 }
 
-// Function for changing viewer center/zoom
-def changeViewer( double centerX, double centerY, double vWidth, double vHeight, boolean isUM, ViewerSessionVars session, Double targetMag = null ) {
+// Function for SMOOTHLY changing viewer center/zoom
+def changeViewer( double centerX, double centerY, double vWidth, double vHeight, boolean isUM, ViewerSessionVars session, Double targetMag = null, Closure onComplete = null ) {
     if (targetMag == null) {
-        double width_uM  = vWidth
-        double height_uM = vHeight
-        if (!isUM) {
-            width_uM  *= session.pixelSize
-            height_uM *= session.pixelSize
-        }
-        double viewWidthPx  = session.view.getWidth()
-        double viewHeightPx = session.view.getHeight()
-        double umPerPx = Math.max(width_uM / viewWidthPx, height_uM / viewHeightPx) * 1.1
+        double width_uM  = isUM ? vWidth  : vWidth  * session.pixelSize
+        double height_uM = isUM ? vHeight : vHeight * session.pixelSize
+        double umPerPx = Math.max( width_uM / session.view.getWidth(), height_uM / session.view.getHeight() ) * 1.1
         targetMag = 0.25 / umPerPx
     }
 
     Platform.runLater {
-        double startX   = session.viewer.getCenterPixelX()
-        double startY   = session.viewer.getCenterPixelY()
-        double logStart = Math.log(session.viewer.getMagnification())
-        double logEnd   = Math.log(targetMag)
-        double startMag = Math.exp(logStart)
-        boolean zoomingIn = targetMag > startMag
-        long durationNs = 350 * 1_000_000L
+        session.activeAnimation?.stop()
+        double startX    = session.viewer.getCenterPixelX()
+        double startY    = session.viewer.getCenterPixelY()
+        double logStart  = Math.log( session.viewer.getMagnification() )
+        double logEnd    = Math.log( targetMag )
+        double L         = logEnd - logStart
+        double dx = centerX - startX
+        double dy = centerY - startY
+        long durationNs = session.viewerMoveTimeMS * 1_000_000L
         long[] startTime = [-1L]
-
-        new AnimationTimer() {
+        session.activeAnimation = new AnimationTimer() {
             @Override
             void handle(long now) {
-                if (startTime[0] < 0) startTime[0] = now
-                double t = Math.min((now - startTime[0]) / (double) durationNs, 1.0)
-                double e = t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2
-
-                double currentMag = Math.exp(logStart + (logEnd - logStart) * e)
-                session.viewer.setMagnification(currentMag)
-
-                if (zoomingIn) {
-                    double ratio = startMag / currentMag * (1 - e)
-                    session.viewer.setCenterPixelLocation(
-                        centerX - (centerX - startX) * ratio,
-                        centerY - (centerY - startY) * ratio
-                    )
-                } else {
-                    session.viewer.setCenterPixelLocation(
-                        startX + (centerX - startX) * e,
-                        startY + (centerY - startY) * e
-                    )
+                if (startTime[0] < 0) { startTime[0] = now }
+                double t = Math.min( (now - startTime[0]) / (double) durationNs, 1.0 )
+                double e = t < 0.5 ? 4*t*t*t : 1 - Math.pow( -2*t + 2, 3 ) / 2
+                double panE = Math.abs(L) > 1e-6 ? (1.0 - Math.exp(-L * e)) / (1.0 - Math.exp(-L)) : e
+                session.viewer.setMagnification( Math.exp( logStart + L * e ) )
+                session.viewer.setCenterPixelLocation( startX + dx * panE, startY + dy * panE )
+                if (t >= 1.0) {
+                    stop()
+                    onComplete?.call()
                 }
-
-                if (t >= 1.0) stop()
             }
-        }.start()
+        }
+        session.activeAnimation.start()
     }
 }
 
@@ -713,11 +947,11 @@ def restoreViewerState( viewerState, ViewerSessionVars session ) {
 }
 
 // Function for changing viewing grid
-def changeGrid( boolean turnOnGrid, double spacingX, double spacingY, ViewerSessionVars session ) {
+def changeGrid( settings viewerSettings, boolean turnOnGrid, double spacingX = null, double spacingY = null ) {
     Platform.runLater {
-        session.overlayOptions.setShowGrid( turnOnGrid )
-        PathPrefs.gridSpacingX.set( spacingX )
-        PathPrefs.gridSpacingY.set( spacingY )
+        viewerSettings.overlayOptions.setShowGrid( turnOnGrid )
+        if (spacingX) { PathPrefs.gridSpacingX.set( spacingX ) }
+        if (spacingY) { PathPrefs.gridSpacingY.set( spacingY ) }
     }
 }
 
@@ -753,40 +987,18 @@ def getNextImage( nextImage ) {
 }
 
 // Function to toggle annotation visibility or read whether they're on
-def toggleAnnos( ViewerSessionVars session ) {
-    boolean annosOn = session.overlayOptions.getShowAnnotations()
+def toggleAnnos( settings viewerSettings ) {
+    boolean annosOn = viewerSettings.overlayOptions.getShowAnnotations()
     Platform.runLater {
-        session.overlayOptions.setShowAnnotations( !annosOn )
+        viewerSettings.overlayOptions.setShowAnnotations( !annosOn )
         if (annosOn) { resetSelection() }
     }
 }
 
 // Function to get annotation visibility
-def getAnnosVisibilityStatus( ViewerSessionVars session ) {
-    boolean annosOn = session.overlayOptions.getShowAnnotations()
+def getAnnosVisibilityStatus( settings viewerSettings ) {
+    boolean annosOn = viewerSettings.overlayOptions.getShowAnnotations()
     return annosOn
-}
-
-// Function to get cursor position (x,y)
-def getCursorPosition( ViewerSessionVars session ) {
-    // Get viewer JavaFX node and convert its top-left to screen coordinates
-    def viewScreenPos = session.view.localToScreen( 0, 0 )
-    
-    // Get the mouse pointer location on screen (AWT)
-    def mouseScreen = MouseInfo.getPointerInfo()?.getLocation()
-    
-    // Compute mouse position relative to viewer (component coordinates)
-    def mouseX_inViewer = mouseScreen.getX() - viewScreenPos.getX()
-    def mouseY_inViewer = mouseScreen.getY() - viewScreenPos.getY()
-    
-    // Convert to image pixel coordinates
-    def viewerPoint = new Point2D.Double( mouseX_inViewer, mouseY_inViewer )
-    def imagePoint = session.viewer.componentPointToImagePoint( viewerPoint, null, true )
-    
-    def cursorX = imagePoint.getX()
-    def cursorY = imagePoint.getY()
-    
-    return [x: cursorX, y: cursorY]
 }
 
 // Function to toggle a channel's visibility
@@ -915,58 +1127,68 @@ def filterForUserKey( List annosToCheck, boolean shouldHaveKey, ViewerSessionVar
     }
 }
 
+// Function to adjust x to middle of available space including the alert
+def adjustX( ViewerSessionVars session, double boundsX, double boundsY, double cX ) {
+    def viewerBounds = session.view.localToScreen( session.view.getBoundsInLocal() )
+    double leftBound = Math.max( session.alertRightEdge, viewerBounds.getMinX() )
+    double targetScreenX = (leftBound + viewerBounds.getMaxX()) / 2.0
+    double viewerCenterX = (viewerBounds.getMinX() + viewerBounds.getMaxX()) / 2.0
+    double gridPx = Math.min( boundsX, boundsY ) / session.pixelSize
+    double targetDownsample = Math.max( gridPx / session.view.getWidth(), gridPx / session.view.getHeight() )
+    double adjustedX = cX - (targetScreenX - viewerCenterX) * targetDownsample
+    
+    return adjustedX
+}
+
 // Function to conditionally toggle the viewer focus to/away from an annotation
-def toggleFocus( ViewerSessionVars session, List annos ) {
+def toggleFocus( ViewerSessionVars session ) {
     if (!session.zoomed) {
-        def mouseCoords = getCursorPosition( session )
-        
-        for (anno in annos) {
-            def roi = anno.getROI()
             
-            // Check if the mouse point lies inside the selected ROI and focus into it if so
-            if (roi.contains( mouseCoords.x, mouseCoords.y )) {
-                
-                session.nonZoomedViewerState = saveViewerState( session )
-                
-                changeViewer( roi.getCentroidX(), roi.getCentroidY(), roi.getBoundsWidth() * 2,
-                              roi.getBoundsHeight() * 2, false, session )
-                session.zoomed = true
-                
-                double[] lastZoom = [0.0]  // Declared here so zoomListener can reference it
-                
-                // Add a zoom listener so if zoomed after focus, it's no longer considered focues
-                // Meaning right clicking again won't take back to previous viewer
-                def zoomListener = new QuPathViewerListener() {
-                
-                    @Override
-                    void visibleRegionChanged( QuPathViewer v, java.awt.Shape shape ) {
-                        double currentZoom = v.getDownsampleFactor()
-                        if (Math.abs( currentZoom - lastZoom[0] ) > 0.1) {
-                            v.removeViewerListener( this )
-                            session.zoomed = false
-                        }
-                    }
-                
-                    @Override
-                    void imageDataChanged( QuPathViewer v, ImageData before, ImageData after ) {}
-                    @Override
-                    void selectedObjectChanged( QuPathViewer v, PathObject pathObj ) {}
-                    @Override
-                    void viewerClosed( QuPathViewer v ) {
+        // Check if the mouse point lies inside the selected ROI and focus into it if so
+        if (session.hoveredAnno) {
+            
+            def roi = session.hoveredAnno.getROI()
+            
+            session.nonZoomedViewerState = saveViewerState( session )
+            
+            double adjustedX = adjustX( session, roi.getBoundsWidth(), roi.getBoundsHeight(), roi.getCentroidX() )
+            
+            changeViewer( adjustedX, roi.getCentroidY(), roi.getBoundsWidth() * 2,
+                          roi.getBoundsHeight() * 2, false, session )
+            session.zoomed = true
+            
+            double[] lastZoom = [0.0]  // Declared here so zoomListener can reference it
+            
+            // Add a zoom listener so if zoomed after focus, it's no longer considered focues
+            // Meaning right clicking again won't take back to previous viewer
+            def zoomListener = new QuPathViewerListener() {
+            
+                @Override
+                void visibleRegionChanged( QuPathViewer v, java.awt.Shape shape ) {
+                    double currentZoom = v.getDownsampleFactor()
+                    if (Math.abs( currentZoom - lastZoom[0] ) > 0.1) {
                         v.removeViewerListener( this )
+                        session.zoomed = false
                     }
                 }
-                
-                // Small pause to track only when zoom actually changes
-                PauseTransition pause = new PauseTransition( Duration.millis( 500 ) )
-                pause.setOnFinished {
-                    lastZoom[0] = session.viewer.getDownsampleFactor()
-                    session.viewer.addViewerListener( zoomListener )
+            
+                @Override
+                void imageDataChanged( QuPathViewer v, ImageData before, ImageData after ) {}
+                @Override
+                void selectedObjectChanged( QuPathViewer v, PathObject pathObj ) {}
+                @Override
+                void viewerClosed( QuPathViewer v ) {
+                    v.removeViewerListener( this )
                 }
-                pause.play()
-                
-                break
             }
+            
+            // Small pause to track only when zoom actually changes after transition
+            PauseTransition pause = new PauseTransition( Duration.millis( session.viewerMoveTimeMS * 1.1 ) )
+            pause.setOnFinished {
+                lastZoom[0] = session.viewer.getDownsampleFactor()
+                session.viewer.addViewerListener( zoomListener )
+            }
+            pause.play()
         }
     } else {
         restoreViewerState( session.nonZoomedViewerState, session )
@@ -974,73 +1196,126 @@ def toggleFocus( ViewerSessionVars session, List annos ) {
     }
 }
 
+// Define scroll blocker specifics
+viewerSettings.scrollFilterKey = "scrollFilterON"
+viewerSettings.scrollBlocker = { ScrollEvent e ->
+    e.consume()  // stops QuPath from zooming
+} as EventHandler<ScrollEvent>
+
 // Function to add a scroll blocker (stops qupath from zooming in viewer)
-def addScrollBlocker( ViewerSessionVars session ) {
-    if (!session.view.properties[ session.scrollFilterKey ]) {
-        session.view.addEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-        session.view.properties[ session.scrollFilterKey ] = true
+def addScrollBlocker( ViewerSessionVars session, settings viewerSettings ) {
+    if (!session.view.properties[ viewerSettings.scrollFilterKey ]) {
+        session.view.addEventFilter( ScrollEvent.ANY, viewerSettings.scrollBlocker )
+        session.view.properties[ viewerSettings.scrollFilterKey ] = true
     }
 }
 
 // Function to remove a scroll blocker (stops qupath from zooming in viewer)
-def removeScrollBlocker( ViewerSessionVars session ) {
-    session.view.removeEventFilter( ScrollEvent.ANY, session.scrollBlocker )
-    session.view.properties.remove( session.scrollFilterKey )
+def removeScrollBlocker( ViewerSessionVars session, settings viewerSettings ) {
+    session.view.removeEventFilter( ScrollEvent.ANY, viewerSettings.scrollBlocker )
+    session.view.properties.remove( viewerSettings.scrollFilterKey )
+}
+
+// Define hover timer specifics (checks if mouse is over anno)
+// Get position and highlight respective class label
+def processPosition( double x, double y, ViewerSessionVars session, elements uiElements, settings viewerSettings ) {
+    def canvasPoint = getCurrentViewer().getView().screenToLocal( x, y )
+    def pt = getCurrentViewer().componentPointToImagePoint(canvasPoint.getX(), canvasPoint.getY(), null, false)
+    session.hoveredAnno = session.hoverAnnos.find { it.getROI().contains( pt.getX(), pt.getY() ) }
+    
+    def hoveredClass = session.hoveredAnno ? session.annoStateMap[ session.hoveredAnno ] : null
+    def hoveredSpec = hoveredClass ? uiElements.classLabelByClassName[ hoveredClass ] : null
+    def labelToHighlight = hoveredSpec?.btn
+    
+    def borderColor = hoveredSpec?.cssColor ?: "gray"
+    def highlightStyles = ["-fx-background-color: -fx-background;", "-fx-background-radius: 5;",
+                           "-fx-effect: dropshadow(gaussian, ${borderColor}, 20, 0.6, 0, 0);"]
+    def highlightStr = " " + highlightStyles.join( " " )
+    def normStyle = ( uiElements.lastLabelHighlighted?.getStyle() ?: "" ).replace( uiElements.lastHighlightStr ?: "", "" )
+    uiElements.lastLabelHighlighted?.setStyle( normStyle )
+    labelToHighlight?.setStyle( (labelToHighlight.getStyle() ?: "") + highlightStr )
+    uiElements.lastLabelHighlighted = labelToHighlight
+    uiElements.lastHighlightStr = highlightStr
+}
+
+viewerSettings.hoverTimer = new AnimationTimer() {
+    @Override
+    void handle( long now ) {    
+        if (!viewerSettings.hoverCheck) { return }
+        viewerSettings.hoverCheck = false
+        def loc = MouseInfo.getPointerInfo().getLocation()
+        processPosition( loc.x, loc.y, session, uiElements, viewerSettings )
+    }
+}
+
+// Function to add the hover timer to check if mouse if over an anno
+def addHoverFilter( ViewerSessionVars session, settings viewerSettings ) {
+    viewerSettings.hoverTimer.start()
+}
+
+// Function to remove the hover timer to check if mouse if over an anno
+def removeHoverFilter( ViewerSessionVars session, settings viewerSettings ) {
+    viewerSettings.hoverTimer.stop()
+}
+
+// Function to return QuPath to pre-script state
+def restoreToPrescript( ViewerSessionVars session, settings viewerSettings ) {
+    removeScrollBlocker( session, viewerSettings )
+    removeHoverFilter( session, viewerSettings )
+    def addedDets = session.hierarchy.getDetectionObjects()
+    session.hierarchy.removeObjects( addedDets, true ) 
+    session.allClassAnnos.each { it.setColor( null ) }
+    
+    Platform.runLater { 
+        viewerSettings.overlayOptions.setShowAnnotations( true )
+        PathPrefs.annotationStrokeThicknessProperty().set( viewerSettings.oldAnnoThickness )
+        changeGrid( viewerSettings, viewerSettings.wasGridOn, viewerSettings.oGridX, viewerSettings.oGridY )
+        ViewerPlusDisplayOptions.getSharedInstance().setShowOverview( viewerSettings.wasOverviewOn )
+        session.viewer.repaintEntireImage()
+    }
+    
+    fireHierarchyUpdate() 
 }
 
 // Function to switch fre view modes
-def switchFVmode( ViewerSessionVars session ) {
+def switchFVmode( ViewerSessionVars session, settings viewerSettings ) {
     int freeViewModeIdx = session.freeViewModes.indexOf( session.freeViewMode )
     session.freeViewMode = session.freeViewModes[ (freeViewModeIdx + 1) % session.freeViewModes.size() ]     
     
     Platform.runLater {
-        if (session.freeViewMode == ActionStrings.ZOOM && session.view.properties[ session.scrollFilterKey ]) {
-            removeScrollBlocker( session )
-        } else if (session.freeViewMode == ActionStrings.BRIGHTNESS && !session.view.properties[ session.scrollFilterKey ]) {
-            addScrollBlocker( session )
+        if (session.freeViewMode == ActionStrings.ZOOM && session.view.properties[ viewerSettings.scrollFilterKey ]) {
+            removeScrollBlocker( session, viewerSettings )
+        } else if (session.freeViewMode == ActionStrings.BRIGHTNESS && !session.view.properties[ viewerSettings.scrollFilterKey ]) {
+            addScrollBlocker( session, viewerSettings )
         }
     }
 }
 
-// Function to return QuPath to pre-script state
-def restoreToPrescript( ViewerSessionVars session ) {
-    Platform.runLater { 
-        session.overlayOptions.setShowAnnotations( true )
-        removeScrollBlocker( session )
-        PathPrefs.annotationStrokeThicknessProperty().set( session.oldAnnoThickness )
-        session.overlayOptions.setOpacity( 1 )
-    }
-    
-    def addedDets = session.hierarchy.getDetectionObjects()
-    session.hierarchy.removeObjects( addedDets, true ) 
-    session.allClassAnnos.each { it.setColor( null ) }
-    fireHierarchyUpdate() 
-}
-
 // Function to generate classifier/reviewer key for metadata
-def generateMdKey( ViewerSessionVars session, String user, String classKey ) {
-    String mdKey = "${session.toolKeyPrefix}_${user}_${classKey}"
+def generateUserKey( ViewerSessionVars session, modeString, String user ) {
+    String mdKey = "${session.toolKeyPrefix}_${modeString}_${user}_${session.classifyingName}"
     return mdKey
 }
 
 // Function to get user from key
 def getUserFromKey( String key ) {
-    String user = key.split( "_" )[1]
-    return user
+    return key.split( "_" )[2]
 }
 
 // Function to get classifying name from key
 def getClassifyingNameFromKey( String key ) {
-    String classifyingName = key.split( "_" )[2]
-    return classifyingName
+    return key.split( "_" )[3]
 }
 
 // Function to show a temporary message that fades out
 def showFadeOutMessage( label ) {
+    def existing = label.getProperties().get( "fadeOut" )
+    if ( existing ) existing.stop()
+
     label.setOpacity( 0.7 )
     label.setVisible( true )
     label.setManaged( true )
-    
+
     def fadeOut = new FadeTransition( Duration.millis( 800 ), label )
     fadeOut.setDelay( Duration.millis( 700 ) )
     fadeOut.setToValue( 0.0 )
@@ -1048,74 +1323,126 @@ def showFadeOutMessage( label ) {
         label.setVisible( false )
         label.setManaged( false )
     }
+    label.getProperties().put( "fadeOut", fadeOut )
     fadeOut.play()
 }
 
-// Function to color annotations based on color map (or create new color)
-def colorAnnosFromMap( ViewerSessionVars session, List mdKeys ) {
+// Function to get euclidean distance between RGB ints
+double colorDistanceHSB( int c1, int c2 ) {
+    float[] hsb1 = java.awt.Color.RGBtoHSB( (c1 >> 16) & 0xFF, (c1 >> 8) & 0xFF, c1 & 0xFF, null )
+    float[] hsb2 = java.awt.Color.RGBtoHSB( (c2 >> 16) & 0xFF, (c2 >> 8) & 0xFF, c2 & 0xFF, null )
+
+    // Hue is circular, so take the shortest arc
+    float dh = Math.abs( hsb1[0] - hsb2[0] )
+    if (dh > 0.5f) { dh = 1.0f - dh }
+
+    float ds = Math.abs( hsb1[1] - hsb2[1] )
+    float db = Math.abs( hsb1[2] - hsb2[2] )
+
+    // Weight hue most heavily, then brightness, then saturation
+    return Math.sqrt( (dh * 2.0) ** 2 + (ds * 1.0) ** 2 + (db * 1.5) ** 2 )
+}
+
+// Function to generate visible color far from other existing colors
+def generateVisibleColor( List existingColors, List reservedColors, double minDistance = 0.3 ) {
+    Random rng = new Random()
+    int newColor
+    int attempts = 0
+    def allColors = (existingColors + reservedColors).unique()
+    do {
+        float hue        = rng.nextFloat()
+        float saturation = 0.25f + rng.nextFloat() * 0.35f
+        float lightness  = 0.75f + rng.nextFloat() * 0.20f
+        newColor = AwtColor.HSBtoRGB( hue, saturation, lightness )
+        attempts++
+        if (attempts > 500) { break } // Stop from infinite loop
+    } while (
+        newColor in allColors ||
+        allColors.any { colorDistanceHSB( newColor, it ) < minDistance }
+    )
+    return newColor
+}
+
+// Builds/updates highlightStatesAndColorsMap based on current annotation classifications
+def buildHighlightStatesAndColorsMap( ViewerSessionVars session, List mdKeys ) {
+    session.highlightStatesAndColorsMap.each { 
+        it.count = 0
+        it.annos = []
+    }
+
     session.allClassAnnos.each { anno ->
-        session.currentAnnoColorsMap[ anno ] = anno.getColor()
-        
         def md = anno.getMetadata()
-        
+
         List classifierVals = mdKeys.collect { md.get( it ) }.unique().sort()
         classifierVals.replaceAll { it == null ? "unclassified" : it }
+
         boolean sameClass = classifierVals.size() == 1
-        
         def classMatch = session.highlightStatesAndColorsMap.find { it.state == classifierVals }
-        
+
         if (sameClass && classifierVals[0] in session.statesAndColors.state) {
             int color = session.statesAndColors.find { it.state == classifierVals[0] }.color
-            anno.setColor( color )
-            
             if (!classMatch) {
-                session.highlightStatesAndColorsMap << [state: classifierVals, color: color, count: 1]
+                session.highlightStatesAndColorsMap << [state: classifierVals, color: color, count: 1, annos: [anno]]
             } else {
-                classMatch.count = (classMatch.count ?: 0) + 1
+                classMatch.color = color
+                classMatch.count++
+                classMatch.annos << anno
             }
-        
         } else if (classMatch) {
-            anno.setColor( classMatch.color )
-            classMatch.count = (classMatch.count ?: 0) + 1
-        
+            classMatch.count++
+            classMatch.annos << anno
         } else {
             int newColor = generateVisibleColor(
                 session.highlightStatesAndColorsMap.color,
-                session.statesAndColors.color + session.channelSpecifics.color.collect { it & 0x00FFFFFF } // stay away from other class and channel colors
+                session.statesAndColors.color + session.channelSpecifics.color.collect { it & 0x00FFFFFF }
             )
-            
-            anno.setColor( newColor )
-            session.highlightStatesAndColorsMap << [state: classifierVals, color: newColor, count: 1]
+            session.highlightStatesAndColorsMap << [state: classifierVals, color: newColor, count: 1, annos: [anno]]
+        }
+    }
+
+    session.highlightStatesAndColorsMap.removeAll { it.count == 0 }
+}
+
+// Colors annotations using the (already built) highlightStatesAndColorsMap, populating currentAnnoColorsMap
+def colorAnnosFromMap( ViewerSessionVars session, List mdKeys ) {
+    session.allClassAnnos.each { anno ->
+
+        def md = anno.getMetadata()
+
+        List classifierVals = mdKeys.collect { md.get( it ) }.unique().sort()
+        classifierVals.replaceAll { it == null ? "unclassified" : it }
+
+        def classMatch = session.highlightStatesAndColorsMap.find { it.state == classifierVals }
+        anno.setColor( classMatch.color )
+    }
+}
+
+// Function to stop nodes from becoming highlighted when clicked
+def disableNonEditableFocusTraversal( Node node ) {
+    
+    node.setFocusTraversable( false )
+    
+    if (node instanceof Parent) {
+        node.getChildrenUnmodifiable().each {
+            disableNonEditableFocusTraversal( it )
         }
     }
 }
 
-// Function to get bounds of a group of annos (width, height, centroidX, centroidY)
-def getBounds( annoGroup, ViewerSessionVars session ) {
-    double left   = session.viewer.getServerWidth()
-    double right  = 0
-    double top    = session.viewer.getServerHeight()
-    double bottom = 0
-    
-    annoGroup.each {
-        def r = it.getROI()
-        def x = r.getBoundsX()
-        def y = r.getBoundsY()
-        def w = r.getBoundsWidth()
-        def h = r.getBoundsHeight()
-        
-        left   = Math.min( left,   x )
-        right  = Math.max( right,  x + w )
-        top    = Math.min( top,    y )
-        bottom = Math.max( bottom, y + h )
+// Compute width once then lock
+def lockDimensions( Node nodes ) {
+    Platform.runLater {
+        nodes.each { node ->
+            double h = node.getHeight()
+            node.setMinHeight( h )
+            node.setPrefHeight( h )
+            node.setMaxHeight( h )
+            double w = node.getWidth()
+            node.setMinWidth( w )
+            node.setPrefWidth( w )
+            node.setMaxWidth( w )
+        }
     }
-    
-    double width  = Math.abs( right - left )
-    double height = Math.abs( bottom - top )
-    double centroidX = (left + right) / 2
-    double centroidY = (top + bottom) / 2
-    
-    return [x: centroidX, y: centroidY, w: width, h: height]
 }
 
 // Function to fire a dialog message
@@ -1172,9 +1499,41 @@ def addIcon( node, iconCode, int size ) {
 }
 
 // Function to get user preferences for run
-def getCodePreferences( ViewerSessionVars session ) {
+def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
     def currentImageData = getCurrentImageData()
     def project = getProject()
+    def projectImages = getProject().getImageList()
+    
+    // Multi-used styles
+    def outlineRedStyle = """
+        -fx-border-color: red;
+        -fx-border-radius: 3;
+    """
+    def underlineRedStyle = """
+        -fx-border-color: red;
+        -fx-border-width: 0 0 1 0;
+    """
+    def newCellStyle = """
+        -fx-border-color: #5a8a5a; 
+        -fx-border-width: 2;
+    """
+    def redFadeMessageStyle = """
+        -fx-font-size: 12px;
+        -fx-text-fill: #ff6b6b;
+    """
+    def greenFadeMessageStyle = """
+        -fx-font-size: 12px;
+        -fx-text-fill: #5cb85c;
+    """
+    def userSelectedStyle = """
+        -fx-border-color: black;
+        -fx-border-width: 1;
+        -fx-font-weight: bold;
+        -fx-background-color: derive(-fx-base, -30%);
+    """ 
+    def userUnelectedStyle = "-fx-opacity: 0.7;"
+    def chanBoxStyle = "-fx-border-color: #000000"
+    
     
     // Make/get prefs folder as needed
     def projectDirectory = project.getBaseDirectory()
@@ -1224,7 +1583,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         def root = new BorderPane()
         root.setPrefSize( 400, 350 )
         
-        // define shared column constraints
+        // Define shared column constraints
         def colGrow = new ColumnConstraints()
         colGrow.setHgrow( Priority.ALWAYS )
         def colFixed = new ColumnConstraints()
@@ -1234,6 +1593,9 @@ def getCodePreferences( ViewerSessionVars session ) {
         // --- TOP: checkbox toggling dropdown mode ---
         def classifierModeBtn = new ToggleButton( "Classifier Mode" )
         def reviewerModeBtn   = new ToggleButton( "Reviewer Mode" )
+        
+        setTT( classifierModeBtn, "Classify annotations" )
+        setTT( reviewerModeBtn, "Review annotations with specific classifications from other users" )
         
         // Stop mode buttons from being untoggled (must click other)
         [classifierModeBtn, reviewerModeBtn].each { btn ->
@@ -1248,21 +1610,12 @@ def getCodePreferences( ViewerSessionVars session ) {
         classifierModeBtn.setToggleGroup( modeButtons )
         reviewerModeBtn.setToggleGroup( modeButtons )
         
-        def selectedStyle =
-            "-fx-border-color: black;" +
-            "-fx-border-width: 1;" +
-            "-fx-font-weight: bold;" +
-            "-fx-background-color: derive(-fx-base, -30%);"
-        
-        def unselectedStyle =
-            "-fx-opacity: 0.7;"
-        
         def updateModeButtonStyles = {
             classifierModeBtn.setStyle(
-                classifierModeBtn.isSelected() ? selectedStyle : unselectedStyle
+                classifierModeBtn.isSelected() ? userSelectedStyle : userUnelectedStyle
             )
             reviewerModeBtn.setStyle(
-                reviewerModeBtn.isSelected() ? selectedStyle : unselectedStyle
+                reviewerModeBtn.isSelected() ? userSelectedStyle : userUnelectedStyle
             )
         }
         
@@ -1286,7 +1639,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         // Make bounding box, add children, assign to UI and set spacing
         def topRow = new HBox( 10 )
         topRow.setPadding( new Insets( 8 ) )
-        topRow.getChildren().setAll(
+        topRow.getChildren().addAll(
             classifierModeBtn,
             reviewerModeBtn,
             topRowSpacer,
@@ -1303,8 +1656,9 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         
         // --- LEFT: dropdown (user box) + text fields ---
-        def userLabel = new Label( " User:" )
+        def userLabel = new Label()
         addIcon( userLabel, FontAwesome.Glyph.USER, 14 )
+        lockDimensions( userLabel )
         
         def userFieldNotice = new Label()
         userFieldNotice.setPadding( new Insets( 0, 0, 0, 10 ) )
@@ -1313,11 +1667,14 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         def userLabelRow = new HBox( 2, userLabel, userFieldNotice )   
         userLabelRow.setPadding( new Insets( 10, 0, 0, 0 ) )
+        lockDimensions( userLabelRow )
         
         def users = new ComboBox()
         users.setMaxWidth( Double.MAX_VALUE )
         HBox.setHgrow( users, Priority.ALWAYS )
         setTT( [userLabel, users], classifierModeBtn.isSelected() ? "Select a classifier" : "Select a reviewer" )
+        users.setStyle( outlineRedStyle ) // Start with red border (cleared if selection)
+        lockDimensions( users )
         
         def userInputField = new TextField()
         userInputField.setPromptText( "Add with ENTER" )
@@ -1335,7 +1692,39 @@ def getCodePreferences( ViewerSessionVars session ) {
         removeUserDropdown.setMaxWidth( Double.MAX_VALUE )
         HBox.setHgrow( removeUserDropdown, Priority.ALWAYS )
         
-        def userRow = new HBox( 5, users, addUserBtn, removeUserBtn )
+        def populateUsersBtn = new Button()
+        setTT( populateUsersBtn, "Populate classifier/reviewer options from existing annotations in project." )
+        addIcon( populateUsersBtn, FontAwesome.Glyph.SEARCH, 12 )
+        lockDimensions( populateUsersBtn )
+        
+        def userRow = new HBox( 5, users, addUserBtn, removeUserBtn, populateUsersBtn )
+        lockDimensions( userRow )
+        
+        // Red border if no value
+        users.valueProperty().addListener { obs, oldVal, newVal ->
+            users.setStyle( newVal ? null : outlineRedStyle )
+        }
+        
+        // Coloring new users with green border
+        def newUsers = []
+        users.setCellFactory { _ ->
+            new ListCell<String>() {
+                @Override
+                protected void updateItem( String item, boolean empty ) {
+                    super.updateItem( item, empty )
+                    if (empty || item == null) {
+                        setText( null )
+                        setStyle( "" )
+                    } else if (item in newUsers) {
+                        setText( item )
+                        setStyle( newCellStyle )
+                    } else {
+                        setText( item )
+                        setStyle( "" )
+                    }
+                }
+            }
+        }
         
         // Set remove user option cells style
         removeUserDropdown.setCellFactory {
@@ -1382,6 +1771,8 @@ def getCodePreferences( ViewerSessionVars session ) {
         modeButtons.selectedToggleProperty().addListener { obs, oldToggle, newToggle ->
             session.classifierMode = (newToggle == classifierModeBtn)
             
+            userLabel.setText( session.classifierMode ? "Classifier:" : "Reviewer:" )
+            
             setTT( addUserBtn, session.classifierMode ? "Add a new classifier" : "Add a new reviewer")
             setTT( userInputField, (session.classifierMode ? "Type a new classifier" : "Type a new reviewer") + " + press enter to add" )
             setTT( removeUserBtn, session.classifierMode ? "Remove a classifier" : "Remove a reviewer")
@@ -1390,8 +1781,8 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         
         
-        def classifierOptions
-        def reviewerOptions   
+        def classifierOptions = FXCollections.observableArrayList()
+        def reviewerOptions   = FXCollections.observableArrayList()
         
         boolean addedUser = false
         
@@ -1406,39 +1797,53 @@ def getCodePreferences( ViewerSessionVars session ) {
                     reviewerOptions << newUser
                 } else {
                     userInputField.clear()
-                    userFieldNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                    userFieldNotice.setStyle( redFadeMessageStyle )
                     userFieldNotice.setText( "*User exists*" )  
                     showFadeOutMessage( userFieldNotice )
                     return
                 }
                 
-                userFieldNotice.setStyle( "-fx-text-fill: #5cb85c;" )
+                newUsers << newUser
+                
+                userFieldNotice.setStyle( greenFadeMessageStyle )
                 userFieldNotice.setText( "*Added ${newUser}*" )              
                 showFadeOutMessage( userFieldNotice )
                 
                 userRow.getChildren().set( 0, users )
                 
                 userInputField.clear()
-                addUserBtn.setDisabled( false )
+                addUserBtn.setDisable( false )
                 users.setValue( newUser )
                 addedUser = true
             }
         }
         
-        // Forcing new users to only have letters/numbers and showing warning if not
+        // Enforcing criteria and firing messages
         userInputField.textProperty().addListener { obs, oldVal, newVal ->
+            // Letters/numbers only
             if (!newVal.matches( "[A-Za-z0-9]*" )) {
                 userInputField.setText( oldVal )
                 
-                userFieldNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                userFieldNotice.setStyle( redFadeMessageStyle )
                 userFieldNotice.setText( "*Letters/numbers*" )           
                 showFadeOutMessage( userFieldNotice )
+                return
+            }
+            
+            // 15 characters max
+            if (newVal.length() > 15) {
+                userInputField.setText( oldVal )
+                
+                userFieldNotice.setText( "*15 chrs max*" )
+                userFieldNotice.setStyle( redFadeMessageStyle )
+                showFadeOutMessage( userFieldNotice )
+                return
             }
         }
         
         // Set field to add a user when button clicked
         addUserBtn.setOnAction {
-            addUserBtn.setDisabled( true )
+            addUserBtn.setDisable( true )
             userRow.getChildren().set( 0, userInputField )
             userInputField.requestFocus()
             addedUser = false
@@ -1448,7 +1853,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         preferencesDialog.getDialogPane().addEventFilter( MouseEvent.MOUSE_PRESSED ) { e ->
             if (!userInputField.isHover()) {
                 if (!addedUser) {
-                    addUserBtn.setDisabled( false )
+                    addUserBtn.setDisable( false )
                     userRow.getChildren().set( 0, users )
                 }
             }
@@ -1466,7 +1871,9 @@ def getCodePreferences( ViewerSessionVars session ) {
                     reviewerOptions.remove( newVal )
                 }
                 
-                userFieldNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                newUsers.remove( newVal )
+                
+                userFieldNotice.setStyle( redFadeMessageStyle )
                 userFieldNotice.setText( "*Removed ${newVal}*" )           
                 showFadeOutMessage( userFieldNotice )
                 removedUser = true
@@ -1475,13 +1882,13 @@ def getCodePreferences( ViewerSessionVars session ) {
             removeUserDropdown.valueProperty().removeListener( removeUserListener )
             userRow.getChildren().set( 0, users )
             users.show()
-            removeUserBtn.setDisabled( false )
+            removeUserBtn.setDisable( false )
         }
         
         // Action when remove user button is clicked
         String prevSelectedUser
         removeUserBtn.setOnAction {
-            removeUserBtn.setDisabled( true )
+            removeUserBtn.setDisable( true )
             removedUser = false
             
             prevSelectedUser = users.getValue()
@@ -1503,9 +1910,89 @@ def getCodePreferences( ViewerSessionVars session ) {
             if (wasShowing && !isShowing && !removedUser) {
                 removeUserDropdown.valueProperty().removeListener( removeUserListener )
                 userRow.getChildren().set( 0, users )
-                removeUserBtn.setDisabled( false )
+                removeUserBtn.setDisable( false )
             }
         }
+        
+        // Running through project and populating user options and sending notice (parallel)
+        populateUsersBtn.setOnAction {
+            def scene = QuPathGUI.getInstance().getStage().getScene()
+            scene.setCursor( Cursor.WAIT )
+            populateUsersBtn.setDisable( true )
+        
+            Thread.start {
+                def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), projectImages.size() )
+                def pool = Executors.newFixedThreadPool( nThreads )
+                
+                def futures = projectImages.collect { entry ->
+                    pool.submit({
+                        def imageData = null
+                        try {
+                            imageData = entry.readImageData()
+                            return imageData.getHierarchy().getAnnotationObjects().collectMany { anno ->
+                                anno.getMetadata().keySet().findAll { it.contains( session.toolKeyPrefix ) }
+                            }
+                        } catch (Exception ignored) {
+                            return []
+                        } finally {
+                            try { imageData?.close() } catch (Exception ignored2) {}
+                        }
+                    } as Callable)
+                }
+                
+                def uniqueUsers = futures.collectMany { it.get() }
+                    .unique()
+                    .collect { [user: it.split( "_" )[2], mode: it.split( "_" )[1]] }
+                    .unique()
+                    
+                pool.shutdown()
+                
+                Platform.runLater {
+                    def newNamesSet = uniqueUsers.toSet()
+                    List newClassifiers = []
+                    List newReviewers = []
+                    
+                    uniqueUsers.each {
+                        if (it.mode == ActionStrings.CLASSIFIER_MODE) {
+                            classifierOptions << it.user
+                            newClassifiers << it.user
+                        
+                        } else {
+                            reviewerOptions << it.user
+                            newReviewers << it.user
+                        }
+                        
+                        newUsers << it.user
+                    }
+                    
+                    classifierOptions = classifierOptions.unique()
+                    reviewerOptions = reviewerOptions.unique()
+                    
+                    
+                    if ( !users.getItems().isEmpty() ) {
+                        users.setValue( users.getItems().first() )
+                    }
+                    
+                    if ( !uniqueUsers.isEmpty() ) {
+                        def msgParts = []
+                        if (newClassifiers) { msgParts << "${newClassifiers.size()} classifiers" }
+                        if (newReviewers) { msgParts << "${newReviewers.size()} reviewers" }
+                        def msg = "*Added: ${msgParts.join(', ')}*"
+                        userFieldNotice.setText( msg )
+                        userFieldNotice.setStyle( greenFadeMessageStyle )
+                        users.show()
+                        
+                    } else {
+                        userFieldNotice.setText( "*None found*" )
+                        userFieldNotice.setStyle( redFadeMessageStyle )
+                    }
+                    
+                    showFadeOutMessage( userFieldNotice )
+                    scene.setCursor( Cursor.DEFAULT )
+                }
+            }
+        }
+        
         
         
         // New text fields
@@ -1514,22 +2001,62 @@ def getCodePreferences( ViewerSessionVars session ) {
         addIcon( annoClassLabel, FontAwesome.Glyph.STAR_HALF_ALT, 14 )
         def annoClassField = new ComboBox()
         annoClassField.setMaxWidth( Double.MAX_VALUE )
-        setTT( [annoClassLabel, annoClassField], "Class of annotations to be classified. \n If missing, add to QuPath class list." )
+        setTT( [annoClassLabel, annoClassField], "Class of annotations to be classified. \n If missing, add to QuPath class list and/or add annotations of that class." )
+        annoClassField.setStyle( outlineRedStyle ) // Start with red border
+        lockDimensions( annoClassField )
         
         def projectPathClasses = project.getPathClasses().findAll { it?.getName() }    
-        def currentImageAnnos = currentImageData ? getAnnotationObjects() : []
-        def countsByClass = currentImageAnnos.countBy { it.getPathClass() }
+        def summaryGson = new Gson()
+        def imageClassCounts = [:]  // imageName -> [className -> count]
+        def totalsByClass = [:]     // className -> total across all images
         
-        // Organizing any pathclasses with objects in the dropdown to the top of the list
-        def highCounts = []
-        def lowCounts = []
-        projectPathClasses.each { pc ->
-            def entry = [name: pc.getName(), num: countsByClass[ pc ] ?: 0]
-            (entry.num > 0 ? highCounts : lowCounts) << entry
+        def imageList = project.getImageList()
+        def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
+        def summaryPool = Executors.newFixedThreadPool( nThreads )
+        def resultMap = new java.util.concurrent.ConcurrentHashMap()
+        
+        // Parallel finding anno summaries
+        def summaryFutures = imageList.collect { entry ->
+            summaryPool.submit({
+                def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+                def counts = [:]
+                if (Files.exists( summaryFile )) {
+                    try {
+                        def raw = new String( Files.readAllBytes( summaryFile ) )
+                        def summary = summaryGson.fromJson( raw, Object )
+                        summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
+                            def n = k.toString()
+                            counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                        }
+                    } catch (Exception ignored) {}
+                }
+                resultMap[ entry.getImageName() ] = counts
+            } as Callable)
+        }
+        summaryFutures.each { it.get() }
+        summaryPool.shutdown()
+        
+        // Merge into imageClassCounts and totalsByClass
+        resultMap.each { imgName, counts ->
+            imageClassCounts[ imgName ] = counts
+            counts.each { className, count ->
+                totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
+            }
         }
         
-        highCounts.sort { -it.num } // Sort for descending abundance
-        def pathClassEntries = highCounts + lowCounts
+        def currentImageName = currentImageData?.getServer()?.getMetadata()?.getName()
+        def currentImageCounts = currentImageName ? (imageClassCounts[ currentImageName ] ?: [:]) : null
+        
+        // Sort: only classes with existing annotations in project by abundance
+        def highCounts = []
+        projectPathClasses.each { pc ->
+            def total = totalsByClass[ pc.getName() ] ?: 0
+            if (total > 0) { 
+                highCounts << [name: pc.getName(), num: total, imageNum: currentImageCounts?[ pc.getName() ] ?: 0] 
+            }
+        }
+        highCounts.sort { -it.num }
+        def pathClassEntries = highCounts
         
         // Set dropdown selection to show counts
         annoClassField.setCellFactory {
@@ -1540,21 +2067,22 @@ def getCodePreferences( ViewerSessionVars session ) {
                     if (empty || item == null) {
                         setText( null )
                     } else {
-                        def pc = item.name
-                        def num = item.num
-                        setText( num > 0 ? "${pc} [${num}]" : "${pc}" )
+                        def label = currentImageCounts != null
+                            ? "${item.name}  [${item.imageNum} / ${item.num}]"
+                            : "${item.name}  [${item.num}]"
+                        
+                        setText( label )
                     }
                 }
             }
         }
         
-        // Set actual pathclass name to be passed to script (no number)
+        // Set selection to show same counts as dropdown
         annoClassField.setConverter( new StringConverter() {     
             String toString( def item ) {
-                def pc  = item.name
-                def num = item.num
-                
-                return num > 0 ? "${pc} [${num}]" : "${pc}"
+                def label = currentImageCounts != null
+                    ? "${item.name}  [${item.imageNum} / ${item.num}]"
+                    : "${item.name}  [${item.num}]"
             }
             
             def fromString( String string ) {
@@ -1563,6 +2091,11 @@ def getCodePreferences( ViewerSessionVars session ) {
         })
         
         annoClassField.setItems( FXCollections.observableArrayList( pathClassEntries ) )
+        
+        // Red border if empty
+        annoClassField.valueProperty().addListener { obs, oldVal, newVal ->
+            annoClassField.setStyle( newVal ? null : outlineRedStyle )
+        }
         
         
         def classifyingNameOptions
@@ -1576,8 +2109,9 @@ def getCodePreferences( ViewerSessionVars session ) {
         classifyingNameNotice.setVisible( false )
         classifyingNameNotice.setManaged( false )
         
-        def classifyingNameLabelRow = new HBox( 2, classifyingNameLabel, classifyingNameNotice )      
+        def classifyingNameLabelRow = new HBox( 2, classifyingNameLabel, classifyingNameNotice )
         classifyingNameLabelRow.setPadding( new Insets( 10, 0, 0, 0 ) )
+        lockDimensions( classifyingNameLabelRow )
         
         def classifyingNameSelection = new ComboBox()
         classifyingNameSelection.setMaxWidth( Double.MAX_VALUE )
@@ -1591,43 +2125,119 @@ def getCodePreferences( ViewerSessionVars session ) {
         addIcon( populateClassifyingNamesBtn, FontAwesome.Glyph.SEARCH, 12 )
         
         def classifyingNameRow = new HBox( 5, classifyingNameSelection, populateClassifyingNamesBtn )
+        lockDimensions( classifyingNameRow )
         
-        // Forcing classifying name to only have letters/numbers and showing warning if not
+        // Enforcing criteria and firing messages
         classifyingNameSelection.getEditor().textProperty().addListener { obs, oldVal, newVal ->
+            // Letters/numbers only
             if (!newVal.matches( "[A-Za-z0-9]*" )) {
                 classifyingNameSelection.getEditor().setText( oldVal )
                 
                 classifyingNameNotice.setText( "*Letters/numbers*" )
-                classifyingNameNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+                classifyingNameNotice.setStyle( redFadeMessageStyle )
                 showFadeOutMessage( classifyingNameNotice )
+                return
             }
+            
+            // 15 characters max
+            if (newVal.length() > 15) {
+                classifyingNameSelection.getEditor().setText( oldVal )
+                
+                classifyingNameNotice.setText( "*15 chrs max*" )
+                classifyingNameNotice.setStyle( redFadeMessageStyle )
+                showFadeOutMessage( classifyingNameNotice )
+                return
+            }
+            
+            // Red border if missing
+            classifyingNameSelection.setStyle( !newVal ? outlineRedStyle : null )
         }
         
-        // Running through project and populating classifying name options and sending notice
+        // Start with red border (cleared if added to)
+        classifyingNameSelection.setStyle( outlineRedStyle )
+        lockDimensions( classifyingNameSelection )
+        
+        // Running through project and populating classifying name options and sending notice (parallel)
         populateClassifyingNamesBtn.setOnAction {
-            def uniqueNames = project.getImageList().collectMany { entry ->
-                entry.readImageData().getHierarchy().getAnnotationObjects().collectMany { anno ->
-                    anno.getMetadata().keySet().findAll { it.contains( session.toolKeyPrefix ) }
+            def scene = QuPathGUI.getInstance().getStage().getScene()
+            scene.setCursor( Cursor.WAIT )
+            populateClassifyingNamesBtn.setDisable( true )
+        
+            Thread.start {
+                nThreads = Math.min( Runtime.getRuntime().availableProcessors(), projectImages.size() )
+                def pool = Executors.newFixedThreadPool( nThreads )
+                
+                def futures = projectImages.collect { entry ->
+                    pool.submit({
+                        def imageData = null
+                        try {
+                            imageData = entry.readImageData()
+                            return imageData.getHierarchy().getAnnotationObjects().collectMany { anno ->
+                                anno.getMetadata().keySet().findAll { it.contains( session.toolKeyPrefix ) }
+                            }
+                        } catch (Exception ignored) {
+                            return []
+                        } finally {
+                            try { imageData?.close() } catch (Exception ignored2) {}
+                        }
+                    } as Callable)
                 }
-            }.unique().collect { getClassifyingNameFromKey( it ) }.unique()
-            
-            classifyingNameOptions.addAll( uniqueNames  )
-            classifyingNameOptions = classifyingNameOptions.unique()
-            classifyingNameSelection.setItems( classifyingNameOptions )
-            if (!classifyingNameSelection.getItems().isEmpty()) {
-                classifyingNameSelection.setValue( classifyingNameSelection.getItems().first() )
+                
+                def uniqueNames = futures.collectMany { it.get() }
+                    .unique()
+                    .collect { getClassifyingNameFromKey( it ) }
+                    .unique()
+                
+                pool.shutdown()
+        
+                Platform.runLater {
+                    def newNamesSet = uniqueNames.toSet()
+                    
+                    classifyingNameOptions.addAll( uniqueNames )
+                    classifyingNameOptions = classifyingNameOptions.unique()
+                    classifyingNameSelection.setItems( classifyingNameOptions )
+                    
+                    // Coloring added names through search with green border
+                    classifyingNameSelection.setCellFactory { _ ->
+                        new ListCell<String>() {
+                            @Override
+                            protected void updateItem( String item, boolean empty ) {
+                                super.updateItem( item, empty )
+                                if (empty || item == null) {
+                                    setText( null )
+                                    setStyle( "" )
+                                } else if (item in newNamesSet) {
+                                    setText( item )
+                                    setStyle( newCellStyle )
+                                } else {
+                                    setText( item )
+                                    setStyle( "" )
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Also style the button cell (what shows when dropdown is closed)
+                    classifyingNameSelection.setButtonCell( classifyingNameSelection.getCellFactory().call( null ) )
+                    
+                    if ( !classifyingNameSelection.getItems().isEmpty() ) {
+                        classifyingNameSelection.setValue( classifyingNameSelection.getItems().first() )
+                    }
+        
+                    if ( !uniqueNames.isEmpty() ) {
+                        classifyingNameNotice.setText( "*${uniqueNames.size()} added*" )
+                        classifyingNameNotice.setStyle( greenFadeMessageStyle )
+                        
+                        classifyingNameSelection.show()
+                    } else {
+                        classifyingNameNotice.setText( "*None found*" )
+                        classifyingNameNotice.setStyle( redFadeMessageStyle )
+                    }
+        
+                    showFadeOutMessage( classifyingNameNotice )
+                    scene.setCursor( Cursor.DEFAULT )
+                }
             }
-            
-            if ( !uniqueNames.isEmpty() ) {
-                classifyingNameNotice.setText( "*${uniqueNames.size()} added*" )
-                classifyingNameNotice.setStyle( "-fx-text-fill: #5cb85c;" )
-            } else {
-                classifyingNameNotice.setText( "*None available*" )
-                classifyingNameNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
-            }
-            
-            showFadeOutMessage( classifyingNameNotice )
-            populateClassifyingNamesBtn.setDisabled( true )
         }
         
         
@@ -1639,21 +2249,34 @@ def getCodePreferences( ViewerSessionVars session ) {
         gridSizeField.setPromptText( "Size of grouping grid (µm)" )
         setTT( [gridSizeLabel, gridSizeField], "Size of grouping grid (µm). Increasing this reduces the number of groups per image but increases objects per group." )
         
-        def gridSizeNotice = new Label( "*Numbers only*" )
-        gridSizeNotice.setStyle( "-fx-text-fill: #ff6b6b;" )
+        def gridSizeNotice = new Label()
+        gridSizeNotice.setStyle( redFadeMessageStyle )
         gridSizeNotice.setPadding( new Insets( 0, 0, 0, 10 ) )
         gridSizeNotice.setVisible( false )
         gridSizeNotice.setManaged( false )
         
-        gridSizeRow = new HBox( 2, gridSizeLabel, gridSizeNotice )  
+        def gridSizeRow = new HBox( 2, gridSizeLabel, gridSizeNotice )
         gridSizeRow.setPadding( new Insets( 10, 0, 0, 0 ) )
+        lockDimensions( gridSizeRow )
         
-        // Enforce integer-only input for grid size and show warning
+        // Enforcing criteria and firing messages
         gridSizeField.textProperty().addListener { obs, oldVal, newVal ->
+            // Numbers only
             if (!newVal.matches( "\\d*" )) {
                 gridSizeField.setText( oldVal )
                 
+                gridSizeNotice.setText( "*Numbers only*" )
                 showFadeOutMessage( gridSizeNotice )
+                return
+            }
+            
+            // 5 numbers max
+            if (newVal.length() > 5) {
+                gridSizeField.setText( oldVal )
+                
+                gridSizeNotice.setText( "*5 nums max*" )
+                showFadeOutMessage( gridSizeNotice )
+                return
             }
         }
         
@@ -1671,12 +2294,13 @@ def getCodePreferences( ViewerSessionVars session ) {
         def leftBox = new VBox( 10 )
         leftBox.setPadding( new Insets( 5 ) )
         leftBox.setPrefWidth( 265 )
-        leftBox.getChildren().setAll(
+        leftBox.getChildren().addAll(
             userLabelRow, userRow,
             annoClassLabel, annoClassField,
             classifyingNameLabelRow, classifyingNameRow,
             gridSizeRow, gridSizeField
         )
+        
         root.left = leftBox
         
         
@@ -1690,7 +2314,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         def bottomRow = new HBox()
         bottomRow.setPadding( new Insets( 20, 10, 0, 0 ) )
-        bottomRow.getChildren().setAll( bottomRowSpacer, checkingWorkCheckbox )
+        bottomRow.getChildren().addAll( bottomRowSpacer, checkingWorkCheckbox )
         root.bottom = bottomRow
         
         // Changing applicable preferences live when switching between modes
@@ -1714,16 +2338,36 @@ def getCodePreferences( ViewerSessionVars session ) {
         // --- CENTER: scrollable list of channels (max 3 allowed) ---
         // Create all channel checkboxes
         // Getting comomon available channels across project images
-        def image1 = project.getImageList()[0]
-        def image1Server = image1.readImageData().getServer()
-        List image1Channels = image1Server.getMetadata().getChannels().collect { it.getName() }
-        def channelCheckboxes = image1Channels.collect { channelName ->
+        def serverGson = new Gson()
+        def serverPool = Executors.newFixedThreadPool( nThreads )
+        
+        def serverFutures = projectImages.collect { entry ->
+            serverPool.submit({
+                def summaryFile = entry.getEntryPath().resolve( "server.json" )
+                if (Files.exists( summaryFile )) {
+                    try {
+                        def raw = new String( Files.readAllBytes( summaryFile ) )
+                        def server = serverGson.fromJson( raw, Object )
+                        return server?.metadata?.channels?.collect { it.name } ?: null
+                    } catch (Exception ignored) {}
+                }
+                return null
+            } as Callable)
+        }
+        
+        def allChannelLists = serverFutures.collect { it.get() }.findAll { it != null }
+        serverPool.shutdown()
+        
+        def commonChannels = allChannelLists ? allChannelLists.inject { acc, channels -> acc.intersect( channels ) } : []
+        
+        def channelCheckboxes = commonChannels.collect { channelName ->
             new CheckBox( channelName )
         }
         
         // Create bounding box for channels and relevant options
         def fullChannelsBox = new VBox( 5 )
         fullChannelsBox.setPadding( new Insets( 0, 5, 5, 5 ) )
+        fullChannelsBox.setStyle( outlineRedStyle ) // Start with red border
         
         // Create bounding box for channel checkboxes
         def channelCBsBox =  new VBox( 5 )
@@ -1740,6 +2384,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         def channelsLabel = new Label( "Select up to ${maxChannels} channels: [0]" )
         channelsLabel.setPadding( new Insets( 5, 0, 0, 0 ) )
         def fullChannelsBoxSpacer = new Region()
+        fullChannelsBoxSpacer.setMinWidth( 10 )
         HBox.setHgrow( fullChannelsBoxSpacer, Priority.ALWAYS )
         def clearChannelsBtn = new Button()
         setTT( clearChannelsBtn, "Clear selected channels" )
@@ -1748,7 +2393,8 @@ def getCodePreferences( ViewerSessionVars session ) {
         // Assemble top row and add as child of larger channel box
         def topChannelRow = new HBox( 5 )
         topChannelRow.setPadding( new Insets( 8 ) )
-        topChannelRow.getChildren().setAll( channelsLabel, fullChannelsBoxSpacer, clearChannelsBtn )
+        topChannelRow.getChildren().addAll( channelsLabel, fullChannelsBoxSpacer, clearChannelsBtn )
+        lockDimensions( topChannelRow )
         
         // Add channel checkboxes and listeners to enforce max number
         channelCheckboxes.each { cb ->
@@ -1769,6 +2415,9 @@ def getCodePreferences( ViewerSessionVars session ) {
                     // Too many – revert this one
                     cb.setSelected( false )
                 }
+                
+                // Red border none selected
+                fullChannelsBox.setStyle( selectedCount ? chanBoxStyle : outlineRedStyle )
             }
             channelCBsBox.getChildren().add( cb )
             cb.setFocusTraversable( false )
@@ -1782,13 +2431,12 @@ def getCodePreferences( ViewerSessionVars session ) {
         // Adding all the pieces together
         def channelsScroll = new ScrollPane( channelCBsBox )
         channelsScroll.setFitToWidth( true )
-        fullChannelsBox.getChildren().setAll( topChannelRow, channelsScroll )
+        fullChannelsBox.getChildren().addAll( topChannelRow, channelsScroll )
         root.right = fullChannelsBox
         
         preferencesDialog.getDialogPane().content = root
         
         // Formatting scrollable box
-        fullChannelsBox.setStyle( "-fx-border-color: #000000" )
         topChannelRow.setStyle( "-fx-border-color: #000000; -fx-border-width: 0 0 1 0" )
         channelsScroll.setStyle( "-fx-background-color: transparent" )
         
@@ -1807,24 +2455,24 @@ def getCodePreferences( ViewerSessionVars session ) {
         int maxReviewerStates = 3
         
         // Defaults
-        def defaultConfirmedColors = [
+        def defaultStateOrderAndConfirmedColors = [
             "false": Color.RED,
             "true" : Color.WHITE,
             "maybe": Color.GRAY
         ]
         def defaultUnconfirmedColor = Color.web( "#FF69B4" )
         
-        def automaticColorOptions = [Color.RED, Color.WHITE, Color.GRAY, Color.CYAN, Color.LIME, defaultUnconfirmedColor]
+        def automaticColorOptions = [Color.RED, Color.WHITE, Color.GRAY, Color.CYAN, Color.YELLOW, defaultUnconfirmedColor]
         
         // Stored output used elsewhere in the script
         def stateColorMap = []
         
         // Locked in values (before pressing ok, changing in the window are temporary)
-        def lockedStateOrder = defaultStateOrder
+        def lockedStateOrder = defaultStateOrderAndConfirmedColors.keySet()
         def lockedReviewerStates = defaultReviewerStates
         def lockedConfirmedColors = [:]
         lockedStateOrder.each { stateName ->
-            lockedConfirmedColors[ stateName ] = defaultConfirmedColors[ stateName ] ?: Color.GRAY
+            lockedConfirmedColors[ stateName ] = defaultStateOrderAndConfirmedColors[ stateName ] ?: Color.GRAY
         }
         def lockedUnconfirmedColor = defaultUnconfirmedColor
         
@@ -1895,17 +2543,19 @@ def getCodePreferences( ViewerSessionVars session ) {
             colorPickerU.setValue( tempUnconfirmedColor )
             colorPickerU.setPrefWidth( 140 )
             
+            
             int numRevCBsOn = reviewerCheckboxes.count { it.isSelected() }
             def reviewerClassHeader = new Label( "Reviewer classes (${minReviewerStates}-${maxReviewerStates}):" )
             reviewerClassHeader.setPadding( new Insets( 5, 0, 0, 0 ) )
             reviewerClassHeader.setPrefWidth( 140 )
+            reviewerClassHeader.setStyle( underlineRedStyle )
             
             def unconfirmedTailSpacer = new Region()
             unconfirmedTailSpacer.setPrefWidth( 65 )
             HBox.setHgrow( unconfirmedTailSpacer, Priority.ALWAYS )
             
             def draggableHeaderRow = new HBox( 6 )
-            draggableHeaderRow.getChildren().setAll(
+            draggableHeaderRow.getChildren().addAll(
                 dragHeaderSpacer,
                 comboHeaderSpacer,
                 confirmedHeader,
@@ -1928,7 +2578,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             def colUnconfirmedHeader = new ColumnConstraints()
             colUnconfirmedHeader.setHgrow( Priority.NEVER )
             
-            classColorGrid.getColumnConstraints().setAll(
+            classColorGrid.getColumnConstraints().addAll(
                 colLabels,
                 colDragArea,
                 colConfirmedHeader,
@@ -1957,6 +2607,9 @@ def getCodePreferences( ViewerSessionVars session ) {
             
             classColorDialog.getDialogPane().setContent( classColorGrid )
             
+            // Stopping the row from staying highlighted on mouse release
+            rowListView.setOnMouseReleased { rowListView.getSelectionModel().clearSelection() }
+            
             
             def refreshStateLabelBox
             
@@ -1969,7 +2622,7 @@ def getCodePreferences( ViewerSessionVars session ) {
                     tempStateOrder.eachWithIndex { state, idx ->
                         
                         def sb = stateBoxes[ idx ]
-                        sb.getItems().setAll( states )
+                        sb.getItems().addAll( states )
                         sb.setEditable( true )
                         setTT( sb, "Select or type a state name" )
                         sb.setPromptText( "Type or select" )
@@ -2038,22 +2691,25 @@ def getCodePreferences( ViewerSessionVars session ) {
                 def colorPickerValues = colorPickers.collect { it.getValue() }
                 def anyEmptyValues = (stateBoxValues + colorPickerValues).any { !it }
                 int numRevClasses = reviewerCheckboxes.count { it.isSelected() }
+                boolean wrongNumRevClasses = (numRevClasses < minReviewerStates || numRevClasses > maxReviewerStates)
+                
+                // Also highlighting label if wrong number
+                reviewerClassHeader.setStyle( wrongNumRevClasses ? underlineRedStyle : null )
                 
                 okButton.setDisable( rowN < minClassifierStates || rowN > maxClassifierStates ||
-                                     numRevClasses < minReviewerStates || numRevClasses > maxReviewerStates ||
-                                     anyEmptyValues ||
+                                     wrongNumRevClasses ||anyEmptyValues ||
                                      stateBoxValues.size() != stateBoxValues.unique().size() ||
                                      colorPickerValues.size() != colorPickerValues.unique().size() )
             }
             
-            // Closure: Attach a listener that blocks invalid inputs and updates respective lists/maps
-            def attachStateColorListener = { item ->
+            // Closure: Attach a state box listener that blocks invalid inputs and updates respective lists/maps
+            def attachStateListeners = { item ->
                 
                 item.valueProperty().addListener { obs, oldVal, newVal ->
                     
-                    if (updatingSelections) return
-                    
+                    if (updatingSelections) { return }
                     updatingSelections = true
+                    
                     try {
                         // If state box is empty, setting to last state
                         if (!newVal) {
@@ -2061,25 +2717,48 @@ def getCodePreferences( ViewerSessionVars session ) {
                             return
                         }
                         
-                        if (item instanceof ComboBox) {
-                            def restOfBoxes = stateBoxes.findAll { it != item }
-                            
-                            // If an existing state is entered, switching the two states
-                            restOfBoxes.each { box ->
-                                if (box.getValue() == newVal) {
-                                    box.setValue( oldVal )
-                                }
+                        // If an existing state is entered, switching the two states
+                        def restOfBoxes = stateBoxes.findAll { it != item }
+                        restOfBoxes.each { box ->
+                            if (box.getValue() == newVal) {
+                                box.setValue( oldVal )
                             }
+                        }  
                         
-                        } else if (item instanceof ColorPicker) {
-                            def restOfPickers = (colorPickers + colorPickerU).findAll { it != item }
-                            def usedColors = restOfPickers.collect { it.getValue() }
-                            
-                            // Blocking new color if already being used
-                            if (newVal in usedColors) {
-                                item.setValue( oldVal )
-                                return
-                            }
+                        syncMapsFromControls()
+                        rowListView.refresh()
+                        refreshStateLabelBox()
+                        updateOkButton()
+                    
+                    } finally {
+                        updatingSelections = false
+                    }
+                }
+                
+                // Letters/numbers only and no more than 15 characters
+                item.getEditor().textProperty().addListener { obs, oldVal, newVal ->
+                    if (!newVal.matches( "[A-Za-z0-9]*" ) || newVal.length() > 15) {
+                        item.getEditor().setText( oldVal )
+                    }
+                }
+            }
+            
+            // Closure: Attach a color listener to stop duplicate colors and updates respective lists/maps
+            def attachColorListener = { item ->
+                 
+                item.valueProperty().addListener { obs, oldVal, newVal ->
+                    
+                    if (updatingSelections) { return }   
+                    updatingSelections = true
+                    
+                    try {
+                        def restOfPickers = (colorPickers + colorPickerU).findAll { it != item }
+                        def usedColors = restOfPickers.collect { it.getValue() }
+                        
+                        // Blocking new color if already being used
+                        if (newVal in usedColors) {
+                            item.setValue( oldVal )
+                            return
                         }
                         
                         syncMapsFromControls()
@@ -2094,16 +2773,10 @@ def getCodePreferences( ViewerSessionVars session ) {
             }
             
             def RevCBListener = { obs, oldVal, newVal ->  
-                if (updatingSelections) return
+                if (updatingSelections) { return }
                 
                 updatingSelections = true
                 try {
-                    // Not allowing number selected to exceed the max
-                    int numSelected = reviewerCheckboxes.count { it.isSelected() }
-                    if (numSelected > maxReviewerStates || numSelected < minReviewerStates) {
-                        obs.bean.setSelected( oldVal )
-                    }
-                    
                     updateOkButton()
                     syncMapsFromControls()
                 } finally {
@@ -2113,14 +2786,14 @@ def getCodePreferences( ViewerSessionVars session ) {
             
             // Attaching listeners to existing objects
             stateBoxes.each { cb ->
-                attachStateColorListener( cb )
+                attachStateListeners( cb )
             }
             
             colorPickers.each { cp ->
-                attachStateColorListener( cp )
+                attachColorListener( cp )
             }
             
-            attachStateColorListener( colorPickerU )
+            attachColorListener( colorPickerU )
             
             reviewerCheckboxes.each { rCB ->
                 rCB.selectedProperty().addListener( RevCBListener )
@@ -2129,14 +2802,14 @@ def getCodePreferences( ViewerSessionVars session ) {
             // Closure: Create a new state box, add options and listener
             def createStateBox = {
                 def sb = new ComboBox<String>()
-                attachStateColorListener( sb )
+                attachStateListeners( sb )
                 return sb
             }
             
             // Closure: Create a new color picker and add listener
             def createColorPicker = {
                 def cp = new ColorPicker()
-                attachStateColorListener( cp )
+                attachColorListener( cp )
                 return cp
             }
             
@@ -2162,16 +2835,16 @@ def getCodePreferences( ViewerSessionVars session ) {
                 
                 tempStateOrder.add( insertIdx, firstUnusedState )
                 
+                def usedColors = colorPickers.collect { it.getValue() } + colorPickerU.getValue()
+                def firstUnusedColor = automaticColorOptions.find { it !in usedColors }
+                
                 stateBoxes.add( insertIdx, createStateBox() )
                 colorPickers.add( insertIdx, createColorPicker() )
                 reviewerCheckboxes.add( insertIdx, createRevCB() )
                 
-                def usedColors = colorPickers.collect { it.getValue() } + colorPickerU.getValue()
-                def firstUnusedColor = automaticColorOptions.find { it !in usedColors }
-                
                 // Getting rid of any convoluting keys to keep map correct size
                 tempConfirmedColors.keySet().retainAll( tempStateOrder )
-                tempConfirmedColors[ firstUnusedState ] = defaultConfirmedColors[ firstUnusedState ] && defaultConfirmedColors[ firstUnusedState ] !in usedColors ? defaultConfirmedColors[ firstUnusedState ] : firstUnusedColor
+                tempConfirmedColors[ firstUnusedState ] = defaultStateOrderAndConfirmedColors[ firstUnusedState ] && defaultStateOrderAndConfirmedColors[ firstUnusedState ] !in usedColors ? defaultStateOrderAndConfirmedColors[ firstUnusedState ] : firstUnusedColor
                 
                 formatControls()
                 syncControlsFromMaps()
@@ -2228,7 +2901,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             
             // Closure: Clear any style changes during state cell dragging
             def clearMarker = { ListView<Integer> lv ->
-                lv.lookupAll(".list-cell").each { it.setStyle( "" ) }
+                lv.lookupAll( ".list-cell" ).each { it.setStyle( "" ) }
             }
             
             // Closure: Create style of line to be shown when dragging states
@@ -2353,7 +3026,7 @@ def getCodePreferences( ViewerSessionVars session ) {
                         
                         def row = new HBox( 10 )
                         row.setPadding( new Insets( 2, 0, 2, 0 ) )
-                        row.getChildren().setAll(
+                        row.getChildren().addAll(
                             dragHandle,
                             stateBoxes[ idx ],
                             colorPickers[ idx ],
@@ -2433,32 +3106,17 @@ def getCodePreferences( ViewerSessionVars session ) {
                 return rowCell
             }
             
-            
             // Setup to restore default number and order of classes/colors
             restoreDefaultsBtn.setOnAction {
-                tempStateOrder = new ArrayList<>( defaultStateOrder )
                 
-                tempConfirmedColors = [:]
-                tempStateOrder.each { stateName ->
-                    tempConfirmedColors[ stateName ] = defaultConfirmedColors[ stateName ] ?: Color.GRAY
-                }
-                
-                stateBoxes = tempStateOrder.collect { createStateBox() }
-                colorPickers = tempStateOrder.collect { createColorPicker() }
-                
-                reviewerCheckboxes.each { it.selectedProperty().removeListener( RevCBListener ) }
-                reviewerCheckboxes.each { it.setSelected( false ) }
-                
-                tempConfirmedColors.eachWithIndex { state, color, idx ->
-                    stateBoxes[ idx ].setValue( state )
-                    colorPickers[ idx ].setValue( color )
-                    reviewerCheckboxes[ idx ].setSelected ( state in defaultReviewerStates )
-                }
-                
-                reviewerCheckboxes.each { it.selectedProperty().addListener( RevCBListener ) }
-                
+                tempStateOrder       = new ArrayList<>( defaultStateOrderAndConfirmedColors.keySet() )
+                tempConfirmedColors  = new LinkedHashMap<>( defaultStateOrderAndConfirmedColors )
+                tempRevStates        = new ArrayList<>( defaultReviewerStates )
                 tempUnconfirmedColor = defaultUnconfirmedColor
-                colorPickerU.setValue( tempUnconfirmedColor )
+                
+                stateBoxes         = defaultStateOrderAndConfirmedColors.collect { createStateBox() }
+                colorPickers       = defaultStateOrderAndConfirmedColors.collect { createColorPicker() }
+                reviewerCheckboxes = defaultStateOrderAndConfirmedColors.collect { createRevCB() }
                 
                 formatControls()
                 syncControlsFromMaps()
@@ -2557,7 +3215,7 @@ def getCodePreferences( ViewerSessionVars session ) {
         
         specifyReviewAnnosBtn.setOnAction {
             def specifyAnnosDialog = new Dialog<ButtonType>()
-            specifyAnnosDialog.setTitle( "Set annotations to review" )
+            specifyAnnosDialog.setTitle( "Set annotations to review from ${classifierOptions}" )
             
             specifyAnnosDialog.getDialogPane().getButtonTypes().setAll(
                 ButtonType.OK,
@@ -2574,14 +3232,14 @@ def getCodePreferences( ViewerSessionVars session ) {
             
             def frequencySelectorLabel = new Label( "Frequency:" )
             frequencySelectorLabel.setPadding( new Insets( 5 ) )  
-            frequencySelectors.each { it.getItems().setAll( session.frequencies.values() ) }
+            frequencySelectors.each { it.getItems().addAll( session.frequencies.values() ) }
             frequencySelectors.each { it.setValue( it.getUserData() ) }
             String freqSelectorTTtext = "Select the frequency of an annotation being classified a specific state."
             setTT( [frequencySelectorLabel] + frequencySelectors, freqSelectorTTtext )
             
             def stateSelectorLabel = new Label( "State:" )
             stateSelectorLabel.setPadding( new Insets( 5 ) ) 
-            stateSelectors.each { it.getItems().setAll( states ) }
+            stateSelectors.each { it.getItems().addAll( states ) }
             stateSelectors.each { it.setEditable( true ) }
             stateSelectors.each { it.setPromptText( "Type or select" ) }
             stateSelectors.each { it.setValue( it.getUserData() ) }
@@ -2613,6 +3271,15 @@ def getCodePreferences( ViewerSessionVars session ) {
             stateSelectors.eachWithIndex { stateSelector, i ->            
                 stateSelector.valueProperty().addListener { obs, oldVal, newVal ->
                     stateSelector.setValue( newVal ?: oldVal )
+                }
+            }
+            
+            // Letters/numbers only and no more than 15 characters
+            stateSelectors.each { sS ->
+                sS.getEditor().textProperty().addListener { obs, oldVal, newVal ->
+                    if (!newVal.matches( "[A-Za-z0-9]*" ) || newVal.length() > 15) {
+                        sS.getEditor().setText( oldVal )
+                    }
                 }
             }
             
@@ -2834,7 +3501,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             
             // Setting classification states, order, and colors
             def savedStates = pMap.statesAndColors?.state
-            lockedStateOrder = savedStates ? savedStates.unique() : defaultStateOrder
+            lockedStateOrder = savedStates ? savedStates.unique() : defaultStateOrderAndConfirmedColors.keySet()
             
             def missingStates = lockedStateOrder.findAll { !(it in states) }
             if (missingStates) {
@@ -2847,7 +3514,7 @@ def getCodePreferences( ViewerSessionVars session ) {
                 lockedConfirmedColors[ stateName ] =
                     savedColor instanceof Number ?
                         intToFx( savedColor as int ) :
-                        (defaultConfirmedColors[ stateName ] ?: Color.GRAY)
+                        (defaultStateOrderAndConfirmedColors[ stateName ] ?: Color.GRAY)
             }
             
             def savedUnconfirmed = pMap.statesAndColors?[0]?.colorU
@@ -2868,13 +3535,15 @@ def getCodePreferences( ViewerSessionVars session ) {
             
             rebuildStateColorMap()
             
-            if (pMap.size() > 1L) {
-                if (nonUpdatedPrefs.isEmpty()) {
-                    Dialogs.showInfoNotification( "", "Successfully updated preferences." )
-                
-                } else {
-                    String notification = nonUpdatedPrefs.collect { "  - $it" }.join( "\n" )
-                    Dialogs.showWarningNotification( "", "UNABLE TO UPDATE: \n${notification}" )
+            if (firstPrompt) {
+                if (pMap.size() > 1L) {
+                    if (nonUpdatedPrefs.isEmpty()) {
+                        Dialogs.showInfoNotification( "", "Successfully updated preferences." )
+                    
+                    } else {
+                        String notification = nonUpdatedPrefs.collect { "  - $it" }.join( "\n" )
+                        Dialogs.showWarningNotification( "", "UNABLE TO UPDATE: \n${notification}" )
+                    }
                 }
             }
         }
@@ -2896,7 +3565,7 @@ def getCodePreferences( ViewerSessionVars session ) {
             List recentClassifyingNames = classifyingNameOptions = ([classifyingName] + classifyingNameOptions).unique().take( 5 )
             def gridSizeText            = gridSizeField.getText().trim()
             def gridSize                = Integer.parseInt( gridSizeText )
-            boolean instructions        = prePrefsMap.instructions
+            boolean instructions        = prePrefsMap.instructions != null ? prePrefsMap.instructions : true
             
             // Reviewer annotation preferences
             def reviewStateFreqs = []
@@ -3018,10 +3687,13 @@ def getCodePreferences( ViewerSessionVars session ) {
 // === GETTING AND CHECKING USER PREFERENCES ===
 Map codePreferences
 
+boolean firstPrompt = true
+
 preferencesLoop:
 while (true) {
     // Collect user preferences
-    codePreferences = getCodePreferences( session )
+    codePreferences = getCodePreferences( session, firstPrompt )
+    firstPrompt = false
     
     // Writing full project matrix + image matrix to external file to "remember" prefs in project
     if (codePreferences != null) {    
@@ -3035,8 +3707,9 @@ while (true) {
     session.classifiers         = codePreferences.classifiers
     session.reviewers           = codePreferences.reviewers
     session.classifyingName     = codePreferences.classifyingName // Name of disease/marker being classified (for metadata)
-    session.userKey             = generateMdKey( session, session.userName, session.classifyingName )
-    session.classifierKeys      = session.classifiers.collect { generateMdKey( session, it, session.classifyingName ) } 
+    String modeKey              = session.classifierMode ? ActionStrings.CLASSIFIER_MODE : ActionStrings.REVIEWER_MODE
+    session.userKey             = generateUserKey( session, modeKey, session.userName )
+    session.classifierKeys      = session.classifiers.collect { generateUserKey( session, ActionStrings.CLASSIFIER_MODE, it ) } 
     session.checkingWork        = codePreferences.checkingWork // Set if the user is going back over their completed classifications
     session.toggleChannels      = codePreferences.selectedChannels // Channels to toggle for analysis (keep number of channels low)
     session.annoClass           = codePreferences.annoClass // Class of annotations to review
@@ -3056,14 +3729,14 @@ while (true) {
     session.lastMessage       = ""
     session.lastMessageTime   = 0
     
-    Dialogs.showInfoNotification( "", "User: ${session.userName}" )
+    Dialogs.showInfoNotification( "", (session.classifierMode ? "Classifier:" : "Reviewer:") + " ${session.userName}" )
     
     
     // --- Generating image list for auto switching ---
     def random = new Random()
     List imageList = project.getImageList()
     List randomImages = imageList.shuffled( random )
-    def currentEntry = currentImageData ? project.getEntry( currentImageData ) : null
+    session.currentEntry = currentImageData ? project.getEntry( currentImageData ) : null
     List imageOrder = session.checkingWork ? imageList : randomImages // If classifying: random order of images. If checking work: normal order to not lose place.
     
     
@@ -3079,97 +3752,118 @@ while (true) {
     
     
     // --- Checking image viability ---
+    def problemImageLists = []
+    
     def notFullyClassifiedImages = []
+    problemImageLists << notFullyClassifiedImages
     def fullyClassifiedImages = []
+    problemImageLists << fullyClassifiedImages
     def userIncompleteImages = []
+    problemImageLists << userIncompleteImages
     def userCompleteImages = []
+    problemImageLists << userCompleteImages
     def imagesWithoutAnnos = []
+    problemImageLists << imagesWithoutAnnos
     def imagesWithNoReviewableAnnos = []  
+    problemImageLists << imagesWithNoReviewableAnnos
     def usersWithIncompleteClassifications = [] as LinkedHashSet
     def incompleteUsersByImage = [:].withDefault { [] as LinkedHashSet }
     
-    for (image in imageOrder) {
-        
-        def imageAnnos = image.readImageData()
-            .getHierarchy()
-            .getAnnotationObjects()
-            .findAll { it.getPathClass()?.getName() == session.annoClass }
-        
-        if (imageAnnos.isEmpty()) {
-            imagesWithoutAnnos << image
-            continue
-        }
-        
-        // Collect which users are missing classifications in reviewer mode
-        def annosMissingClassifierKeys = session.reviewerMode ? imageAnnos.findAll { anno ->
-            session.classifierKeys.any { key -> !anno.getMetadata().containsKey( key ) }
-        } : []
-        
-        annosMissingClassifierKeys.each { anno ->
-            def missingUsers = session.classifierKeys.findAll { key ->
-                !anno.getMetadata().containsKey( key )
-            
-            }.collect { getUserFromKey( it ) }
-            
-            usersWithIncompleteClassifications.addAll( missingUsers )
-            incompleteUsersByImage[ image.getImageName() ].addAll( missingUsers )
-        }
-        
-        boolean anyMissingClassifierKeys = session.reviewerMode && !annosMissingClassifierKeys.isEmpty()
-        
-        boolean anyMissingUserKey = imageAnnos.any { anno ->
-            if (session.reviewerMode) {
-                matchesMdClassification(
-                    anno,
-                    session.reviewerCriteria.all,
-                    session.reviewerCriteria.any,
-                    session.reviewerCriteria.different,
-                    session
-                ) && !containsUserKey( anno, session )
-            } else {
-                !containsUserKey( anno, session )
+    // Parallel checks for speed
+    def nThreads = Math.min( Runtime.getRuntime().availableProcessors() * 2, imageOrder.size() )
+    def pool = Executors.newFixedThreadPool( nThreads )
+    
+    def futures = imageOrder.collect { image ->
+        pool.submit({
+            def imageAnnos = image.readImageData()
+                .getHierarchy()
+                .getAnnotationObjects()
+                .findAll { it.getPathClass()?.getName() == session.annoClass }
+                
+            if (imageAnnos.isEmpty()) {
+                return new ImageCheckResult(image: image, imageName: image.getImageName(), hasNoAnnos: true,
+                    anyMissingClassifierKeys: false, anyMissingUserKey: false, anyUserKey: false,
+                    anyAnnosToCheck: false, missingUsers: [] as Set, incompleteUsersByImage: [:])
             }
-        }
-        
-        boolean anyUserKey = imageAnnos.any { containsUserKey( it, session ) }
-        
-        boolean anyAnnosToCheck = session.reviewerMode ?
-            findAnnosByMdClassification(
-                imageAnnos,
-                all     = session.reviewerCriteria.all,
-                any     = session.reviewerCriteria.any,
-                diff    = session.reviewerCriteria.different,
-                session = session
-            ) : true
             
+            def missingUsers = [] as LinkedHashSet
+            def incompleteByImage = [:].withDefault { [] as LinkedHashSet }
+            def annosMissingClassifierKeys = []
+            
+            if (session.reviewerMode) {
+                imageAnnos.each { anno ->
+                    def missing = session.classifierKeys.findAll { !anno.getMetadata().containsKey( it ) }
+                                                        .collect { getUserFromKey( it ) }
+                    if (missing) {
+                        annosMissingClassifierKeys << anno
+                        missingUsers.addAll( missing )
+                        incompleteByImage[ image.getImageName() ].addAll( missing )
+                    }
+                }
+            }
+            
+            boolean anyMissingUserKey = imageAnnos.any { anno ->
+                if (session.reviewerMode) {
+                    matchesMdClassification(
+                        anno,
+                        session.reviewerCriteria.all,
+                        session.reviewerCriteria.any,
+                        session.reviewerCriteria.different,
+                        session
+                    ) && !containsUserKey( anno, session )
+                } else {
+                    !containsUserKey( anno, session )
+                }
+            }
+            
+            boolean anyUserKey = imageAnnos.any { containsUserKey( it, session ) }
+            
+            boolean anyAnnosToCheck = session.reviewerMode ?
+                findAnnosByMdClassification(
+                    imageAnnos,
+                    all     = session.reviewerCriteria.all,
+                    any     = session.reviewerCriteria.any,
+                    diff    = session.reviewerCriteria.different,
+                    session = session
+                ) : true
+                
+            return new ImageCheckResult(
+                image: image, imageName: image.getImageName(), hasNoAnnos: false,
+                anyMissingClassifierKeys: !annosMissingClassifierKeys.isEmpty(),
+                anyMissingUserKey: anyMissingUserKey, anyUserKey: anyUserKey,
+                anyAnnosToCheck: anyAnnosToCheck,
+                missingUsers: missingUsers, incompleteUsersByImage: incompleteByImage
+            )
+        } as Callable)
+    }
+    pool.shutdown()
+    
+    // Serial merge — order preserved via futures list order
+    futures.each { f ->
+        def r = f.get()
+        if (r.hasNoAnnos) { imagesWithoutAnnos << r.image; return }
         if (session.reviewerMode) {
-            (anyMissingClassifierKeys ? notFullyClassifiedImages : fullyClassifiedImages) << image
+            (r.anyMissingClassifierKeys ? notFullyClassifiedImages : fullyClassifiedImages) << r.image
         }
+        usersWithIncompleteClassifications.addAll( r.missingUsers )
+        r.incompleteUsersByImage.each { k, v -> incompleteUsersByImage[ k ].addAll( v ) }
         
-        if (anyAnnosToCheck) {
-            if (anyMissingUserKey) {
-                userIncompleteImages << image
+        if (r.anyAnnosToCheck) {
+            if (r.anyMissingUserKey) {
+                userIncompleteImages << r.image
             } else {
                 userCompleteImages << [
-                    image     : image,
-                    userInput : anyUserKey
+                    image     : r.image,
+                    userInput : r.anyUserKey
                 ]
             }
         } else {
-            imagesWithNoReviewableAnnos << image
+            imagesWithNoReviewableAnnos << r.image
         }
     }
     
     // --- Collecting images to process ---
     session.imagesToProcess = session.checkingWork ? new ArrayList( userCompleteImages.image ) : new ArrayList( userIncompleteImages )
-    
-    // Setting current image first if needs classification
-    if (currentEntry && !session.imagesToProcess.isEmpty()) {
-        if (currentEntry in session.imagesToProcess) {
-            session.imagesToProcess.remove( currentEntry )
-        }
-        session.imagesToProcess.addFirst( currentEntry )
-    }
     
     // Warning if some images haven't been fully classified and allowing exit
     List warningList = []
@@ -3192,6 +3886,18 @@ while (true) {
                             "Object class: ${session.annoClass}", 
                             "Classifying name: ${session.classifyingName}"]
     
+    // Ordering problem image lists to reflect or of images in project
+    def orderByName = [:]
+    imageList.eachWithIndex { entry, idx ->
+        orderByName[ entry.getImageName() ] = idx
+    }
+    problemImageLists.each { sublist ->
+        sublist.sort { entry ->
+            if (entry instanceof Map) { entry = entry.image }
+            orderByName[ entry.getImageName() ] ?: Integer.MAX_VALUE
+        }
+    }
+    
     // - Creating specific checks + warnings -
     // User completion warnings
     addWarningCheck( [session.reviewerMode, session.checkingWork, userCompleteImages.isEmpty(), !imagesWithNoReviewableAnnos.isEmpty()],
@@ -3199,7 +3905,7 @@ while (true) {
         "User Completion", reviewerCriteriaList )
     addWarningCheck( [session.classifierMode, session.checkingWork, userCompleteImages.isEmpty()],
         "User has not completed any images and cannot check work.",
-        "User Completion" )
+        "User Completion", generalCriteria )
     addWarningCheck( [session.checkingWork, (userIncompleteImages.size() !in [0, imageList.size()])],
         "${userIncompleteImages.size()} image(s) have not been completed by user and cannot be checked.",
         "User Completion", userIncompleteImages )
@@ -3229,7 +3935,7 @@ while (true) {
         
         def exitBtnType      = new ButtonType( "Exit", ButtonBar.ButtonData.CANCEL_CLOSE )
         def continueBtnType  = new ButtonType( "Continue", ButtonBar.ButtonData.OK_DONE )
-        def checkWorkBtnType = new ButtonType( "Review completed annos", ButtonBar.ButtonData.OK_DONE )
+        def checkWorkBtnType = new ButtonType( "Check completed annos", ButtonBar.ButtonData.OK_DONE )
         def backBtnType      = new ButtonType( "Back", ButtonData.BACK_PREVIOUS )
         
         def warningDecision = runOnFxThreadAndWait {
@@ -3316,25 +4022,35 @@ while (true) {
 }
 
 
+// Setting current image first if needs classification
+if (session.currentEntry) {
+    if (session.currentEntry in session.imagesToProcess) {
+        session.imagesToProcess.remove( session.currentEntry )
+    }
+    session.imagesToProcess.addFirst( session.currentEntry )
+}
 
-// Collect preset options to restore after script
+
+// Collect existing viewer settings to restore after script
 session.viewer = getCurrentViewer()
 session.view = session.viewer.getView()
-session.overlayOptions = session.viewer.getOverlayOptions()
-boolean wasGridOn = session.overlayOptions.getShowGrid()
-double gridX = PathPrefs.gridSpacingX.get()
-double gridY = PathPrefs.gridSpacingY.get()
-changeGrid( true, session.gridSize, session.gridSize, session )
-session.oldAnnoThickness = PathPrefs.annotationStrokeThicknessProperty().get()
+viewerSettings.overlayOptions = session.viewer.getOverlayOptions()
+viewerSettings.wasGridOn = viewerSettings.overlayOptions.getShowGrid()
+viewerSettings.oGridX = PathPrefs.gridSpacingX.get()
+viewerSettings.oGridY = PathPrefs.gridSpacingY.get()
+viewerSettings.wasOverviewOn = ViewerPlusDisplayOptions.getSharedInstance().getShowOverview()
+viewerSettings.oldAnnoThickness = PathPrefs.annotationStrokeThicknessProperty().get()
 
-// Adding grid / changing to needed viewer settings
+// Changing viewer settings for run
 Platform.runLater {
+    ViewerPlusDisplayOptions.getSharedInstance().setShowOverview( false )
     PathPrefs.annotationStrokeThicknessProperty().set( 1 )
-    session.overlayOptions.setShowDetections( true )
-    session.overlayOptions.setFillDetections( true )
-    session.overlayOptions.setShowAnnotations( true )
-    session.overlayOptions.setFillAnnotations( false )
-    session.overlayOptions.setOpacity( 1 )
+    changeGrid( viewerSettings, true, session.gridSize, session.gridSize )
+    viewerSettings.overlayOptions.setShowDetections( true )
+    viewerSettings.overlayOptions.setFillDetections( true )
+    viewerSettings.overlayOptions.setShowAnnotations( true )
+    viewerSettings.overlayOptions.setFillAnnotations( false )
+    viewerSettings.overlayOptions.setOpacity( 1 )
 }
 
 
@@ -3350,7 +4066,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     def imageData = getNextImage( currentImage )
     
     // Collect (new) image important data
-    def server = imageData.getServer()
+    session.server = imageData.getServer()
     session.hierarchy = imageData.getHierarchy()
     
     // Get all desired class annotations
@@ -3425,6 +4141,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     // Changing positive annotation colors temporarily if desired
     def BLACK = ColorTools.makeRGB( 000, 000, 000 )
     
+    
     if (session.classifierMode) {
         for (anno : annotations) {
             def value = anno.getMetadata().get( session.userKey )
@@ -3435,13 +4152,13 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
         def nonNeededAnnos = session.allClassAnnos.clone() - annotations
         for (anno : nonNeededAnnos) { anno.setColor( BLACK ) }
     }
+    Platform.runLater { session.viewer.repaintEntireImage() }
+    
+    buildHighlightStatesAndColorsMap( session, session.classifierMode ? [session.userKey] : session.classifierKeys )
     
     // Turning off clicking and scrolling temporarily during the script to be brought back after
-    session.scrollFilterKey = "scrollFilterON"
-    session.scrollBlocker = { ScrollEvent e ->
-        e.consume()  // stops QuPath from zooming
-    } as EventHandler<ScrollEvent>
-    addScrollBlocker( session )
+    addScrollBlocker( session, viewerSettings )   
+    addHoverFilter( session, viewerSettings )
     
     // Establishing/storing important variables
     @Field int numTrues
@@ -3455,8 +4172,8 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     boolean firstLoop = true
     
     
-    resetSelection()
-    session.pixelSize = server.getPixelCalibration().getAveragedPixelSizeMicrons()
+    Platform.runLater { resetSelection() }
+    session.pixelSize = session.server.getPixelCalibration().getAveragedPixelSizeMicrons()
     
     
     def sortedBins = []
@@ -3472,13 +4189,13 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
         def alert = null
         runOnFxThreadAndWait {
             alert = new Alert( AlertType.NONE )
-            alert.setX( dialogOffsetX )
-            alert.setY( dialogOffsetY )
+            alert.setX( 0 )
+            alert.setY( 0 )
             alert.initModality( Modality.NONE )
         
             // Pass queue in so buttons put results instead of closing
-            buildAndWireAlertUI( alert, session, uiElements, queue )
-            updateUI( alert, session, uiElements, queue )
+            buildControlPanel( alert, session, uiElements, viewerSettings, queue )
+            updateControlPanel( alert, session, uiElements, viewerSettings, queue )
         
             alert.show()
             
@@ -3488,9 +4205,14 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
             window.focusedProperty().addListener { obs, wasFocused, isFocused ->
                 if (!isFocused) { window.requestFocus() }
             }
+            
+            // Get and stash the right edge of alert for reference
+            session.alertRightEdge = window.getX() + window.getWidth()
         }
         
-        // --- FOR NON-REVIEWER MODE: BIN CLASSIFICATIONS ---
+        
+        
+        // --- CLASSIFIER MODE: BIN CLASSIFICATIONS ---
         if (session.classifierMode) {
             
             // Bin setup
@@ -3503,10 +4225,9 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 def binKey = [binX, binY]
                 binMap[ binKey ] << anno
             }
-            sortedBins = binMap.keySet().sort { a, b -> a[0] <=> b[0] ?: a[1] <=> b[1] }
+            sortedBins = binMap.keySet().sort { a, b -> a[1] <=> b[1] ?: a[0] <=> b[0] }
             
             // Storing classification data
-            session.annoStateMap = [:]
             for (anno : annotations) {
                 def value = anno.getMetadata().get( session.userKey )
                 value ? session.annoStateMap.put( anno, value ) : session.annoStateMap.put( anno, session.statesAndColors[0].state )
@@ -3517,9 +4238,11 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 
                 def binKey = sortedBins[ binIndex ]
                 def group = binMap[ binKey ]
+                session.hoverAnnos = group
                 
                 // Checking if annotations need classification (skipping if they do not)
-                if (!session.checkingWork && firstLoop && group.every { it.getMetadata().containsKey( session.userKey ) }) continue
+                session.groupDone = group.every { containsUserKey( it, session ) }
+                if (!session.checkingWork && firstLoop && session.groupDone) continue
                 
                 // If wanted, classifed annos out of view will be filled (using detections)
                 def detObjs = session.hierarchy.getDetectionObjects()
@@ -3561,34 +4284,41 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 
                 // Calcualating bin coordinates for viewer centering
                 double binX = (session.gridSize / session.pixelSize) * (binKey[0] + 0.5)
-                double binY = (session.gridSize / session.pixelSize) * (binKey[1] + 0.5)
+                double binY = (session.gridSize / session.pixelSize) * (binKey[1] + 0.5)            
+                double adjustedX = adjustX( session, session.gridSize, session.gridSize, binX )
                 
                 // Focus viewer on group
-                changeViewer( binX, binY, session.gridSize, session.gridSize, true, session )
+                changeViewer( adjustedX, binY, session.gridSize, session.gridSize, true, session, null ) {
+                    nonFreeViewerState = saveViewerState(session)
+                }
+                
+                // Remember current viewer state for changes
+                nonFreeViewerState = saveViewerState( session )
                 
                 // --- Loop if adjusting settings without moving to next group ---
                 annoGroupLoop:
                 while (true) { 
                     
+                    session.groupDone = group.every { containsUserKey( it, session ) }
+                    
                     // Updating control panel
                     Platform.runLater {
                         alert.setTitle(!session.freeView ?
-                            "Group ${binIndex + 1} of ${sortedBins.size()} — ${session.userName}" :
+                            "Classify group ${binIndex + 1}/${sortedBins.size()} — ${session.userName}" :
                             "Free View")
                             
-                            updateUI( alert, session, uiElements, queue )
+                            updateControlPanel( alert, session, uiElements, viewerSettings, queue )
                     }
                     
-                    def result = queue.take()
+                    session.UI_COMMAND = queue.take()
                     
                     
                     // -- Checking/acting on user response --
-                    switch (result) {
+                    switch (session.UI_COMMAND) {
                         
                         case (ActionStrings.CANCEL):
                             runOnFxThreadAndWait { alert.getDialogPane()?.getScene()?.getWindow()?.hide() }
-                            restoreToPrescript( session )
-                            changeGrid( wasGridOn, gridX, gridY, session )
+                            restoreToPrescript( session, viewerSettings )
                             codePreferences.instructions = session.instructions
                             writePreferencesMaptoJSON( session.prefsFile, codePreferences )
                             return
@@ -3608,30 +4338,27 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                             break
                             
                         case (ActionStrings.TOGGLE_FOCUS): // Looking for annotation mouse is over
-                            List toggleableAnnos = session.freeView ? annotations : group
-                            toggleFocus( session, toggleableAnnos )  
+                            toggleFocus( session )  
                             break
                             
                         case (ActionStrings.TOGGLE_CLASS):
-                            def mouseCoords = getCursorPosition( session )
-                            for (anno in group) {
-                                def roi = anno.getROI()
-                                
-                                // Check if the mouse point lies inside the selected ROI
-                                if (roi.contains( mouseCoords.x, mouseCoords.y )) {
-                                    changeClassification( anno, session )
-                                    break
-                                }
+                            if (session.hoveredAnno) {
+                                changeClassification( session.hoveredAnno, session )
                             }
                             break
                             
                         case (ActionStrings.TOGGLE_ANNOS): // Toggling annotations on or off
-                            getAnnosVisibilityStatus( session ) ? 
+                            getAnnosVisibilityStatus( viewerSettings ) ? 
                                 session.prevSelectedAnnos = getSelectedObjects().collect { it } : 
-                                selectObjects( session.prevSelectedAnnos )
-                            toggleAnnos( session )
+                                Platform.runLater { selectObjects( session.prevSelectedAnnos ) }
+                            toggleAnnos( viewerSettings )
                             break
                        
+                        case (ActionStrings.TOGGLE_GRID): // Toggles grid on or off
+                            boolean gridOn = viewerSettings.overlayOptions.getShowGrid()
+                            changeGrid( viewerSettings, !gridOn )
+                            break
+                        
                         case (ActionStrings.TOGGLE_CHANNEL): // Toggles channel of interest or remembers for changing brightness (if turned off, finds first one that's on)
                             def channelToToggle = session.channelSpecifics.find { it.name == session.toggleChannel }?.channel
                             toggleChannel( channelToToggle, session )
@@ -3661,6 +4388,8 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                 anno.setColor ( session.statesAndColors[0].colorU )
                             }
                             Platform.runLater { session.viewer.repaintEntireImage() }
+                            
+                            buildHighlightStatesAndColorsMap( session, [session.userKey] )
                             break
                         
                         case (ActionStrings.TOGGLE_FREE_VIEW):
@@ -3668,37 +4397,57 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                             
                             Platform.runLater {
                                 if (session.freeView) {
+                                    buildHighlightStatesAndColorsMap( session, [session.userKey] )
+                                    
                                     // Storing existing colors for anno before any change
                                     session.allClassAnnos.each { session.currentAnnoColorsMap[ it ] = it.getColor() }
+                                    
+                                    // Defining which annos can be focused on
+                                    session.hoverAnnos = session.allClassAnnos
                                     
                                     // Getting/generating/setting colors of different anno classifications
                                     colorAnnosFromMap( session, [session.userKey] )
                                     
-                                    session.overlayOptions.setShowDetections( false )
-                                    session.overlayOptions.setShowGrid( false )
+                                    viewerSettings.overlayOptions.setShowDetections( false )
+                                    viewerSettings.overlayOptions.setShowAnnotations( true )
+                                        
                                     session.prevSelectedAnnos = getSelectedObjects().collect { it }
                                     session.hierarchy.getSelectionModel().clearSelection()
-                                    nonFreeViewerState = saveViewerState( session )
-                                    session.viewer.zoomToFit()
-                                    removeScrollBlocker( session )
+                                    
+                                    double sWidth = session.server.getWidth()
+                                    double sHeight = session.server.getHeight()
+                                    session.server.getMetadata().getMagnification()
+                                    changeViewer( sWidth/2, sHeight/2, sWidth/1.4, sHeight/1.4, false, session )
+                                    
+                                    removeScrollBlocker( session, viewerSettings )
                                     
                                 } else {
+                                    addScrollBlocker( session, viewerSettings )
+                                    
+                                    // Defining which annos can be focused on
+                                    session.hoverAnnos = group
                                     
                                     restoreViewerState( nonFreeViewerState, session )
-                                    session.overlayOptions.setShowDetections( true )
-                                    session.overlayOptions.setShowGrid( true )
-                                    session.overlayOptions.setOpacity( 1 )
+                                    
+                                    viewerSettings.overlayOptions.setShowDetections( true )
+                                    viewerSettings.overlayOptions.setShowAnnotations( true )
+                                        
+                                    changeGrid( viewerSettings, true )
+                                    
                                     session.freeViewMode = session.freeViewModes[0]
-                                    session.allClassAnnos.each { it.setColor( session.currentAnnoColorsMap[ it ] ) }                        
+                                    session.allClassAnnos.each { it.setColor( session.currentAnnoColorsMap[ it ] ) }
+                                    
                                     selectObjects( session.prevSelectedAnnos )
-                                    addScrollBlocker( session )
+                                    
                                     session.zoomed = false
                                 }
+                                
+                                session.viewer.repaintEntireImage()
                             }
                             break
                             
                         case (ActionStrings.SWITCH_FREE_VIEW_MODE):
-                            switchFVmode( session )
+                            switchFVmode( session, viewerSettings )
                             break
                         
                         case (ActionStrings.NEXT): // Updating classifications after each group
@@ -3706,6 +4455,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                 def state = session.annoStateMap.get( anno )
                                 anno.getMetadata().put( session.userKey, state )
                             }
+                            
                             break annoGroupLoop
                     }
                     firstLoop = false
@@ -3734,21 +4484,26 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                     anno.setColor( session.statesAndColors.find { it.state == value }.color )
                 }
             }
+            Platform.runLater { session.viewer.repaintEntireImage() }
             
             // Individual annotation review
             for (int annoIndex = setAnnoIndex; annoIndex < annotations.size(); annoIndex++) {
                 
                 def annotation = annotations[ annoIndex ]
                 
+                // Defining which annos can be focused on (when applicable)
+                session.hoverAnnos = session.allClassAnnos
+                
                 // Skipping to annotations that needs review if others alrady have been
-                if (firstLoop && annotation.getMetadata().containsKey( session.userKey )) continue
+                if (firstLoop && containsUserKey( annotation, session )) continue
                 
                 Platform.runLater { session.viewer.repaintEntireImage() }
                 
                 // Focusing on specific annotation
-                def roi = annotation.getROI()
-                changeViewer( roi.getCentroidX(), roi.getCentroidY(), roi.getBoundsWidth() * 2, roi.getBoundsHeight() * 2, false, session )
-                selectObjects( annotation )
+                def roi = annotation.getROI()       
+                double adjustedX = adjustX( session, roi.getBoundsWidth(), roi.getBoundsHeight(), roi.getCentroidX() )         
+                changeViewer( adjustedX, roi.getCentroidY(), roi.getBoundsWidth() * 2, roi.getBoundsHeight() * 2, false, session )
+                Platform.runLater { selectObjects( annotation ) }
                 
                 // --- Loop if adjusting settings without moving to next group ---
                 annoLoop:
@@ -3757,21 +4512,20 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                     // Updating control panel
                     Platform.runLater {
                         alert.setTitle( !session.freeView ? 
-                            "Annotation ${annoIndex + 1} of ${annotations.size()} — ${session.userName}" :
+                            "Review anno ${annoIndex + 1}/${annotations.size()} — ${session.userName}" :
                             "Free View" )
                     
-                        updateUI( alert, session, uiElements, queue )
+                        updateControlPanel( alert, session, uiElements, viewerSettings, queue )
                     }
                     
-                    def result = queue.take()
+                    session.UI_COMMAND = queue.take()
                     
                     // -- Checking/acting on user response --
-                    switch (result) {
+                    switch (session.UI_COMMAND) {
                         
                         case (ActionStrings.CANCEL): // If cancelled, puts back previous settings
                             runOnFxThreadAndWait { alert.getDialogPane()?.getScene()?.getWindow()?.hide() }
-                            restoreToPrescript( session )
-                            changeGrid( wasGridOn, gridX, gridY, session )
+                            restoreToPrescript( session, viewerSettings )
                             codePreferences.instructions = session.instructions
                             writePreferencesMaptoJSON( session.prefsFile, codePreferences )
                             return
@@ -3790,10 +4544,15 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                 break
                             }
                         case (ActionStrings.TOGGLE_ANNOS): // Toggling annotations on or off
-                            getAnnosVisibilityStatus( session ) ? 
+                            getAnnosVisibilityStatus( viewerSettings ) ? 
                                 session.prevSelectedAnnos = getSelectedObjects().collect { it } : 
-                                selectObjects( session.prevSelectedAnnos )
-                            toggleAnnos( session )
+                                Platform.runLater { selectObjects( session.prevSelectedAnnos ) }
+                            toggleAnnos( viewerSettings )
+                            break
+                        
+                        case (ActionStrings.TOGGLE_GRID): // Toggles grid on or off
+                            boolean gridOn = viewerSettings.overlayOptions.getShowGrid()
+                            changeGrid( viewerSettings, !gridOn )
                             break
                         
                         case (ActionStrings.TOGGLE_CHANNEL): // Toggles channel of interest or remembers for changing brightness (if turned off, finds first one that's on)
@@ -3809,15 +4568,15 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                 session.channelToChange = brightnessChannelState ? session.channelToChange : backupChannel
                             }
                             break
-                        
+                            
                         case (ActionStrings.BRIGHT_UP):
                             changeBrightness( "UP", session )
                             break
-                        
+                            
                         case (ActionStrings.BRIGHT_DOWN):
                             changeBrightness( "DOWN", session )
                             break
-                        
+                            
                         case (ActionStrings.TOGGLE_FREE_VIEW):
                             session.freeView = !session.freeView
                             
@@ -3833,38 +4592,47 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     
                                     session.prevSelectedAnnos = getSelectedObjects().collect { it }
                                     session.hierarchy.getSelectionModel().clearSelection()
-                                    session.viewer.zoomToFit()
-                                    session.overlayOptions.setShowGrid( false )
-                                    removeScrollBlocker( session )
+                                    
+                                    double sWidth = session.server.getWidth()
+                                    double sHeight = session.server.getHeight()
+                                    session.server.getMetadata().getMagnification()
+                                    changeViewer( sWidth/2, sHeight/2, sWidth/1.4, sHeight/1.4, false, session )
+                                    
+                                    viewerSettings.overlayOptions.setShowAnnotations( true )
+                                    
+                                    removeScrollBlocker( session, viewerSettings )
                                     
                                 } else {
+                                    addScrollBlocker( session, viewerSettings )
                                     
                                     restoreViewerState( nonFreeViewerState, session )
-                                    session.overlayOptions.setOpacity( 1 )
                                     session.freeViewMode = session.freeViewModes[0]
                                     session.allClassAnnos.each { it.setColor( session.currentAnnoColorsMap[ it ] ) }                          
                                     selectObjects( session.prevSelectedAnnos )
-                                    session.overlayOptions.setShowGrid( true )
-                                    addScrollBlocker( session )
+                                    changeGrid( viewerSettings, true )
+                                    
+                                    viewerSettings.overlayOptions.setShowAnnotations( true )
                                 }
+                                
+                                session.viewer.repaintEntireImage()
                             }
                             break
                         
                         // Switch scroll mode in free view between zoom and brightness
                         case (ActionStrings.SWITCH_FREE_VIEW_MODE):
-                            switchFVmode( session )
+                            switchFVmode( session, viewerSettings )
                             break
                         
                         // Zoom in on specific annotation
                         case (ActionStrings.TOGGLE_FOCUS):
-                            toggleFocus( session, session.allClassAnnos )                 
+                            toggleFocus( session )                 
                             break
                         
                         case (ActionStrings.SET_CLASS ):
                             def md = annotation.getMetadata()
                             String setClass = session.reviewerClassification
                             md.put( session.userKey, setClass )
-                            annotation.setColor( session.statesAndColors.find { it.state == setClass }.color )
+                            annotation.setColor( session.statesAndColors.find { it.state == setClass }?.color )
                             break annoLoop
                     }
                     firstLoop = false
@@ -3887,10 +4655,9 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
             alert.setHeaderText( null )
             alert.setContentText( "Save classifications and move to next image?" )
             
-            // Customize buttons to Yes and No only
+            // Customize buttons to based on if user inupt
             boolean anyFinishedImageAnnos = session.allClassAnnos.any { anno ->
-                boolean hasUserKey = anno.getMetadata().containsKey( session.userKey )
-                return hasUserKey
+                return containsUserKey( anno, session )
             }
             if (annotations.isEmpty() && !anyFinishedImageAnnos) {
                 alert.getButtonTypes().setAll( ButtonType.YES, ButtonType.NO )
@@ -3910,8 +4677,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
         // If next image wanted, saving changes and changing image
         switch (moveToNextImage) {
             case (ActionStrings.YES):
-                restoreToPrescript( session )
-                changeGrid( wasGridOn, gridX, gridY, session )
+                restoreToPrescript( session, viewerSettings )
                 codePreferences.instructions = session.instructions
                 writePreferencesMaptoJSON( session.prefsFile, codePreferences )
                 
@@ -3923,8 +4689,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
             
             // Stopping script and resetting colors if not
             case (ActionStrings.NO):
-                restoreToPrescript( session )
-                changeGrid( wasGridOn, gridX, gridY, session )
+                restoreToPrescript( session, viewerSettings )
                 codePreferences.instructions = session.instructions
                 writePreferencesMaptoJSON( session.prefsFile, codePreferences )
                 return
@@ -3959,15 +4724,16 @@ runOnFxThreadAndWait {
 // --- Importing packages ---
 import groovy.transform.Field
 
+import java.awt.AWTEvent
+import java.awt.event.AWTEventListener
 import java.awt.MouseInfo
 import java.awt.geom.Point2D
 import java.awt.Color as AwtColor
+import java.nio.file.Files
 import java.util.Collections
 import javafx.util.StringConverter
-import java.util.concurrent.CountDownLatch
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.*
+import java.util.concurrent.atomic.*
 
 import javafx.animation.AnimationTimer
 import javafx.animation.PauseTransition
@@ -3993,6 +4759,7 @@ import qupath.lib.common.ColorTools
 import qupath.lib.gui.tools.IconFactory
 import qupath.lib.gui.viewer.QuPathViewer
 import qupath.lib.gui.viewer.QuPathViewerListener
+import qupath.lib.gui.viewer.ViewerPlusDisplayOptions
 
 import javafx.beans.binding.Bindings
 

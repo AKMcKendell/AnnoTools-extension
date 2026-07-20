@@ -1,6 +1,7 @@
 package qupath.ext.annotools
 
 import javafx.application.Platform
+import javafx.scene.Cursor
 import javafx.scene.control.*
 import javafx.scene.layout.HBox
 import javafx.geometry.Pos
@@ -137,11 +138,28 @@ class AnnoToolsExtension implements QuPathExtension {
                             return
                         }
 
+                        def scene = qupath.getStage().getScene()
+                        Platform.runLater { scene.setCursor( Cursor.WAIT ) }
+
+                        // Reset cursor when the script UI appears (stage loses focus)
+                        def listener
+                        listener = { obs, oldVal, newVal ->
+                            if (!newVal) {
+                                Platform.runLater { scene.setCursor( Cursor.DEFAULT ) }
+                                qupath.getStage().focusedProperty().removeListener( listener )
+                            }
+                        } as javafx.beans.value.ChangeListener
+                        qupath.getStage().focusedProperty().addListener( listener )
+
                         def runner = new Thread({
                             try {
                                 qupath.runScript( file, null )
                             } catch ( Throwable t ) {
                                 t.printStackTrace()
+                                Platform.runLater { 
+                                    scene.setCursor( Cursor.DEFAULT )
+                                    qupath.getStage().focusedProperty().removeListener( listener )
+                                }
                             }
                         } as Runnable, "Run-${file.name}")
 
@@ -179,11 +197,28 @@ class AnnoToolsExtension implements QuPathExtension {
                             return
                         }
 
+                        def scene = qupath.getStage().getScene()
+                        Platform.runLater { scene.setCursor( Cursor.WAIT ) }
+
+                        // Reset cursor when the script UI appears (stage loses focus)
+                        def listener
+                        listener = { obs, oldVal, newVal ->
+                            if (!newVal) {
+                                Platform.runLater { scene.setCursor( Cursor.DEFAULT ) }
+                                qupath.getStage().focusedProperty().removeListener( listener )
+                            }
+                        } as javafx.beans.value.ChangeListener
+                        qupath.getStage().focusedProperty().addListener( listener )
+
                         def runner = new Thread({
                             try {
                                 qupath.runScript( file, null )
                             } catch ( Throwable t ) {
                                 t.printStackTrace()
+                                Platform.runLater { 
+                                    scene.setCursor( Cursor.DEFAULT )
+                                    qupath.getStage().focusedProperty().removeListener( listener )
+                                }
                             }
                         } as Runnable, "Run-${file.name}")
 

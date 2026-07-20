@@ -43,6 +43,8 @@ def setTT( objs, String tooltip ) {
 def createProgressWindow( String title, int totalImages ) {
     return runOnFxThreadAndWait {
         def stage = new Stage()
+        stage.setMinWidth( 350 )
+        stage.setResizable( false )
         stage.setTitle( title )
         
         def stepLabel = new Label()
@@ -64,15 +66,15 @@ def createProgressWindow( String title, int totalImages ) {
         def imageRow = new HBox( 5, imageLabel )
         
         def bar = new ProgressBar( 0.0 )
-        bar.setPrefWidth( 350 )
-        def barRow = new HBox( 10, bar )     
+        def barRow = new HBox( 10, bar )  
         
-        def cancelBtn = new Button( "Cancel" )
-        cancelBtn.setDisable( false )
+        def stopBtn = new Button( "Stop" )
+        def stopNowInsteadBtn = new Button( "Stop now" )
+        stopBtn.setDisable( false )
         def spacer = new Region()
         HBox.setHgrow( spacer, Priority.ALWAYS )
         def timerLabel = new Label( "Elapsed: 00:00:00" )       
-        def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
+        def bottomRow = new HBox( 10, stopBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
         List rows = [stepRow, imageRow, barRow, bottomRow]
@@ -96,6 +98,24 @@ def createProgressWindow( String title, int totalImages ) {
             node.widthProperty().addListener { obs, old, nw -> updateMinWidth() }
         }
         
+        // Progress bar fills row width
+        bar.setMaxWidth( Double.MAX_VALUE )
+        HBox.setHgrow( bar, Priority.ALWAYS )
+        
+        // Stage grows (never shrinks) to fit widest row
+        def updateStageWidth = {
+            Platform.runLater {
+                double maxRowPref = rows.collect { it.prefWidth(-1) }.max()
+                double needed = maxRowPref + vbox.getPadding().getLeft() + vbox.getPadding().getRight()
+                if ( needed > Math.max( stage.getMinWidth(), 0 ) ) {
+                    stage.setMinWidth( needed )
+                }
+            }
+        }
+        [ stepNum, stepMax, stepName, stepPer, imageNum, imageName ].each { prop ->
+            prop.addListener { obs, old, nw -> updateStageWidth() }
+        }
+        
         def scene = new Scene( vbox )
         stage.setScene( scene )
         
@@ -105,6 +125,7 @@ def createProgressWindow( String title, int totalImages ) {
         }
         stage.initModality( Modality.WINDOW_MODAL )
         stage.show()
+        updateStageWidth()
         
         def startTime = System.nanoTime()
         
@@ -128,19 +149,61 @@ def createProgressWindow( String title, int totalImages ) {
         timeline.play()
         
         // Signal to cancel script
-        def cancelFlag = new java.util.concurrent.atomic.AtomicBoolean( false )
-        def cancelUpdateLabel = new Label( "Cancelling after image..." )
-        cancelUpdateLabel.setPadding( new Insets( 4 ) )
-        cancelBtn.setOnAction {
-            bottomRow.getChildren().set(
-                bottomRow.getChildren().indexOf( cancelBtn ), cancelUpdateLabel
-            )
-            cancelFlag.set( true )
+        def stopNowFlag   = new AtomicBoolean( false )
+        def stopLaterFlag = new AtomicBoolean( false )
+        
+        def stopNowLabel = new Label( "Stopping after operation..." )
+        stopNowLabel.setPadding( new Insets( 4 ) )
+        def stopLaterLabel = new Label( "Stopping after image..." )
+        stopLaterLabel.setPadding( new Insets( 4 ) )
+        
+        def poolRef = new AtomicReference( null )
+
+        def showStopConfirmation = {
+            // Preventing a double show
+            if (stopNowFlag.get() || stopLaterFlag.get()) { return }
+            
+            def alert = new Alert( Alert.AlertType.CONFIRMATION )
+            alert.setTitle( "Stop confirmation" )
+            alert.setHeaderText( "Stop processing?" )
+            alert.initOwner( stage )
+            
+            alert.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.YES, ButtonType.CANCEL )
+            def stopAfterImageBtn = alert.getDialogPane().lookupButton( ButtonType.OK )
+            def stopNowBtn        = alert.getDialogPane().lookupButton( ButtonType.YES )
+            def backBtn           = alert.getDialogPane().lookupButton( ButtonType.CANCEL )
+            stopAfterImageBtn.setText( "Stop after image" )
+            stopNowBtn.setText( "Stop now" )
+            backBtn.setText( "Back" )
+            
+            def response = alert.showAndWait().orElse( null )
+            
+            if (response == ButtonType.YES) {
+                stopNowFlag.set( true )
+                bottomRow.getChildren().set( 0, stopNowLabel ) 
+                poolRef.get()?.shutdownNow()
+            
+            } else if (response == ButtonType.OK) {
+                stopLaterFlag.set( true )
+                bottomRow.getChildren().set( 0, stopLaterLabel )
+                bottomRow.getChildren().add( 1, stopNowInsteadBtn )
+            }
+        }
+
+        stopBtn.setOnAction {
+            showStopConfirmation()
         }
         stage.setOnCloseRequest { evt ->
-            cancelFlag.set( true )
+            evt.consume()
+            showStopConfirmation()
         }
-        
+        stopNowInsteadBtn.setOnAction {
+            stopNowFlag.set( true )
+            bottomRow.getChildren().set( 0, stopNowLabel )
+            bottomRow.getChildren().remove( 1 )
+            poolRef.get()?.shutdownNow()
+        }
+
         return [
             stage        : stage,
             stepNum      : stepNum,
@@ -150,7 +213,9 @@ def createProgressWindow( String title, int totalImages ) {
             imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            cancelFlag   : cancelFlag
+            stopNowFlag  : stopNowFlag,
+            stopLaterFlag: stopLaterFlag,
+            poolRef      : poolRef
         ]
     }
 }
@@ -196,7 +261,7 @@ def fillAnnoHoles( List annoGeoms ) {
             }
             filledGeom = geomFactory.createMultiPolygon( polys as Polygon[] )
         } else {
-            filledGeom = annoGeom // fallback
+            filledGeom = toPolygonGeometry( annoGeom ) // fallback
         }    
         filledGeomsList << filledGeom
     }    
@@ -232,9 +297,9 @@ def cleanForROI( Geometry g_clean ) {
     if (g_clean == null || g_clean.isEmpty()) {
         return g_clean?.getFactory()?.createPolygon()
     }
-
+    
     def cleaned = toPolygonGeometry( g_clean )
-
+    
     if (cleaned == null || cleaned.isEmpty()) {
         return g_clean.getFactory().createPolygon()
     }
@@ -242,8 +307,33 @@ def cleanForROI( Geometry g_clean ) {
     if (!cleaned.isValid()) {
         cleaned = cleaned.buffer( 0 ) // fallback only
     }
-
+    
     return cleaned
+}
+
+// Function to simplify geometry for speed based on passed max vertices
+def simplifyGeom( Geometry g_simple, int targetMaxPoints = 1000 ) {
+    int pts = g_simple.getNumPoints()
+    if (pts <= targetMaxPoints) { return g_simple }
+    def env = g_simple.getEnvelopeInternal()
+    double diag = Math.sqrt( env.getWidth()**2 + env.getHeight()**2 )
+    double tol = diag / targetMaxPoints
+    def result = TopologyPreservingSimplifier.simplify( g_simple, tol )
+    return result.isValid() ? result : result.buffer( 0 )
+}
+
+// Function to break shape into parts if multiple in a mask (speeds up processing)
+def bufferGeom( Geometry g_buff, double dist, bufParams ) {
+    int n = g_buff.getNumGeometries()
+    if (n <= 1) { return BufferOp.bufferOp( g_buff, dist, bufParams ) }
+    def parts = (0..<n).collect { g_buff.getGeometryN( it ) }
+    def buffered = parts.parallelStream()
+        .map { part ->
+            def b = BufferOp.bufferOp( part, dist, bufParams )
+            return b.isValid() ? b : b.buffer( 0 )
+        }
+        .collect( java.util.stream.Collectors.toList() )
+    return toPolygonGeometry( CascadedPolygonUnion.union( buffered ) )
 }
 
 // Function: Make a checkbox that selects/deselects all checkboxes
@@ -281,7 +371,6 @@ def addIcon( node, iconCode, int size ) {
     node.setGraphic( icon )
 }
 
-
 // Function: Make a box with checkboxes and a modifiable header
 def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0 ) {
     
@@ -312,7 +401,46 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     def selectAllCB = makeSelectAllCB( checkboxes )
     
     def scrollPane = new ScrollPane( checkboxContainer )
-    scrollPane.setFitToWidth( true )
+    VBox.setVgrow( scrollPane, Priority.ALWAYS )
+    
+    
+    // Making scrollpane slide back to left if horizontally scrollable
+    Platform.runLater {
+        def hBar = scrollPane.lookupAll( ".scroll-bar" )
+            .find { it instanceof ScrollBar && it.orientation == Orientation.HORIZONTAL }
+            
+        if (hBar.isVisible()) {
+            def snapBack = new PauseTransition( Duration.millis( 300 ) )
+            snapBack.setOnFinished {
+                new Timeline(
+                    new KeyFrame(
+                        Duration.millis( 200 ),
+                        new KeyValue( scrollPane.hvalueProperty(), 0, Interpolator.EASE_BOTH )
+                    )
+                ).play()
+            }
+            
+            scrollPane.addEventFilter( ScrollEvent.SCROLL ) { e ->
+                if (Math.abs( e.deltaX ) > 0 || e.isShiftDown()) {
+                    def delta = (e.deltaX != 0 ? e.deltaX : e.deltaY)
+                    def sensitivity = 250.0
+                    def newValue = scrollPane.hvalue - (delta / sensitivity)
+                    scrollPane.hvalue = Math.max( 0, Math.min( 1, newValue ) )
+                    e.consume()
+                }
+            }
+            
+            scrollPane.addEventFilter( ScrollEvent.SCROLL_FINISHED ) { e ->
+                snapBack.playFromStart()
+                e.consume()
+            }
+            
+            hBar.addEventFilter( MouseEvent.MOUSE_RELEASED ) {
+                snapBack.playFromStart()
+            }
+        }
+    }
+    
     
     def titleLabel = new Label()
     titleLabel.setPadding( new Insets( 5, 0, 0, 0 ) )
@@ -344,6 +472,32 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
         // Double fire to spark listeners
         cb.setSelected( !cb.isSelected() )
         cb.setSelected( !cb.isSelected() )
+    }
+    
+    // Allowing shift + click to select/deselect multiple
+    CheckBox lastClicked = null   
+    checkboxes.eachWithIndex { cb, idx ->
+    
+        cb.addEventHandler( MouseEvent.MOUSE_CLICKED ) { e ->
+    
+            if (e.isShiftDown() && lastClicked != null) {
+                int lastIdx = checkboxes.indexOf( lastClicked )
+                int start = Math.min( lastIdx, idx )
+                int end   = Math.max( lastIdx, idx )
+    
+                // Use the state of the checkbox just clicked
+                boolean value = lastClicked.isSelected()
+    
+                (start..end).each { i ->
+                    cb = checkboxes[i]
+                    if (!cb.isDisabled() && cb.isVisible() ) {
+                        cb.setSelected( value )
+                    }
+                }
+            }
+    
+            lastClicked = cb
+        }
     }
     
     def clearBtn = new Button()
@@ -414,7 +568,7 @@ def codePreferences = runOnFxThreadAndWait {
     def root = new BorderPane()
     root.setPrefHeight( 350 )
     
-    dialog.getDialogPane().buttonTypes.addAll( ButtonType.OK, ButtonType.CANCEL )
+    dialog.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.CANCEL )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
     okBtn.setText( "Make rings" )
     ButtonBar.setButtonUniformSize( okBtn, false )
@@ -427,8 +581,7 @@ def codePreferences = runOnFxThreadAndWait {
     
     // Parse comma-separated integers
     def parseIntegerList = { String text ->    
-        if (!text?.trim())
-            return []     
+        if (!text?.trim()) { return [] }  
         def values = []    
         text.split( "," ).each { part ->
             def trimmed = part.trim()
@@ -469,8 +622,6 @@ def codePreferences = runOnFxThreadAndWait {
     def previewLabel = new Label( "=" )  
     def expansionsPreview = new Label( "[]" )
     setTT( [previewLabel, expansionsPreview], "Preview of final expansions.")
-    
-    
     
     
     expansionField.textProperty().addListener { obs, oldVal, newVal ->
@@ -521,54 +672,56 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     
-    // CENTER PANEL: Image Selection
-    def imageNames = project.getImageList().collect { it.getImageName() }
-    def imagesBox = makeCheckboxBox( "Select images", "images", imageNames.collect { [name: it] } )
-    def currentImageCB = new CheckBox( "Current Image" )
-    imagesBox.header.getChildren().addAll( imagesBox.selectAll, imagesBox.spacer, currentImageCB )
-    imagesBox.CBs.each { it.setSelected( it.getText() in prePrefsMap.selectedImages  ) }
-    BorderPane.setMargin( imagesBox.box, new Insets( 0, 15, 0, 0 ) )
-    
-    if (currentEntry) {
-        def currentCB = imagesBox.CBs.find { it.getText() == currentEntry.getImageName() }
-        currentImageCB.selectedProperty().bindBidirectional(
-            currentCB.selectedProperty()
-        )
-        
-        // If current image was only one selected, will update to new image
-        if (prePrefsMap.currentImage == true && prePrefsMap.selectedImages.size() == 1) {
-            imagesBox.CBs.each { it.setSelected( false ) }
-            currentImageCB.setSelected( true )
-        }
-    } else {
-        currentImageCB.setDisable( true )
-    }
-    
-    // Setting and updating tooltip for current image checkbox
-    currentImageCB.selectedProperty().addListener { obs, oldVal, newVal ->
-        setTT( currentImageCB, currentImageCB.isSelected() ? "Deselect current image" : "Select current image" )
-    }
-    
-    root.center = imagesBox.box
-    
-    
-    
     // RIGHT PANEL: PathClass selection list
-    def viewer = getCurrentViewer()
-    def annos  = viewer ? getAnnotationObjects() : []
-    def projectPathClasses = project.getPathClasses().findAll { it?.getName() } // No null (those with a name)
-    def countsByClass = annos.countBy { it.getPathClass() } 
+    def projectPathClasses = project.getPathClasses().findAll { it?.getName() }
     
-    // Organizing any pathclasses with objects in the open viewer to the top of the list
-    def highCounts = []
-    def lowCounts = []
-    projectPathClasses.each { pc ->
-        def entry = [name: pc.getName(), num: countsByClass[ pc ] ?: 0]
-        (entry.num > 0 ? highCounts : lowCounts) << entry
+    def gson = new Gson()
+    def imageClassCounts = [:]  // imageName -> [className -> count]
+    def totalsByClass = [:]     // className -> total across all images
+    
+    def imageList = project.getImageList()
+    def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
+    def pool = Executors.newFixedThreadPool( nThreads )
+    def resultMap = new java.util.concurrent.ConcurrentHashMap()
+    
+    // Parallel finding anno summaries
+    def futures = imageList.collect { entry ->
+        pool.submit({
+            def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+            def counts = [:]
+            if (Files.exists( summaryFile )) {
+                try {
+                    def raw = new String( Files.readAllBytes( summaryFile ) )
+                    def summary = gson.fromJson( raw, Object )
+                    summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
+                        def n = k.toString()
+                        counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                    }
+                } catch (Exception ignored) {}
+            }
+            resultMap[ entry.getImageName() ] = counts
+        } as Callable)
     }
-    highCounts.sort { -it.num } // Sort for descending abundance
-    def pathClassNamesAndNum = highCounts + lowCounts
-    List pathClassCBsMap = pathClassNamesAndNum.collect { [name: (it.num > 0 ? "${it.name} [${it.num}]" : it.name), data: it.name] }
+    futures.each { it.get() }
+    pool.shutdown()
+    
+    // Merge into imageClassCounts and totalsByClass
+    resultMap.each { imgName, counts ->
+        imageClassCounts[ imgName ] = counts
+        counts.each { className, count ->
+            totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
+        }
+    }
+    
+    // Sort: only classes with existing annotations in project by abundance
+    def highCounts = []
+    projectPathClasses.each { pc ->
+        def total = totalsByClass[ pc.getName() ] ?: 0
+        if (total > 0) { highCounts << [name: pc.getName(), num: total] }
+    }
+    highCounts.sort { -it.num }
+    def pathClassNamesAndNum = highCounts
+    List pathClassCBsMap = pathClassNamesAndNum.collect { [name: it.name, data: it.name] } // labels set by updateClassCounts
     def pathClassBox = makeCheckboxBox( "Object classes", null, pathClassCBsMap, 200 )    
     pathClassBox.header.getChildren().addAll( pathClassBox.title, pathClassBox.spacer, pathClassBox.clear )    
     pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.objectClasses ) }
@@ -589,6 +742,73 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     
+    // CENTER PANEL: Image Selection
+    def imageNames = project.getImageList().collect { it.getImageName() }
+    def imagesBox = makeCheckboxBox( "Select images", "images", imageNames.collect { [name: it] } )
+    def currentImageCB = new CheckBox( "Current Image" )
+    imagesBox.header.getChildren().addAll( imagesBox.selectAll, imagesBox.spacer, currentImageCB )
+    imagesBox.CBs.each { it.setSelected( it.getText() in prePrefsMap.selectedImages  ) }
+    BorderPane.setMargin( imagesBox.box, new Insets( 0, 15, 0, 0 ) )
+    
+    if (currentEntry) {
+        def currentCB = imagesBox.CBs.find { it.getText() == currentEntry.getImageName() }
+        currentImageCB.selectedProperty().bindBidirectional(
+            currentCB.selectedProperty()
+        )
+        
+        // Setting bright border on checkbox for current image
+        Platform.runLater { 
+            [currentCB, currentImageCB].each {
+                it.lookup( ".box" )?.setStyle("""
+                    -fx-border-color: black;
+                    -fx-border-width: 2;
+                    -fx-border-radius: 1;
+                """)
+            }
+        }
+        
+        // If current image was only one selected, will update to new image
+        if (prePrefsMap.currentImage == true && prePrefsMap.selectedImages.size() == 1) {
+            imagesBox.CBs.each { it.setSelected( false ) }
+            currentImageCB.setSelected( true )
+        }
+    } else {
+        currentImageCB.setDisable( true )
+    }
+    
+    // Setting and updating tooltip for current image checkbox
+    currentImageCB.selectedProperty().addListener { obs, oldVal, newVal ->
+        setTT( currentImageCB, currentImageCB.isSelected() ? "Deselect current image" : "Select current image" )
+    }
+    
+    root.center = imagesBox.box
+    
+    
+    
+    // Closure to update total and selected class counts
+    def updateClassCounts = {
+        def selectedNames = imagesBox.CBs.findAll { it.isSelected() }.collect { it.getText() } as Set
+        def selectedTotals = [:]
+        selectedNames.each { imgName ->
+            imageClassCounts[ imgName ]?.each { className, count ->
+                selectedTotals[ className ] = (selectedTotals[ className ] ?: 0) + count
+            }
+        }
+        pathClassBox.CBs.each { cb ->
+            def className = cb.getUserData()
+            def sel   = selectedTotals[ className ] ?: 0
+            def total = totalsByClass[ className ]  ?: 0
+            cb.setText( total > 0 ? "${className} [${sel} / ${total}]" : className )
+        }
+    }
+    
+    imagesBox.CBs.each { cb ->
+        cb.selectedProperty().addListener { obs, oldVal, newVal -> updateClassCounts() }
+    }
+    updateClassCounts()
+    
+    
+    
     // BOTTOM ROW:
     def expandOnlyOutwardCheck = new CheckBox( "Only expand outward" )
     setTT( expandOnlyOutwardCheck, "Expand only outward rather than also inward if central object has holes?")
@@ -596,17 +816,81 @@ def codePreferences = runOnFxThreadAndWait {
     
     def contstrainToParentCheck = new CheckBox( "Constrain to parent" )
     contstrainToParentCheck.setPadding( new Insets( 0, 0, 0, 20 ) )
-    setTT( contstrainToParentCheck, "Constrain expansions to the parent object of central object?")
+    setTT( contstrainToParentCheck, "Crop expansions to the parent object of central object?")
     contstrainToParentCheck.setSelected( prePrefsMap.constrainToParent instanceof Boolean ? prePrefsMap.constrainToParent : true )
     
+    def firstBottomSpacer = new Region()
+    HBox.setHgrow( firstBottomSpacer, Priority.ALWAYS )
+    
+    def simplifyGeomCheck = new CheckBox( "Simplify geometry" )
+    setTT( simplifyGeomCheck, """If expanding complex objects is taking too long, this will simplify the shapes.
+                               \nWARNING: The geometry will be inexact.""" )
+    simplifyGeomCheck.setSelected( prePrefsMap.simplifyGeometry instanceof Boolean ? prePrefsMap.simplifyGeometry : false )
+    
+    def secondBottomSpacer = new Region()
+    HBox.setHgrow( secondBottomSpacer, Priority.ALWAYS )
+    
+    def simpleLabel = new Label( "Simple" )
+    def complexLabel = new Label( "Complex" )
+    [simpleLabel, complexLabel].each {
+        it.setStyle("""
+            -fx-font-size: 12px;
+            -fx-text-fill: gray;
+        """)
+    }
+    
+    def roundTo2 = { num ->
+        return Math.round( num.doubleValue() / 2.0 ) * 2.0
+    }
+    
+    def maxVerticesSlider = new Slider( 2, 10, 6 )
+    maxVerticesSlider.setPrefWidth( 100 )
+    setTT( maxVerticesSlider, "Max number of vertices x1000 before simplifying for expansions. More is finer but slower." )
+    maxVerticesSlider.setMajorTickUnit( 2 )
+    maxVerticesSlider.setMinorTickCount( 0 )
+    maxVerticesSlider.setSnapToTicks( true )   
+    maxVerticesSlider.setShowTickMarks( true )    
+    maxVerticesSlider.setShowTickLabels( true )
+    if (prePrefsMap.maxVertices instanceof Number) { 
+        maxVerticesSlider.setValue( roundTo2( prePrefsMap.maxVertices / 1000 ).toInteger() )
+    }
+    
+    maxVerticesSlider.valueProperty().addListener { obs, oldVal, newVal ->
+        if (!maxVerticesSlider.isValueChanging()) { return }
+    
+        double snapped = roundTo2( newVal )
+        if (maxVerticesSlider.getValue() != snapped) { maxVerticesSlider.setValue( snapped ) }
+    }
+    
     // Creating row and adding children
-    def secondRow = new HBox( 10 )
-    secondRow.setPadding( new Insets( 20, 0, 0, 10 ) )
-    secondRow.getChildren().addAll(
+    def firstBottomRow = new HBox( 10 )
+    firstBottomRow.setPadding( new Insets( 20, 10, 0, 10 ) )
+    firstBottomRow.getChildren().addAll(
         expandOnlyOutwardCheck,
-        contstrainToParentCheck
+        contstrainToParentCheck,
+        firstBottomSpacer,
+        simplifyGeomCheck
     )
-    root.bottom = secondRow
+    
+    def secondBottomRow = new HBox( 5 )
+    secondBottomRow.setPadding( new Insets( 10, 0, 0, 0 ) )
+    secondBottomRow.getChildren().addAll(
+        secondBottomSpacer,
+        simpleLabel,
+        maxVerticesSlider,
+        complexLabel
+    )
+    
+    secondBottomRow.visibleProperty().bind( simplifyGeomCheck.selectedProperty() )
+    secondBottomRow.managedProperty().bind( simplifyGeomCheck.selectedProperty() )
+    
+    def bottomBox = new VBox()
+    bottomBox.getChildren().addAll(
+        firstBottomRow,
+        secondBottomRow
+    )
+    
+    root.bottom = bottomBox
     
     
     
@@ -657,7 +941,9 @@ def codePreferences = runOnFxThreadAndWait {
             objectClasses     : selectedPathClasses,
             expansionsMicrons : expansions,
             expandOnlyOutward : expandOnlyOutwardCheck.isSelected(),
-            constrainToParent : contstrainToParentCheck.isSelected()
+            constrainToParent : contstrainToParentCheck.isSelected(),
+            simplifyGeometry  : simplifyGeomCheck.isSelected(),
+            maxVertices       : maxVerticesSlider.getValue().toInteger() * 1000
         ]
         
     } else {
@@ -682,15 +968,17 @@ def imagesToRun = project.getImageList().findAll { it.getImageName() in codePref
 
 def total = imagesToRun.size()
 def progressUI = createProgressWindow( "Processing", total )
-def cancelFlag = progressUI.cancelFlag
+def stopNowFlag   = progressUI.stopNowFlag
+def stopLaterFlag = progressUI.stopLaterFlag
 int processed = 0
+
+// Number of vertices calculated when buffering geometries (standard is 8)
+def bufParams = new BufferParameters( codePreferences.simplifyGeometry ? 4 : 8 )
 
 imageLoop:
 for (image in imagesToRun) {
-    
-    if (cancelFlag.get()) {
-        break
-    }
+    // Stopping when requested
+    if (stopNowFlag.get() || stopLaterFlag.get()) { break }
     
     // Reporting current image
     updateProgressWindow( progressUI, [imageName: image] )
@@ -703,141 +991,243 @@ for (image in imagesToRun) {
     
     def hierarchy = imageData.getHierarchy()
     
-    int netSteps = (codePreferences.objectClasses.size() * (codePreferences.expansionsMicrons.size() + 1))
+    int netSteps = (codePreferences.objectClasses.size() * ((codePreferences.expansionsMicrons.size() * 2) + 1))
     updateProgressWindow( progressUI, [stepMax: netSteps] )
     int step = 1
     
+    def pool = Executors.newFixedThreadPool( Runtime.getRuntime().availableProcessors() )
+    progressUI.poolRef.set( pool )
     
-    pathclassLoop:
-    for (objectClass in codePreferences.objectClasses) {
-        
-        // Get central objects
-        def baseObjs = hierarchy.getAnnotationObjects().findAll {
-            it.getPathClass()?.getName() == objectClass && 
-            it.getROI()?.getArea() > 0
-        }
-        baseObjs.each { it.setLocked( true ) }
-        
-        // Get expansion class names
-        def expansionClasses = codePreferences.expansionsMicrons.collect { exp ->
-            def expPathClassName = objectClass + "_" + exp
-            return expPathClassName
-        }
-        
-        // Clear previous expansions
-        def objectsToRemove = hierarchy.getAnnotationObjects().findAll { 
-            def pathClassName = it.getPathClass()?.getName()
-            pathClassName in expansionClasses ||
-            ( pathClassName.contains( objectClass + "_" ) && it.getParent() in baseObjs )
-        }
-        hierarchy.removeObjects( objectsToRemove, false )
-        
-        // Making sure new class(es) are in project classes
-        def availableClasses = getQuPath().getAvailablePathClasses()
-        def missingClasses = expansionClasses
-                .collect { getPathClass( it ) }
-                .findAll { it !in availableClasses }
-        availableClasses.addAll( missingClasses )
-        
-        
-        
-        // --- RING GENERATION ---
-        // Getting map with central object and relevant expansion geometries
-        updateProgressWindow( progressUI, [stepNum: step, stepName: "Generating expansion map for ${objectClass}"] )
-        
-        def expansionsMap = []
-        
-        int numBaseObjs = baseObjs.size()
-        baseObjs.eachWithIndex { annoCentral, idx ->
-            // Normalize to Polygon/MultiPolygon before buffering.
-            // Mask objects stored as GeometryCollections can produce unexpectedly wide
-            // expansions if passed to buffer() directly.
-            def geomCentral = toPolygonGeometry( annoCentral.getROI().getGeometry() )
+    try {
+        pathclassLoop:
+        for (objectClass in codePreferences.objectClasses) {
             
-            // Fill holes BEFORE buffering when expanding outward only.
-            // buffer() on a holey geometry also shrinks inner rings inward, making the
-            // resulting expansion appear wider than intended. Filling holes first ensures
-            // the buffer only travels outward from the exterior boundary.
-            if (codePreferences.expandOnlyOutward) {
-                def filled = fillAnnoHoles( [geomCentral] )
-                geomCentral = toPolygonGeometry( filled[0] )
+            // Get central objects
+            def baseObjs = hierarchy.getAnnotationObjects().findAll {
+                it.getPathClass()?.getName() == objectClass && 
+                it.getROI()?.getArea() > 0
+            }
+            baseObjs.each { it.setLocked( true ) }
+            
+            // Get expansion class names
+            def expansionClasses = codePreferences.expansionsMicrons.collect { exp ->
+                def expPathClassName = objectClass + "_" + exp
+                return expPathClassName
             }
             
-            def geomsAll = [geomCentral]
-            
-            codePreferences.expansionsMicrons.each { exp ->
-                double expandPixels = exp / pixelSize            
-                def geomExpanded = toPolygonGeometry( geomCentral.buffer( expandPixels ) )
-                geomsAll << geomExpanded
+            // Clear previous expansions
+            def objectsToRemove = hierarchy.getAnnotationObjects().findAll { 
+                def pathClassName = it.getPathClass()?.getName()
+                pathClassName in expansionClasses ||
+                ( pathClassName.contains( objectClass + "_" ) && it.getParent() in baseObjs )
             }
-            expansionsMap << [centerObj: annoCentral, allGeoms: geomsAll]
+            hierarchy.removeObjects( objectsToRemove, false )
             
-            int pDone = ((idx+1) / numBaseObjs) * 100
-            updateProgressWindow( progressUI, [stepPer: pDone] )
-        }
-        
-        // Prep each group: geometries are already normalized by above so no re-cleaning needed.
-        // Parent geometry is cached here once so it isn't recomputed on every ring level below.
-        expansionsMap.each { objGroup ->
-            objGroup.cleanedAllGeoms = objGroup.allGeoms
-            objGroup.ringObjs = []
-            if (codePreferences.constrainToParent) {
-                def parent = objGroup.centerObj.getParent()
-                objGroup.parentGeom = (parent?.getROI() != null) ? cleanForROI( parent.getROI().getGeometry() ) : null
+            // Making sure new class(es) are in project classes
+            def availableClasses = getQuPath().getAvailablePathClasses()
+            def missingClasses = expansionClasses
+                    .collect { getPathClass( it ) }
+                    .findAll { it !in availableClasses }
+            availableClasses.addAll( missingClasses )
+            
+            
+            // --- RING GENERATION ---
+            // Getting map with central object and relevant expansion geometries
+            updateProgressWindow( progressUI, [stepNum: step, stepName: "Generating expansion map for ${objectClass}"] )
+            
+            // Parallelize execution
+            int numBaseObjs = baseObjs.size()
+            def expansionsMap = new Object[ numBaseObjs ]
+            def doneCount = new AtomicInteger( 0 )
+            
+            def futures = (0..<numBaseObjs).collect { idx ->
+                if (stopNowFlag.get()) { return null }
+                try {
+                    pool.submit({
+                        def annoCentral = baseObjs[ idx ]
+                        def geomCentral = codePreferences.simplifyGeometry ?
+                            simplifyGeom( toPolygonGeometry( annoCentral.getROI().getGeometry() ), codePreferences.maxVertices ) :
+                            toPolygonGeometry( annoCentral.getROI().getGeometry() )
+                        
+                        if (codePreferences.expandOnlyOutward) {
+                            geomCentral = toPolygonGeometry( fillAnnoHoles( [geomCentral] )[0] )
+                        }
+                        
+                        def geomsAll = [ geomCentral ]
+                        codePreferences.expansionsMicrons.each { exp ->
+                            double expandPixels = exp / pixelSize
+                            geomsAll << toPolygonGeometry( bufferGeom( geomCentral, expandPixels, bufParams ) )
+                        }
+                        expansionsMap[ idx ] = [ centerObj: annoCentral, allGeoms: geomsAll ]
+                        
+                        int pDone = ( doneCount.incrementAndGet() / numBaseObjs * 100 ) as int
+                        updateProgressWindow( progressUI, [ stepPer: pDone ] )
+                    } as Callable)
+                } catch (RejectedExecutionException ignored) {
+                    null
+                }
+            }.findAll { it != null }
+            
+            // Allowing a live cancel to happen
+            try {
+                for (def f in futures) {
+                    f.get()
+                    if (stopNowFlag.get()) { continue imageLoop }
+                }
+            } catch (Exception e) {
+                if (stopNowFlag.get()) { continue imageLoop }
+                throw e
             }
-        }
-        
-        // Creating rings and nesting under central object
-        expansionClasses.eachWithIndex { expClass, level ->
             
-            // Reporting current step
-            step ++
-            updateProgressWindow( progressUI, [stepNum: step, stepName: "Working on ${expClass}", stepPer: 0] )
+            def expansionsMapList = expansionsMap.toList()
             
-            // Union all objects' geometries at the inner level into a single mask to subtract.
-            // This ensures each ring does not overlap any lower-level zone from any object —
-            // including neighboring objects whose inner zones may intrude into this ring's area.
-            // Geometries are already Polygon/MultiPolygon so no part-flattening is needed before union.
-            def innerGeomsAtLevel = expansionsMap.collect { it.cleanedAllGeoms[ level ] }
-            def combinedInnerMask = cleanForROI( UnaryUnionOp.union( innerGeomsAtLevel ) )
             
-            // Getting each outer level geometry and subtracting the combined inner mask to form rings
-            int numExpMapVals = expansionsMap.size()
-            expansionsMap.eachWithIndex { objGroup, idx ->
-                def centerObj = objGroup.centerObj
+            // Prep each group: geometries are already normalized by above so no re-cleaning needed.
+            // Parent geometry is cached here once so it isn't recomputed on every ring level below.
+            expansionsMapList.each { objGroup ->
+                objGroup.cleanedAllGeoms = objGroup.allGeoms
+                objGroup.ringObjs = []
+                if (codePreferences.constrainToParent) {
+                    def parent = objGroup.centerObj.getParent()
+                    objGroup.parentGeom = (parent?.getROI() != null) ? cleanForROI( parent.getROI().getGeometry() ) : null
+                }
+            }
+            
+            
+            // Creating rings and nesting under central object
+            for (int level = 0; level < expansionClasses.size(); level++) {
+                def expClass = expansionClasses[ level ]
                 
-                // cleanedAllGeoms entries are already normalized Polygon/MultiPolygon from above
-                def ringGeom = objGroup.cleanedAllGeoms[ level + 1 ]
+                // Reporting current step
+                step ++
+                updateProgressWindow( progressUI, [stepName: "Building ${expClass} inner mask", stepPer: 0] )
                 
-                if (!combinedInnerMask.isEmpty() && ringGeom.intersects( combinedInnerMask )) {
-                    ringGeom = ringGeom.difference( combinedInnerMask )
-                    ringGeom = cleanForROI( ringGeom )
+                def innerGeomsAtLevel = expansionsMapList.collect { it.cleanedAllGeoms[ level ] }
+                def geoms = Collections.synchronizedList( codePreferences.simplifyGeometry ?
+                    innerGeomsAtLevel.collect { toPolygonGeometry( simplifyGeom( it, codePreferences.maxVertices ) ) } :
+                    innerGeomsAtLevel )
+                int totalGeoms = geoms.size()
+                
+                while (geoms.size() > 1) {
+                    if (stopNowFlag.get()) { continue imageLoop }
+                    
+                    def pairs = []
+                    for (int i = 0; i < geoms.size() - 1; i += 2) {
+                        pairs << [i, i + 1]
+                    }
+                    
+                    def roundResults = new Object[ pairs.size() + (geoms.size() % 2) ]
+                    def currentGeoms = geoms
+                    
+                    def mergeFutures = pairs.indices.collect { pi ->
+                        if (stopNowFlag.get()) { return null }
+                        try {
+                            def a = currentGeoms[ pairs[pi][0] ]
+                            def b = currentGeoms[ pairs[pi][1] ]
+                            def resultIdx = pi
+                            pool.submit({
+                                def merged = toPolygonGeometry( a.union( b ) )
+                                roundResults[ resultIdx ] = merged.isValid() ? merged : merged.buffer( 0 )
+                            } as Callable)
+                        } catch (RejectedExecutionException ignored) {
+                            null
+                        }
+                    }.findAll { it != null }
+                    
+                    // Allowing live cancel
+                    try {
+                        for (def f in mergeFutures) {
+                            f.get()
+                            if (stopNowFlag.get()) { continue imageLoop }
+                        }
+                    } catch (Exception e) {
+                        if (stopNowFlag.get()) { continue imageLoop }
+                        throw e
+                    }
+                    
+                    if (geoms.size() % 2 == 1) {
+                        roundResults[ pairs.size() ] = geoms.last()
+                    }
+                    
+                    geoms = roundResults.toList()
+                    int pDone = ((totalGeoms - geoms.size()) / totalGeoms * 100) as int
+                    updateProgressWindow( progressUI, [stepPer: pDone] )
+                }
+                def combinedInnerMask = cleanForROI( geoms[0] )
+                
+                
+                step++
+                updateProgressWindow( progressUI, [stepNum: step, stepName: "Building ${expClass} rings", stepPer: 0] )
+                
+                // Parallel geometry phase
+                def ringResults = new Object[ expansionsMapList.size() ]
+                def doneRingCount = new AtomicInteger( 0 )
+                int numExpMapVals = expansionsMapList.size()
+                
+                def diffFutures = (0..<numExpMapVals).collect { idx ->
+                    if (stopNowFlag.get()) { return null }
+                    try {
+                        pool.submit({
+                            def objGroup = expansionsMapList[ idx ]
+                            def ringGeom = codePreferences.simplifyGeometry ? 
+                                simplifyGeom( objGroup.cleanedAllGeoms[ level + 1 ], codePreferences.maxVertices ) :
+                                objGroup.cleanedAllGeoms[ level + 1 ]
+                    
+                            if (!combinedInnerMask.isEmpty() && ringGeom.intersects( combinedInnerMask )) {
+                                def mask = combinedInnerMask.isValid() ? combinedInnerMask : combinedInnerMask.buffer( 0 )
+                                def ring = ringGeom.isValid() ? ringGeom : ringGeom.buffer( 0 )
+                                ringGeom = cleanForROI( ring.difference( mask ) )
+                            }
+                    
+                            if (codePreferences.constrainToParent) {
+                                def parentGeom = objGroup.parentGeom
+                                if (parentGeom != null && !ringGeom.isEmpty() && ringGeom.getArea() > 0
+                                        && !parentGeom.covers( ringGeom )) {
+                                    def parent = parentGeom.isValid() ? parentGeom : parentGeom.buffer( 0 )
+                                    def ring = ringGeom.isValid() ? ringGeom : ringGeom.buffer( 0 )
+                                    ringGeom = cleanForROI( ring.intersection( parent ) )
+                                }
+                            }
+                    
+                            ringResults[ idx ] = (!ringGeom.isEmpty() && ringGeom.getArea() > 0) ? ringGeom : null
+                    
+                            int pDone = (doneRingCount.incrementAndGet() / numExpMapVals * 100) as int
+                            updateProgressWindow( progressUI, [ stepPer: pDone ] )
+                        } as Callable)
+                    } catch (RejectedExecutionException ignored) {
+                        null
+                    }
+                }.findAll { it != null }
+                
+                // Allowing live cancel
+                try {
+                    for (def f in diffFutures) {
+                        f.get()
+                        if (stopNowFlag.get()) { continue imageLoop }
+                    }
+                } catch (Exception e) {
+                    if (stopNowFlag.get()) { continue imageLoop }
+                    throw e
                 }
                 
-                // Clip to central object's parent if wanted; parentGeom cached in prep loop
-                if (codePreferences.constrainToParent) {
-                    def centralObjParentGeom = objGroup.parentGeom
-                    if (centralObjParentGeom != null && !ringGeom.isEmpty() && ringGeom.getArea() > 0
-                            && !centralObjParentGeom.covers( ringGeom )) {
-                        ringGeom = ringGeom.intersection( centralObjParentGeom )
-                        ringGeom = cleanForROI( ringGeom )
+                // Serial hierarchy adds
+                runOnFxThreadAndWait {
+                    ringResults.eachWithIndex { ringGeom, idx ->
+                        if (ringGeom == null) { return }
+                        def objGroup = expansionsMapList[ idx ]
+                        def centerObj = objGroup.centerObj
+                        def ringROI = GeometryTools.geometryToROI( ringGeom, centerObj.getROI().getImagePlane() )
+                        def ringObj = PathObjects.createAnnotationObject( ringROI, getPathClass( expClass ) )
+                        hierarchy.addObjectBelowParent( centerObj, ringObj, false )
+                        objGroup.ringObjs << ringObj
+                        ringObj.setLocked( true )
                     }
                 }
-                
-                // Make the final objects as children of the central object
-                if (!ringGeom.isEmpty() && ringGeom.getArea() > 0) {
-                    def ringROI = GeometryTools.geometryToROI( ringGeom, centerObj.getROI().getImagePlane() )
-                    def ringObj = PathObjects.createAnnotationObject( ringROI, getPathClass( expClass ) )
-                    
-                    hierarchy.addObjectBelowParent( centerObj, ringObj, false )
-                    objGroup.ringObjs << ringObj
-                    ringObj.setLocked( true )
-                }
-                
-                int pDone = ((idx+1) / numExpMapVals) * 100
-                updateProgressWindow( progressUI, [stepPer: pDone] )
             }
         }
+    } finally {
+        pool.shutdown()
+        progressUI.poolRef.set( null )
     }
     
     
@@ -866,7 +1256,7 @@ for (image in imagesToRun) {
     // - Reporting progress -
     processed++
     double frac = processed / total 
-    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
+    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed+1] )
 }
 
 // Closing progress bar window
@@ -875,23 +1265,28 @@ Platform.runLater {
 }
 
 
-import java.util.concurrent.CountDownLatch
+import java.nio.file.Files
+import java.util.concurrent.*
+import java.util.concurrent.atomic.*
+import javafx.util.Duration
 import javafx.animation.*
 import javafx.application.Platform
 import javafx.beans.property.SimpleStringProperty
-import javafx.geometry.Insets
-import javafx.geometry.Pos
+import javafx.geometry.*
 import javafx.scene.Scene
 import javafx.scene.control.*
 import javafx.scene.control.ButtonBar.ButtonData
 import javafx.scene.layout.*
+import javafx.scene.input.*
 import javafx.stage.*
 import javafx.beans.binding.Bindings
 import com.google.gson.GsonBuilder
 import com.google.gson.Gson
 
 import org.locationtech.jts.geom.*
-import org.locationtech.jts.operation.union.UnaryUnionOp
+import org.locationtech.jts.operation.buffer.BufferOp
+import org.locationtech.jts.operation.buffer.BufferParameters
+import org.locationtech.jts.operation.union.*
 import org.locationtech.jts.simplify.TopologyPreservingSimplifier
 
 import javafx.scene.control.TextFormatter

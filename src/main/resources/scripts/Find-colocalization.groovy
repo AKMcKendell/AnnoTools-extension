@@ -1,6 +1,7 @@
 /*
-    Developed by Alec K. McKendell
-    2026.4.20
+ * Author: Alec McKendell
+ * Date: 2026.4.20
+ * Description: Generate new annotations at the colocalization of others.
 */
 
 
@@ -52,6 +53,8 @@ def setTT( objs, String tooltip ) {
 def createProgressWindow( String title, int totalImages ) {
     return runOnFxThreadAndWait {
         def stage = new Stage()
+        stage.setMinWidth( 350 )
+        stage.setResizable( false )
         stage.setTitle( title )
         
         def stepLabel = new Label()
@@ -73,15 +76,15 @@ def createProgressWindow( String title, int totalImages ) {
         def imageRow = new HBox( 5, imageLabel )
         
         def bar = new ProgressBar( 0.0 )
-        bar.setPrefWidth( 350 )
-        def barRow = new HBox( 10, bar )     
+        def barRow = new HBox( 10, bar )  
         
-        def cancelBtn = new Button( "Cancel" )
-        cancelBtn.setDisable( false )
+        def stopBtn = new Button( "Stop" )
+        def stopNowInsteadBtn = new Button( "Stop now" )
+        stopBtn.setDisable( false )
         def spacer = new Region()
         HBox.setHgrow( spacer, Priority.ALWAYS )
         def timerLabel = new Label( "Elapsed: 00:00:00" )       
-        def bottomRow = new HBox( 10, cancelBtn, spacer, timerLabel )
+        def bottomRow = new HBox( 10, stopBtn, spacer, timerLabel )
         bottomRow.setAlignment( Pos.CENTER_LEFT )
         
         List rows = [stepRow, imageRow, barRow, bottomRow]
@@ -105,6 +108,24 @@ def createProgressWindow( String title, int totalImages ) {
             node.widthProperty().addListener { obs, old, nw -> updateMinWidth() }
         }
         
+        // Progress bar fills row width
+        bar.setMaxWidth( Double.MAX_VALUE )
+        HBox.setHgrow( bar, Priority.ALWAYS )
+        
+        // Stage grows (never shrinks) to fit widest row
+        def updateStageWidth = {
+            Platform.runLater {
+                double maxRowPref = rows.collect { it.prefWidth(-1) }.max()
+                double needed = maxRowPref + vbox.getPadding().getLeft() + vbox.getPadding().getRight()
+                if ( needed > Math.max( stage.getMinWidth(), 0 ) ) {
+                    stage.setMinWidth( needed )
+                }
+            }
+        }
+        [ stepNum, stepMax, stepName, stepPer, imageNum, imageName ].each { prop ->
+            prop.addListener { obs, old, nw -> updateStageWidth() }
+        }
+        
         def scene = new Scene( vbox )
         stage.setScene( scene )
         
@@ -114,6 +135,7 @@ def createProgressWindow( String title, int totalImages ) {
         }
         stage.initModality( Modality.WINDOW_MODAL )
         stage.show()
+        updateStageWidth()
         
         def startTime = System.nanoTime()
         
@@ -137,19 +159,61 @@ def createProgressWindow( String title, int totalImages ) {
         timeline.play()
         
         // Signal to cancel script
-        def cancelFlag = new java.util.concurrent.atomic.AtomicBoolean( false )
-        def cancelUpdateLabel = new Label( "Cancelling after image..." )
-        cancelUpdateLabel.setPadding( new Insets( 4 ) )
-        cancelBtn.setOnAction {
-            bottomRow.getChildren().set(
-                bottomRow.getChildren().indexOf( cancelBtn ), cancelUpdateLabel
-            )
-            cancelFlag.set( true )
+        def stopNowFlag   = new AtomicBoolean( false )
+        def stopLaterFlag = new AtomicBoolean( false )
+        
+        def stopNowLabel = new Label( "Stopping after operation..." )
+        stopNowLabel.setPadding( new Insets( 4 ) )
+        def stopLaterLabel = new Label( "Stopping after image..." )
+        stopLaterLabel.setPadding( new Insets( 4 ) )
+        
+        def poolRef = new AtomicReference( null )
+
+        def showStopConfirmation = {
+            // Preventing a double show
+            if (stopNowFlag.get() || stopLaterFlag.get()) { return }
+            
+            def alert = new Alert( Alert.AlertType.CONFIRMATION )
+            alert.setTitle( "Stop confirmation" )
+            alert.setHeaderText( "Stop processing?" )
+            alert.initOwner( stage )
+            
+            alert.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.YES, ButtonType.CANCEL )
+            def stopAfterImageBtn = alert.getDialogPane().lookupButton( ButtonType.OK )
+            def stopNowBtn        = alert.getDialogPane().lookupButton( ButtonType.YES )
+            def backBtn           = alert.getDialogPane().lookupButton( ButtonType.CANCEL )
+            stopAfterImageBtn.setText( "Stop after image" )
+            stopNowBtn.setText( "Stop now" )
+            backBtn.setText( "Back" )
+            
+            def response = alert.showAndWait().orElse( null )
+            
+            if (response == ButtonType.YES) {
+                stopNowFlag.set( true )
+                bottomRow.getChildren().set( 0, stopNowLabel ) 
+                poolRef.get()?.shutdownNow()
+            
+            } else if (response == ButtonType.OK) {
+                stopLaterFlag.set( true )
+                bottomRow.getChildren().set( 0, stopLaterLabel )
+                bottomRow.getChildren().add( 1, stopNowInsteadBtn )
+            }
+        }
+
+        stopBtn.setOnAction {
+            showStopConfirmation()
         }
         stage.setOnCloseRequest { evt ->
-            cancelFlag.set( true )
+            evt.consume()
+            showStopConfirmation()
         }
-        
+        stopNowInsteadBtn.setOnAction {
+            stopNowFlag.set( true )
+            bottomRow.getChildren().set( 0, stopNowLabel )
+            bottomRow.getChildren().remove( stopNowInsteadBtn )
+            poolRef.get()?.shutdownNow()
+        }
+
         return [
             stage        : stage,
             stepNum      : stepNum,
@@ -159,7 +223,9 @@ def createProgressWindow( String title, int totalImages ) {
             imageNum     : imageNum,
             imageName    : imageName,
             bar          : bar,
-            cancelFlag   : cancelFlag
+            stopNowFlag  : stopNowFlag,
+            stopLaterFlag: stopLaterFlag,
+            poolRef      : poolRef
         ]
     }
 }
@@ -252,7 +318,46 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     def selectAllCB = makeSelectAllCB( checkboxes )
     
     def scrollPane = new ScrollPane( checkboxContainer )
-    scrollPane.setFitToWidth( true )
+    VBox.setVgrow( scrollPane, Priority.ALWAYS )
+    
+    
+    // Making scrollpane slide back to left if horizontally scrollable
+    Platform.runLater {
+        def hBar = scrollPane.lookupAll( ".scroll-bar" )
+            .find { it instanceof ScrollBar && it.orientation == Orientation.HORIZONTAL }
+            
+        if (hBar.isVisible()) {
+            def snapBack = new PauseTransition( Duration.millis( 300 ) )
+            snapBack.setOnFinished {
+                new Timeline(
+                    new KeyFrame(
+                        Duration.millis( 200 ),
+                        new KeyValue( scrollPane.hvalueProperty(), 0, Interpolator.EASE_BOTH )
+                    )
+                ).play()
+            }
+            
+            scrollPane.addEventFilter( ScrollEvent.SCROLL ) { e ->
+                if (Math.abs( e.deltaX ) > 0 || e.isShiftDown()) {
+                    def delta = (e.deltaX != 0 ? e.deltaX : e.deltaY)
+                    def sensitivity = 250.0
+                    def newValue = scrollPane.hvalue - (delta / sensitivity)
+                    scrollPane.hvalue = Math.max( 0, Math.min( 1, newValue ) )
+                    e.consume()
+                }
+            }
+            
+            scrollPane.addEventFilter( ScrollEvent.SCROLL_FINISHED ) { e ->
+                snapBack.playFromStart()
+                e.consume()
+            }
+            
+            hBar.addEventFilter( MouseEvent.MOUSE_RELEASED ) {
+                snapBack.playFromStart()
+            }
+        }
+    }
+    
     
     def titleLabel = new Label()
     titleLabel.setPadding( new Insets( 5, 0, 0, 0 ) )
@@ -284,6 +389,32 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
         // Double fire to spark listeners
         cb.setSelected( !cb.isSelected() )
         cb.setSelected( !cb.isSelected() )
+    }
+    
+    // Allowing shift + click to select/deselect multiple
+    CheckBox lastClicked = null   
+    checkboxes.eachWithIndex { cb, idx ->
+    
+        cb.addEventHandler( MouseEvent.MOUSE_CLICKED ) { e ->
+    
+            if (e.isShiftDown() && lastClicked != null) {
+                int lastIdx = checkboxes.indexOf( lastClicked )
+                int start = Math.min( lastIdx, idx )
+                int end   = Math.max( lastIdx, idx )
+    
+                // Use the state of the checkbox just clicked
+                boolean value = lastClicked.isSelected()
+    
+                (start..end).each { i ->
+                    cb = checkboxes[i]
+                    if (!cb.isDisabled() && cb.isVisible() ) {
+                        cb.setSelected( value )
+                    }
+                }
+            }
+    
+            lastClicked = cb
+        }
     }
     
     def clearBtn = new Button()
@@ -378,7 +509,7 @@ def codePreferences = runOnFxThreadAndWait {
     def root = new BorderPane()
     root.setPrefHeight( 350 )
     
-    dialog.getDialogPane().buttonTypes.addAll( ButtonType.OK, ButtonType.CANCEL )
+    dialog.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.CANCEL )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
     okBtn.setText( "Make Objects" )
     ButtonBar.setButtonUniformSize( okBtn, false )
@@ -407,36 +538,6 @@ def codePreferences = runOnFxThreadAndWait {
     root.top = topRow
     
     
-    // LEFT PANEL: Image Selection
-    def imageNames = project.getImageList().collect { it.getImageName() }
-    def imagesBox = makeCheckboxBox( "Select images", "images", imageNames.collect { [name: it] } )
-    def currentImageCB = new CheckBox( "Current Image" )
-    imagesBox.header.getChildren().addAll( imagesBox.selectAll, imagesBox.spacer, currentImageCB )
-    imagesBox.CBs.each { it.setSelected( it.getText() in prePrefsMap.selectedImages  ) }
-    BorderPane.setMargin( imagesBox.box, new Insets( 0, 15, 0, 0 ) )
-    
-    if (currentEntry) {
-        def currentCB = imagesBox.CBs.find { it.getText() == currentEntry.getImageName() }
-        currentImageCB.selectedProperty().bindBidirectional(
-            currentCB.selectedProperty()
-        )
-        
-        // If current image was only one selected, will update to new image
-        if (prePrefsMap.currentImage == true && prePrefsMap.selectedImages.size() == 1) {
-            imagesBox.CBs.each { it.setSelected( false ) }
-            currentImageCB.setSelected( true )
-        }
-    } else {
-        currentImageCB.setDisable( true )
-    }
-    
-    // Setting and updating tooltip for current image checkbox
-    currentImageCB.selectedProperty().addListener { obs, oldVal, newVal ->
-        setTT( currentImageCB, currentImageCB.isSelected() ? "Deselect current image" : "Select current image" )
-    }
-    
-    root.left = imagesBox.box
-    
     
     // BOTTOM PANEL: Output class preview
     def bottomSpacer = new Region()
@@ -459,22 +560,55 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     // RIGHT PANELS: PathClass selection list
-    def viewer = getCurrentViewer()
-    def annos  = viewer ? getAnnotationObjects() : []
-    def projectPathClasses = project.getPathClasses().findAll { it?.getName() } // No null (those with a name)
-    def countsByClass = annos.countBy { it.getPathClass() } 
+    def projectPathClasses = project.getPathClasses().findAll { it?.getName() }
     
-    // Organizing any pathclasses with objects in the open viewer to the top of the list
-    def highCounts = []
-    def lowCounts = []
-    projectPathClasses.each { pc ->
-        def entry = [name: pc.getName(), num: countsByClass[ pc ] ?: 0]
-        (entry.num > 0 ? highCounts : lowCounts) << entry
+    def gson = new Gson()
+    def imageClassCounts = [:]  // imageName -> [className -> count]
+    def totalsByClass = [:]     // className -> total across all images
+    
+    def imageList = project.getImageList()
+    def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
+    def pool = Executors.newFixedThreadPool( nThreads )
+    def resultMap = new java.util.concurrent.ConcurrentHashMap()
+    
+    // Parallel finding anno summaries
+    def futures = imageList.collect { entry ->
+        pool.submit({
+            def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+            def counts = [:]
+            if (Files.exists( summaryFile )) {
+                try {
+                    def raw = new String( Files.readAllBytes( summaryFile ) )
+                    def summary = gson.fromJson( raw, Object )
+                    summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
+                        def n = k.toString()
+                        counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                    }
+                } catch (Exception ignored) {}
+            }
+            resultMap[ entry.getImageName() ] = counts
+        } as Callable)
     }
-    highCounts.sort { -it.num } // Sort for descending abundance
-    def pathClassNamesAndNum = highCounts + lowCounts
+    futures.each { it.get() }
+    pool.shutdown()
     
-    List pathClassCBsMap = pathClassNamesAndNum.collect { [name: (it.num > 0 ? "${it.name} [${it.num}]" : it.name), data: it.name] }
+    // Merge into imageClassCounts and totalsByClass
+    resultMap.each { imgName, counts ->
+        imageClassCounts[ imgName ] = counts
+        counts.each { className, count ->
+            totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
+        }
+    }
+    
+    // Sort: only classes with existing annotations in project by abundance
+    def highCounts = []
+    projectPathClasses.each { pc ->
+        def total = totalsByClass[ pc.getName() ] ?: 0
+        if (total > 0) { highCounts << [name: pc.getName(), num: total] }
+    }
+    highCounts.sort { -it.num }
+    def pathClassNamesAndNum = highCounts
+    List pathClassCBsMap = pathClassNamesAndNum.collect { [name: it.name, data: it.name] } // labels set by updateClassCounts
     
     def pathClassBox1 = makeCheckboxBox( "Classes 1", "overlap class 1", pathClassCBsMap, 200 )
     pathClassBox1.header.getChildren().addAll( pathClassBox1.title, pathClassBox1.spacer, pathClassBox1.clear )    
@@ -508,6 +642,75 @@ def codePreferences = runOnFxThreadAndWait {
     
     def pathclassBoxes = new HBox( 10, pathClassBox1.box, pathClassBox2.box )
     root.center = pathclassBoxes
+    
+    
+    
+    // LEFT PANEL: Image Selection
+    def imageNames = project.getImageList().collect { it.getImageName() }
+    def imagesBox = makeCheckboxBox( "Select images", "images", imageNames.collect { [name: it] } )
+    def currentImageCB = new CheckBox( "Current Image" )
+    imagesBox.header.getChildren().addAll( imagesBox.selectAll, imagesBox.spacer, currentImageCB )
+    imagesBox.CBs.each { it.setSelected( it.getText() in prePrefsMap.selectedImages  ) }
+    BorderPane.setMargin( imagesBox.box, new Insets( 0, 15, 0, 0 ) )
+    
+    if (currentEntry) {
+        def currentCB = imagesBox.CBs.find { it.getText() == currentEntry.getImageName() }
+        currentImageCB.selectedProperty().bindBidirectional(
+            currentCB.selectedProperty()
+        )
+        
+        // Setting bright border on checkbox for current image 
+        Platform.runLater { 
+            [currentCB, currentImageCB].each {
+                it.lookup( ".box" )?.setStyle("""
+                    -fx-border-color: black;
+                    -fx-border-width: 2;
+                    -fx-border-radius: 1;
+                """)
+            }
+        }
+        
+        // If current image was only one selected, will update to new image
+        if (prePrefsMap.currentImage == true && prePrefsMap.selectedImages.size() == 1) {
+            imagesBox.CBs.each { it.setSelected( false ) }
+            currentImageCB.setSelected( true )
+        }
+    } else {
+        currentImageCB.setDisable( true )
+    }
+    
+    // Setting and updating tooltip for current image checkbox
+    currentImageCB.selectedProperty().addListener { obs, oldVal, newVal ->
+        setTT( currentImageCB, currentImageCB.isSelected() ? "Deselect current image" : "Select current image" )
+    }
+    
+    root.left = imagesBox.box
+    
+    
+    
+    // Closure to update total and selected class counts
+    def updateClassCounts = {
+        def selectedNames = imagesBox.CBs.findAll { it.isSelected() }.collect { it.getText() } as Set
+        def selectedTotals = [:]
+        selectedNames.each { imgName ->
+            imageClassCounts[ imgName ]?.each { className, count ->
+                selectedTotals[ className ] = (selectedTotals[ className ] ?: 0) + count
+            }
+        }
+        [pathClassBox1, pathClassBox2].each { pcBox ->
+            pcBox.CBs.each { cb ->
+                def className = cb.getUserData()
+                def sel   = selectedTotals[ className ] ?: 0
+                def total = totalsByClass[ className ]  ?: 0
+                cb.setText( total > 0 ? "${className} [${sel} / ${total}]" : className )
+            }
+        }
+    }
+    
+    imagesBox.CBs.each { cb ->
+        cb.selectedProperty().addListener { obs, oldVal, newVal -> updateClassCounts() }
+    }
+    updateClassCounts()
     
     
     
@@ -575,14 +778,19 @@ def imagesToRun = project.getImageList().findAll { it.getImageName() in codePref
 
 def total = imagesToRun.size()
 def progressUI = createProgressWindow( "Processing", total )
-def cancelFlag = progressUI.cancelFlag
+def stopNowFlag = progressUI.stopNowFlag
+def stopLaterFlag = progressUI.stopLaterFlag
 int processed = 0
 int netSteps = codePreferences.objectClasses1.size() * codePreferences.objectClasses2.size()
 
+// Pool for parallel processing
+def pool = Executors.newFixedThreadPool( Runtime.getRuntime().availableProcessors() )
+progressUI.poolRef.set( pool )
+
 imageLoop:
 for (image in imagesToRun) {
-    
-    if (cancelFlag.get()) break
+    // Stopping when requested
+    if (stopNowFlag.get() || stopLaterFlag.get()) { break }
     
     // Reporting current image
     updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image] )
@@ -591,6 +799,7 @@ for (image in imagesToRun) {
     def imageData = image == currentEntry ? currentImageData : image.readImageData()
     def hierarchy = imageData.getHierarchy()
     def annotations = hierarchy.getAnnotationObjects()
+    def annosByClass = annotations.groupBy { it.getPathClass()?.getName() }
     
     int step = 1
     
@@ -624,61 +833,91 @@ for (image in imagesToRun) {
             
                 
             // Getting objects from each class
-            def class1Annos = annotations.findAll {
-                it.getPathClass()?.getName() == class1
-            }
-            def class2Annos = annotations.findAll {
-                it.getPathClass()?.getName() == class2
-            }
-            
-            int totalComps = class1Annos.size() * class2Annos.size()
-            int compNum = 1
-            
+            def class1Annos = annosByClass[ class1 ] ?: []
+            def class2Annos = annosByClass[ class2 ] ?: []
+
+
+
             // Skipping the loop if either class has no objects
-            if (class1Annos.isEmpty() || class2Annos.isEmpty()) continue
-            
-            class1Annos.each { class1Anno ->
-                def class1Geom = class1Anno.getROI().getGeometry()
-                
-                class2Annos.each { class2Anno ->
-                    def class2Geom = class2Anno.getROI().getGeometry()
-                    
-                    if (class1Geom.intersects( class2Geom )) {
-                        
-                        // Establishing the variable for the coming lines
-                        def overlapGeom = cleanForROI( class1Geom.intersection( class2Geom ) )
-                        
-                        if (!overlapGeom.isEmpty() && overlapGeom.getArea() > 1) { 
-                            
-                            def overlapROI = GeometryTools.geometryToROI( overlapGeom, class1Anno.getROI().getImagePlane() )
-                            
-                            // Making the overlapping geometry into an annotation object
-                            def overlapObj = PathObjects.createAnnotationObject( overlapROI, getPathClass( newClass ) )
-                            
-                            // Inserting the annotation based on user preference
-                            def parent
-                            switch (codePreferences.nestBehavior) {
-                                case (NestStrings.CLASS1):
-                                    parent = class1Anno
-                                    break
-                                
-                                case (NestStrings.CLASS1_PARENT):
-                                    parent = class1Anno.getParent()
-                                    break
-                                    
-                                case (NestStrings.NONE):
-                                    parent = hierarchy.getRootObject()
-                                    break
+            if (class1Annos.isEmpty() || class2Annos.isEmpty()) { continue }
+
+            // Build index + cache geometries once before the loop
+            def class2GeomCache = class2Annos.collect { cleanForROI( it.getROI().getGeometry() ) }
+            def class2Tree = new STRtree()
+            // Enveloping the annos to reduce comparisons
+            // by avoiding ones that are geometrically impossible
+            class2Annos.eachWithIndex { anno, i ->
+                def geom = class2GeomCache[i]
+                if (geom != null && !geom.isEmpty()) {
+                    class2Tree.insert( geom.getEnvelopeInternal(), i )
+                }
+            }
+
+            int numClass1 = class1Annos.size()
+            def overlapResults = new Object[ numClass1 ]
+            def doneCount = new AtomicInteger( 0 )
+
+            // Parallel geometry phase
+            def futures = (0..<numClass1).collect { idx ->
+                if (stopNowFlag.get()) { return null }
+                try {
+                    pool.submit({
+                        def class1Anno = class1Annos[ idx ]
+                        def class1Geom = cleanForROI( class1Anno.getROI().getGeometry() )
+                        def parent = (codePreferences.nestBehavior == NestStrings.CLASS1)        ? class1Anno :
+                                     (codePreferences.nestBehavior == NestStrings.CLASS1_PARENT) ? class1Anno.getParent() :
+                                                                                                    hierarchy.getRootObject()
+                        def localResults = []
+                        if (class1Geom != null && !class1Geom.isEmpty()) {
+                            class2Tree.query( class1Geom.getEnvelopeInternal() ).each { i ->
+                                def class2Geom = class2GeomCache[ i ]
+                                if (class2Geom != null && !class2Geom.isEmpty() && class1Geom.intersects( class2Geom )) {
+                                    try {
+                                        def overlapGeom = cleanForROI( class1Geom.intersection( class2Geom ) )
+                                        if (overlapGeom != null && !overlapGeom.isEmpty() && overlapGeom.getArea() > 1) {
+                                            localResults << [ geom: overlapGeom, parent: parent, plane: class1Anno.getROI().getImagePlane() ]
+                                        }
+                                    } catch (Exception e) {
+                                        logger.warn( "Skipping invalid intersection between ${class1Anno.getName()} and ${class2Annos[i]?.getName()}: ${e.getMessage()}" )
+                                    }
+                                }
                             }
-                            
-                            hierarchy.addObjectBelowParent( parent, overlapObj, false )
-                            overlapObj.setLocked( true )
                         }
+                        overlapResults[ idx ] = localResults
+            
+                        int pDone = ( doneCount.incrementAndGet() / numClass1 * 100 ) as int
+                        updateProgressWindow( progressUI, [ stepPer: pDone ] )
+                    } as Callable)
+                } catch (RejectedExecutionException ignored) {
+                    null
+                }
+            }.findAll { it != null }
+            
+            // Allowing live cancel
+            try {
+                for (def f in futures) {
+                    f.get()
+                    if (stopNowFlag.get()) {
+                        pool.shutdownNow()
+                        continue imageLoop
                     }
-                    
-                    int percentDone = (compNum / totalComps) * 100
-                    updateProgressWindow( progressUI, [stepPer: percentDone] )
-                    compNum ++
+                }
+            } catch (Exception e) {
+                if (stopNowFlag.get()) {
+                    continue imageLoop
+                }
+                throw e
+            }            
+            
+            // Serial hierarchy adds
+            runOnFxThreadAndWait {
+                overlapResults.each { localResults ->
+                    localResults?.each { r ->
+                        def overlapROI = GeometryTools.geometryToROI( r.geom, r.plane )
+                        def overlapObj = PathObjects.createAnnotationObject( overlapROI, getPathClass( newClass ) )
+                        hierarchy.addObjectBelowParent( r.parent, overlapObj, false )
+                        overlapObj.setLocked( true )
+                    }
                 }
             }
             step ++
@@ -710,8 +949,10 @@ for (image in imagesToRun) {
     // - Reporting progress -
     processed++
     double frac = processed / total 
-    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
+    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed+1] )
 }
+
+pool.shutdown()
 
 // Closing progress bar window
 Platform.runLater {
@@ -719,16 +960,19 @@ Platform.runLater {
 }
 
 
-import java.util.concurrent.CountDownLatch
+import java.nio.file.Files
+import java.util.concurrent.*
+import java.util.concurrent.atomic.*
+import javafx.util.Duration
 import javafx.animation.*
 import javafx.application.Platform
 import javafx.beans.property.SimpleStringProperty
-import javafx.geometry.Insets
-import javafx.geometry.Pos
+import javafx.geometry.*
 import javafx.scene.Scene
 import javafx.scene.control.*
 import javafx.scene.control.ButtonBar.ButtonData
 import javafx.scene.layout.*
+import javafx.scene.input.*
 import javafx.stage.*
 import javafx.beans.binding.Bindings
 import com.google.gson.GsonBuilder
@@ -740,6 +984,7 @@ import org.locationtech.jts.operation.union.UnaryUnionOp
 
 import qupath.lib.gui.tools.IconFactory
 import org.controlsfx.glyphfont.FontAwesome
+import org.locationtech.jts.index.strtree.STRtree
 
 
 // Comments for tool launcher icon and tooltip
