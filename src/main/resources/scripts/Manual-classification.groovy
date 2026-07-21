@@ -188,6 +188,11 @@ def runOnFxThreadAndWait( Closure fxCode ) {
     return result.value
 }
 
+// Function to get base channel name with no numbers (e.g. "(C1)")
+def baseChannelName(String name) {
+    name?.replaceAll('\\s*\\(C\\d+\\)\\s*$', '')?.trim() ?: name
+}
+
 // Function to set or change a tooltip hint for one or multiple objects
 def setTT( objs, String tooltip ) {
     objs.each { obj ->
@@ -2013,7 +2018,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def imageList = project.getImageList()
         def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
         def summaryPool = Executors.newFixedThreadPool( nThreads )
-        def resultMap = new java.util.concurrent.ConcurrentHashMap()
+        def resultMap = new ConcurrentHashMap()
         
         // Parallel finding anno summaries
         def summaryFutures = imageList.collect { entry ->
@@ -2024,39 +2029,40 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                     try {
                         def raw = new String( Files.readAllBytes( summaryFile ) )
                         def summary = summaryGson.fromJson( raw, Object )
-                        summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
-                            def n = k.toString()
-                            counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                        def classCounts = summary?.get( "hierarchy" )?.get( "annotationClassificationCounts" )
+                        classCounts?.each { k, v ->
+                            counts[ k.toString() ] = (v instanceof Number) ? ((Number)v).intValue() : 0
                         }
-                    } catch (Exception ignored) {}
+                    } catch (Exception e) {
+                        logger.warn( "[AnnoTools] summary parse failed for ${entry.getImageName()}: ${e.getMessage()}" )
+                    }
                 }
-                resultMap[ entry.getImageName() ] = counts
+                return [entry.getImageName(), counts]
             } as Callable)
         }
-        summaryFutures.each { it.get() }
+        
+        // Serial merge. no concurrent writes
+        summaryFutures.each { f ->
+            def (name, counts) = f.get()
+            resultMap[ name ] = counts
+        }
         summaryPool.shutdown()
         
         // Merge into imageClassCounts and totalsByClass
         resultMap.each { imgName, counts ->
-            imageClassCounts[ imgName ] = counts
+            imageClassCounts[imgName] = counts
             counts.each { className, count ->
-                totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
+                totalsByClass.merge(className, count, Integer.&sum)
             }
         }
         
         def currentImageName = currentImageData?.getServer()?.getMetadata()?.getName()
-        def currentImageCounts = currentImageName ? (imageClassCounts[ currentImageName ] ?: [:]) : null
+        def currentImageCounts = currentImageName ? (imageClassCounts[currentImageName] ?: [:]) : [:]
         
-        // Sort: only classes with existing annotations in project by abundance
-        def highCounts = []
-        projectPathClasses.each { pc ->
-            def total = totalsByClass[ pc.getName() ] ?: 0
-            if (total > 0) { 
-                highCounts << [name: pc.getName(), num: total, imageNum: currentImageCounts?[ pc.getName() ] ?: 0] 
-            }
-        }
-        highCounts.sort { -it.num }
-        def pathClassEntries = highCounts
+        // Sort: only classes with existing annotations in project, by abundance
+        List pathClassEntries = totalsByClass
+            .collect { pc, count -> [name: pc, num: count, imageNum: currentImageCounts[pc] ?: 0] }
+            .sort { -it.num }
         
         // Set dropdown selection to show counts
         annoClassField.setCellFactory {
@@ -2343,12 +2349,13 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         
         def serverFutures = projectImages.collect { entry ->
             serverPool.submit({
-                def summaryFile = entry.getEntryPath().resolve( "server.json" )
-                if (Files.exists( summaryFile )) {
+                def serverFile = entry.getEntryPath().resolve( "server.json" )
+                if (Files.exists( serverFile )) {
                     try {
-                        def raw = new String( Files.readAllBytes( summaryFile ) )
+                        def raw = new String( Files.readAllBytes( serverFile ) )
                         def server = serverGson.fromJson( raw, Object )
-                        return server?.metadata?.channels?.collect { it.name } ?: null
+                        def channels = server?.get( "metadata" )?.get( "channels" )
+                        return channels?.collect { baseChannelName( it.get( "name" ) as String ) } ?: null
                     } catch (Exception ignored) {}
                 }
                 return null
@@ -2361,7 +2368,9 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def commonChannels = allChannelLists ? allChannelLists.inject { acc, channels -> acc.intersect( channels ) } : []
         
         def channelCheckboxes = commonChannels.collect { channelName ->
-            new CheckBox( channelName )
+            def cb = new CheckBox( channelName )
+            cb.setMnemonicParsing( false )
+            return cb
         }
         
         // Create bounding box for channels and relevant options

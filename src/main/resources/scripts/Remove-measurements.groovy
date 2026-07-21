@@ -42,6 +42,7 @@ def setTT( objs, String tooltip ) {
 }
 
 // Function: Create window showing script progress
+// Function: Create window showing script progress
 def createProgressWindow( String title, int totalImages, boolean simplify = false, Stage ownerStage = null ) {
     return runOnFxThreadAndWait {
         def stage = new Stage()
@@ -58,12 +59,9 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         def imageRow = new HBox( 5, imageLabel )
         
         def bar = new ProgressBar( 0.0 )
-        
-        // Progress bar fills row width
         bar.setPrefWidth( 350 )
         bar.setMaxWidth( Double.MAX_VALUE )
         HBox.setHgrow( bar, Priority.ALWAYS )
-        
         def barRow = new HBox( 10, bar )
         
         def stopBtn = new Button( "Stop" )
@@ -85,15 +83,12 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         vbox.setPadding( new Insets( 10 ) )
         vbox.setAlignment( Pos.CENTER_LEFT )
         
-        // Sizing to fit all rows
         def updateMinWidth = {
             double preferred = rows.collect { it.getWidth() }.max() + vbox.getPadding().getLeft() + vbox.getPadding().getRight()
             if ( preferred > stage.getWidth() ) {
                 stage.setWidth( preferred )
             }
         }
-        
-        // Attaching the width update as a listener
         rows.each { node ->
             node.setMinWidth( Region.USE_PREF_SIZE )
             node.widthProperty().addListener { obs, old, nw -> updateMinWidth() }
@@ -116,15 +111,14 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         stage.setScene( scene )
         
         def gui = QuPathGUI.getInstance()
-        stage.initOwner( ownerStage ?: gui?.getStage() ) // use passed owner, fallback to QuPath
-        
+        stage.initOwner( ownerStage ?: gui?.getStage() )
         stage.initModality( Modality.WINDOW_MODAL )
         stage.show()
         updateStageWidth()
         
         def startTime = System.nanoTime()
         
-        def timeline = new Timeline(
+        def timerTimeline = new Timeline(
             new KeyFrame(
                 javafx.util.Duration.seconds( 1 ),
                 { evt ->
@@ -133,15 +127,39 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
                     long hrs = seconds / 3600
                     long mins = (seconds % 3600) / 60
                     long secs = seconds % 60
-                    
                     timerLabel.setText(
                         String.format( "Elapsed: %02d:%02d:%02d", hrs, mins, secs )
                     )
                 }
             )
         )
-        timeline.setCycleCount( Animation.INDEFINITE )
-        timeline.play()
+        timerTimeline.setCycleCount( Animation.INDEFINITE )
+        timerTimeline.play()
+        
+        // Shared atomic state written by worker threads, read by poll timeline
+        def doneCount     = new AtomicInteger( 0 )
+        def lastImageName = new AtomicReference<String>( "Starting..." )
+        
+        // Poll at 100 ms — faster than the render pulse, so no burst is missed
+        def pollTimeline = new Timeline(
+            new KeyFrame(
+                javafx.util.Duration.millis( 100 ),
+                { evt ->
+                    int done = doneCount.get()
+                    imageNum.set( "${done}" )
+                    imageName.set( lastImageName.get() )
+                    bar.setProgress( totalImages > 0 ? done / (double)totalImages : 0.0 )
+                }
+            )
+        )
+        pollTimeline.setCycleCount( Animation.INDEFINITE )
+        pollTimeline.play()
+        
+        // Stop both timelines when the stage is actually closed
+        stage.setOnHidden {
+            timerTimeline.stop()
+            pollTimeline.stop()
+        }
         
         // Signal to stop script
         def stopLaterFlag = new AtomicBoolean( false )
@@ -151,23 +169,18 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         
         def showStopConfirmation = {
             if (stopLaterFlag.get()) { return }
-            
             def alert = new Alert( Alert.AlertType.CONFIRMATION )
             alert.setTitle( "Stop confirmation" )
             alert.setHeaderText( "Stop processing?" )
             alert.initOwner( stage )
-            
             def response = alert.showAndWait().orElse( null )
-            
             if (response == ButtonType.OK) {
                 stopLaterFlag.set( true )
                 bottomRow.getChildren().set( 0, stopLaterLabel )
             }
         }
 
-        stopBtn.setOnAction {
-            showStopConfirmation()
-        }
+        stopBtn.setOnAction { showStopConfirmation() }
         stage.setOnCloseRequest { evt ->
             evt.consume()
             showStopConfirmation()
@@ -175,24 +188,10 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         
         return [
             stage        : stage,
-            imageNum     : imageNum,
-            imageName    : imageName,
-            bar          : bar,
-            stopLaterFlag: stopLaterFlag
+            stopLaterFlag: stopLaterFlag,
+            doneCount    : doneCount,
+            lastImageName: lastImageName
         ]
-    }
-}
-
-// Function: Update progress window
-def updateProgressWindow( UI, Map args = [:] ) {
-    String imageNum  = args.imageNum
-    String imageName = args.imageName
-    double imagePer  = args.imagePer ?: 0
-
-    Platform.runLater {
-        if (imageName) { UI.imageName.set( imageName ) }
-        if (imageNum)  { UI.imageNum.set( imageNum ) }
-        if (imagePer)  { UI.bar.setProgress( imagePer ) }
     }
 }
 
@@ -433,7 +432,6 @@ def addIcon( node, iconCode, int size ) {
 def collectProjectAnnotationIndex( project, Stage ownerStage = null, Collection omittedMdKeys = [] ) {
     List projectImages = project.getImageList()
     def collectingUI = createProgressWindow( "Getting project specifics", projectImages.size(), true, ownerStage )
-    def imagesScanned = new AtomicInteger( 0 )
     int total = projectImages.size()
 
     def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), total )
@@ -466,8 +464,8 @@ def collectProjectAnnotationIndex( project, Stage ownerStage = null, Collection 
                 try { imageData?.close() } catch (Exception ignored2) {}
             }
 
-            int done = imagesScanned.incrementAndGet()
-            updateProgressWindow( collectingUI, [ imagePer: done / total, imageNum: done ] )
+            collectingUI.lastImageName.set( entry.getImageName() )
+            collectingUI.doneCount.incrementAndGet()
 
             return [ classCounts: localClassCounts, measurements: localMeasurements, metadata: localMetadata ]
         } as Callable)
@@ -488,8 +486,9 @@ def collectProjectAnnotationIndex( project, Stage ownerStage = null, Collection 
 
     pool.shutdown()
 
+    Thread.sleep( 200 )
     Platform.runLater { collectingUI.stage.close() }
-
+    
     index.measurementsByClass = index.measurementsByClass.collectEntries { k, v -> [k, new LinkedHashSet( v )] }
     index.metadataByClass     = index.metadataByClass.collectEntries     { k, v -> [k, new LinkedHashSet( v )] }
     index.classCounts         = index.classCounts.collectEntries         { k, v -> [k, v as int] }
@@ -582,8 +581,6 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     // CENTER PANEL: PathClass selection list
-    def projectPathClasses = project.getPathClasses().findAll { it?.getName() }
-    
     def gson = new Gson()
     def imageClassCounts = [:]  // imageName -> [className -> count]
     def totalsByClass = [:]     // className -> total across all images
@@ -591,46 +588,42 @@ def codePreferences = runOnFxThreadAndWait {
     def imageList = project.getImageList()
     def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
     def pool = Executors.newFixedThreadPool( nThreads )
-    def resultMap = new java.util.concurrent.ConcurrentHashMap()
     
-    // Parallel finding anno summaries
     def futures = imageList.collect { entry ->
         pool.submit({
             def summaryFile = entry.getEntryPath().resolve( "summary.json" )
             def counts = [:]
-            if (Files.exists( summaryFile )) {
+            if (Files.exists(summaryFile)) {
                 try {
-                    def raw = new String( Files.readAllBytes( summaryFile ) )
+                    def raw = new String(Files.readAllBytes(summaryFile))
                     def summary = gson.fromJson( raw, Object )
-                    summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
-                        def n = k.toString()
-                        counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                    def classCounts = summary?.get( "hierarchy" )?.get( "annotationClassificationCounts" )
+                    classCounts?.each { k, v ->
+                        counts[ k.toString() ] = (v instanceof Number) ? ((Number)v).intValue() : 0
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception e) {
+                    logger.warn( "[AnnoTools] summary parse failed for ${entry.getImageName()}: ${e.getMessage()}" )
+                }
             }
-            resultMap[ entry.getImageName() ] = counts
+            return [entry.getImageName(), counts]
         } as Callable)
     }
-    futures.each { it.get() }
-    pool.shutdown()
     
-    // Merge into imageClassCounts and totalsByClass
-    resultMap.each { imgName, counts ->
+    // Serial merge — directly into imageClassCounts and totalsByClass, no intermediate map needed
+    futures.each { f ->
+        def (imgName, counts) = f.get()
         imageClassCounts[ imgName ] = counts
         counts.each { className, count ->
-            totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
+            totalsByClass.merge(className, count, Integer.&sum)
         }
     }
+    pool.shutdown()
     
-    // Sort: only classes with existing annotations in project by abundance
-    def highCounts = []
-    projectPathClasses.each { pc ->
-        def total = totalsByClass[ pc.getName() ] ?: 0
-        if (total > 0) { highCounts << [name: pc.getName(), num: total] }
-    }
-    highCounts.sort { -it.num }
-    def pathClassNamesAndNum = highCounts
-    List pathClassCBsMap = pathClassNamesAndNum.collect { [name: it.name, data: it.name] } // labels set by updateClassCounts
+    // Only classes with existing annotations in project, sorted by abundance
+    List pathClassCBsMap = totalsByClass
+        .collect { [name: it.key, data: it.key, num: it.value] }
+        .sort { -it.num }
+        .collect { [name: it.name, data: it.data] } // labels set by updateClassCounts
     def pathClassBox = makeCheckboxBox( "Available classes", null, pathClassCBsMap, 200 )
     pathClassBox.header.getChildren().add( pathClassBox.selectAll )
     pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.objectClasses ) }
@@ -909,7 +902,6 @@ def imagesToRun = project.getImageList().findAll { it.getImageName() in codePref
 def total = imagesToRun.size()
 def progressUI = createProgressWindow( "Processing", total )
 def stopLaterFlag = progressUI.stopLaterFlag
-int processed = 0
 
 // Making a matrix for all images
 List completeMatrixMap = []
@@ -919,7 +911,6 @@ List emptyImages = []
 
 def nThreads = Math.min( Runtime.getRuntime().availableProcessors() * 2, imagesToRun.size() )
 def pool = Executors.newFixedThreadPool( nThreads )
-def doneCount = new AtomicInteger( 0 )
 
 // Parallel processing images
 def futures = imagesToRun.findAll { it != currentEntry }.collect { image ->
@@ -940,12 +931,8 @@ def futures = imagesToRun.findAll { it != currentEntry }.collect { image ->
             imageData.close()
         }
         
-        int done = doneCount.incrementAndGet()
-        updateProgressWindow( progressUI, [
-            imageName: image,
-            imagePer : done / total,
-            imageNum : done + 1
-        ])
+        progressUI.lastImageName.set( image.getImageName() )
+        progressUI.doneCount.incrementAndGet()
     } as Callable)
 }.findAll { it != null }
 
@@ -970,11 +957,8 @@ if (!stopLaterFlag.get() && currentEntry in imagesToRun) {
             viewer.setImageData( currentImageData )
         }
     }
-    int done = doneCount.incrementAndGet()
-    updateProgressWindow( progressUI, [
-        imagePer: done / total,
-        imageNum: done + 1
-    ])
+    progressUI.lastImageName.set( currentEntry.getImageName() )
+    progressUI.doneCount.incrementAndGet()
 }
 
 
@@ -994,6 +978,7 @@ outputMatrix.addFirst( headerRow )
 
 
 // Closing progress bar window
+Thread.sleep( 200 )
 Platform.runLater {
     progressUI.stage.close()
 }

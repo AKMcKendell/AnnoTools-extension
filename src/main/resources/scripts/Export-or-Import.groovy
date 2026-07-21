@@ -47,7 +47,7 @@ def createProgressWindow( String title, int totalImages ) {
         stage.setResizable( false )
         stage.setTitle( title )
         
-        def imageNum = new SimpleStringProperty( "1" )
+        def imageNum = new SimpleStringProperty( "0" )
         def imageName = new SimpleStringProperty( "Starting..." )
         def imageLabel = new Label()
         imageLabel.textProperty().bind(
@@ -96,9 +96,9 @@ def createProgressWindow( String title, int totalImages ) {
         def updateStageWidth = {
             Platform.runLater {
                 double maxRowPref = rows.collect { it.prefWidth(-1) }.max()
-                double needed = Math.max(maxRowPref + vbox.getPadding().getLeft() + vbox.getPadding().getRight(), 350)
+                double needed = Math.max( maxRowPref + vbox.getPadding().getLeft() + vbox.getPadding().getRight(), 350 )
                 if (needed > stage.getWidth()) {
-                    stage.setWidth(needed)
+                    stage.setWidth( needed )
                 }
             }
         }
@@ -137,6 +137,9 @@ def createProgressWindow( String title, int totalImages ) {
         )
         timeline.setCycleCount( Animation.INDEFINITE )
         timeline.play()
+        
+        // Stop both timelines when the stage is actually closed
+        stage.setOnHidden { timeline.stop() }
         
         // Signal to stop script
         def stopLaterFlag = new AtomicBoolean( false )
@@ -607,8 +610,6 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     // RIGHT PANEL: PathClass selection list
-    def projectPathClasses = project.getPathClasses().findAll { it?.getName() }
-    
     def gson = new Gson()
     def imageClassCounts = [:]  // imageName -> [className -> count]
     def totalsByClass = [:]     // className -> total across all images
@@ -616,46 +617,42 @@ def codePreferences = runOnFxThreadAndWait {
     def imageList = project.getImageList()
     def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
     def pool = Executors.newFixedThreadPool( nThreads )
-    def resultMap = new java.util.concurrent.ConcurrentHashMap()
     
-    // Parallel finding anno summaries
     def futures = imageList.collect { entry ->
         pool.submit({
             def summaryFile = entry.getEntryPath().resolve( "summary.json" )
             def counts = [:]
-            if (Files.exists( summaryFile )) {
+            if (Files.exists(summaryFile)) {
                 try {
-                    def raw = new String( Files.readAllBytes( summaryFile ) )
+                    def raw = new String(Files.readAllBytes(summaryFile))
                     def summary = gson.fromJson( raw, Object )
-                    summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
-                        def n = k.toString()
-                        counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                    def classCounts = summary?.get( "hierarchy" )?.get( "annotationClassificationCounts" )
+                    classCounts?.each { k, v ->
+                        counts[ k.toString() ] = (v instanceof Number) ? ((Number)v).intValue() : 0
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception e) {
+                    logger.warn( "[AnnoTools] summary parse failed for ${entry.getImageName()}: ${e.getMessage()}" )
+                }
             }
-            resultMap[ entry.getImageName() ] = counts
+            return [entry.getImageName(), counts]
         } as Callable)
     }
-    futures.each { it.get() }
-    pool.shutdown()
     
-    // Merge into imageClassCounts and totalsByClass
-    resultMap.each { imgName, counts ->
+    // Serial merge — directly into imageClassCounts and totalsByClass, no intermediate map needed
+    futures.each { f ->
+        def (imgName, counts) = f.get()
         imageClassCounts[ imgName ] = counts
         counts.each { className, count ->
-            totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
+            totalsByClass.merge(className, count, Integer.&sum)
         }
     }
+    pool.shutdown()
     
-    // Sort: only classes with existing annotations in project by abundance
-    def highCounts = []
-    projectPathClasses.each { pc ->
-        def total = totalsByClass[ pc.getName() ] ?: 0
-        if (total > 0) { highCounts << [name: pc.getName(), num: total] }
-    }
-    highCounts.sort { -it.num }
-    def pathClassNamesAndNum = highCounts
-    List pathClassCBsMap = pathClassNamesAndNum.collect { [name: it.name, data: it.name] } // labels set by updateClassCounts
+    // Only classes with existing annotations in project, sorted by abundance
+    List pathClassCBsMap = totalsByClass
+        .collect { [name: it.key, data: it.key, num: it.value] }
+        .sort { -it.num }
+        .collect { [name: it.name, data: it.data] } // labels set by updateClassCounts
     def pathClassBox = makeCheckboxBox( "Object classes", null, pathClassCBsMap, 200 )    
     pathClassBox.header.getChildren().addAll( pathClassBox.title, pathClassBox.spacer, pathClassBox.clear )    
     pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.objectClasses ) }
@@ -745,7 +742,7 @@ def codePreferences = runOnFxThreadAndWait {
     
     // Closure: Make the selected folder path viewable
     def formatFolderPathView = { String path_format, double maxWidth, Font font_format ->
-        if (!path_format) return "No folder selected"
+        if (!path_format) { return "No folder selected" }
         def reversePathSplit = path_format.tokenize( "/\\\\" ).reverse()
         def viewPath = reversePathSplit[ 0 ]
         for (folder in reversePathSplit.drop( 1 )) {
@@ -1043,12 +1040,12 @@ def codePreferences = runOnFxThreadAndWait {
             
             // Return all preferences of "OK" is selected
             return [
-                selectedFolder      : selectedFolderPath?.toString(),
-                mode                : mode,
-                includeParents      : includeParentsCheck.isSelected(),
-                selectedImages      : selectedImages,
-                currentImage        : currentImageCB.isSelected(),
-                selectedPathClasses : selectedPathClasses
+                selectedFolder: selectedFolderPath?.toString(),
+                mode          : mode,
+                includeParents: includeParentsCheck.isSelected(),
+                selectedImages: selectedImages,
+                currentImage  : currentImageCB.isSelected(),
+                objectClasses : selectedPathClasses
             ]
             
         } else {
@@ -1064,11 +1061,11 @@ if (codePreferences == null) {
     
 } else if (codePreferences.mode != "resolveHierarchy") { // Write to .json if exporting/importing
     def currentPrefs = [
-        selectedFolder      : codePreferences.selectedFolder ?: "",
-        mode                : codePreferences.mode ?: "export",
-        selectedImages      : codePreferences.selectedImages ?: [],
-        currentImage        : codePreferences.currentImage ?: false,
-        selectedPathClasses : codePreferences.selectedPathClasses ?: []
+        selectedFolder: codePreferences.selectedFolder ?: "",
+        mode          : codePreferences.mode ?: "export",
+        selectedImages: codePreferences.selectedImages ?: [],
+        currentImage  : codePreferences.currentImage ?: false,
+        objectClasses : codePreferences.objectClasses ?: []
     ]
     
     def outputGson = new GsonBuilder().setPrettyPrinting().create()
@@ -1159,7 +1156,7 @@ for (image in imagesToRun) {
         
         // --- Filter annotations ---
         def annotationsForExport = hierarchy.getAnnotationObjects().findAll {
-            def matchClass = it.getPathClass()?.getName() in codePreferences.selectedPathClasses
+            def matchClass = it.getPathClass()?.getName() in codePreferences.objectClasses
             return matchClass
         }
         
@@ -1246,7 +1243,7 @@ for (image in imagesToRun) {
                             def fileChooser = new FileChooser()
                             fileChooser.setTitle( "Find: ${imageName}" )
                             fileChooser.getExtensionFilters().add(
-                                new FileChooser.ExtensionFilter("GeoJSON files", "*.geojson")
+                                new FileChooser.ExtensionFilter( "GeoJSON files", "*.geojson" )
                             )
                             fileChooser.setInitialDirectory( folderPath )
                             
@@ -1272,7 +1269,13 @@ for (image in imagesToRun) {
             def workingObjects = hierarchy.getAnnotationObjects().toList()
             
             // Read imported objects
-            def importedObjects = PathIO.readObjects( file )
+            def importedObjects = []
+            try {
+                importedObjects = PathIO.readObjects(file)
+            } catch (Exception e) {
+                Dialogs.showErrorNotification( "Skipping import for '${file.getName()}'", e.getMessage() )
+                logger.error( "Skipping import for '${file.getName()}': ${e.getMessage()}" )
+            }
             
             // Optionally remove current objects of the same class
             def importingObjClasses = importedObjects*.getPathClass().unique()
@@ -1362,10 +1365,11 @@ for (image in imagesToRun) {
     }
     
     
-    // - Reporting progress -
+    // - Reporting progress - 
     processed++
-    double frac = processed / total 
-    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed+1] )
+    double frac = processed / total
+    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
+    System.sleep( 10 )
 }
 
 // Closing progress bar window

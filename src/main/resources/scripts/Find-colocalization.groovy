@@ -158,6 +158,9 @@ def createProgressWindow( String title, int totalImages ) {
         timeline.setCycleCount( Animation.INDEFINITE )
         timeline.play()
         
+        // Stop both timelines when the stage is actually closed
+        stage.setOnHidden { timeline.stop() }
+        
         // Signal to cancel script
         def stopNowFlag   = new AtomicBoolean( false )
         def stopLaterFlag = new AtomicBoolean( false )
@@ -560,8 +563,6 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     // RIGHT PANELS: PathClass selection list
-    def projectPathClasses = project.getPathClasses().findAll { it?.getName() }
-    
     def gson = new Gson()
     def imageClassCounts = [:]  // imageName -> [className -> count]
     def totalsByClass = [:]     // className -> total across all images
@@ -569,46 +570,42 @@ def codePreferences = runOnFxThreadAndWait {
     def imageList = project.getImageList()
     def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), imageList.size() )
     def pool = Executors.newFixedThreadPool( nThreads )
-    def resultMap = new java.util.concurrent.ConcurrentHashMap()
     
-    // Parallel finding anno summaries
     def futures = imageList.collect { entry ->
         pool.submit({
             def summaryFile = entry.getEntryPath().resolve( "summary.json" )
             def counts = [:]
-            if (Files.exists( summaryFile )) {
+            if (Files.exists(summaryFile)) {
                 try {
-                    def raw = new String( Files.readAllBytes( summaryFile ) )
+                    def raw = new String(Files.readAllBytes(summaryFile))
                     def summary = gson.fromJson( raw, Object )
-                    summary?.hierarchy?.annotationClassificationCounts?.each { k, v ->
-                        def n = k.toString()
-                        counts[ n ] = (v instanceof Number) ? ((Number)v).intValue() : 0
+                    def classCounts = summary?.get( "hierarchy" )?.get( "annotationClassificationCounts" )
+                    classCounts?.each { k, v ->
+                        counts[ k.toString() ] = (v instanceof Number) ? ((Number)v).intValue() : 0
                     }
-                } catch (Exception ignored) {}
+                } catch (Exception e) {
+                    logger.warn( "[AnnoTools] summary parse failed for ${entry.getImageName()}: ${e.getMessage()}" )
+                }
             }
-            resultMap[ entry.getImageName() ] = counts
+            return [entry.getImageName(), counts]
         } as Callable)
     }
-    futures.each { it.get() }
-    pool.shutdown()
     
-    // Merge into imageClassCounts and totalsByClass
-    resultMap.each { imgName, counts ->
+    // Serial merge — directly into imageClassCounts and totalsByClass, no intermediate map needed
+    futures.each { f ->
+        def (imgName, counts) = f.get()
         imageClassCounts[ imgName ] = counts
         counts.each { className, count ->
-            totalsByClass[ className ] = (totalsByClass[ className ] ?: 0) + count
+            totalsByClass.merge(className, count, Integer.&sum)
         }
     }
+    pool.shutdown()
     
-    // Sort: only classes with existing annotations in project by abundance
-    def highCounts = []
-    projectPathClasses.each { pc ->
-        def total = totalsByClass[ pc.getName() ] ?: 0
-        if (total > 0) { highCounts << [name: pc.getName(), num: total] }
-    }
-    highCounts.sort { -it.num }
-    def pathClassNamesAndNum = highCounts
-    List pathClassCBsMap = pathClassNamesAndNum.collect { [name: it.name, data: it.name] } // labels set by updateClassCounts
+    // Only classes with existing annotations in project, sorted by abundance
+    List pathClassCBsMap = totalsByClass
+        .collect { [name: it.key, data: it.key, num: it.value] }
+        .sort { -it.num }
+        .collect { [name: it.name, data: it.data] } // labels set by updateClassCounts
     
     def pathClassBox1 = makeCheckboxBox( "Classes 1", "overlap class 1", pathClassCBsMap, 200 )
     pathClassBox1.header.getChildren().addAll( pathClassBox1.title, pathClassBox1.spacer, pathClassBox1.clear )    
@@ -793,7 +790,7 @@ for (image in imagesToRun) {
     if (stopNowFlag.get() || stopLaterFlag.get()) { break }
     
     // Reporting current image
-    updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image] )
+    updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image, imageNum: processed+1] )
     
     // If working on current image, modifying respective image data
     def imageData = image == currentEntry ? currentImageData : image.readImageData()
@@ -949,7 +946,7 @@ for (image in imagesToRun) {
     // - Reporting progress -
     processed++
     double frac = processed / total 
-    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed+1] )
+    updateProgressWindow( progressUI, [imagePer: frac] )
 }
 
 pool.shutdown()
