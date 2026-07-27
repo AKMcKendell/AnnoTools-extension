@@ -40,7 +40,7 @@ def setTT( objs, String tooltip ) {
 }
 
 // Function: Create window showing script progress
-def createProgressWindow( String title, int totalImages ) {
+def createProgressWindow( String title, int totalImages, List imageNames = [] ) {
     return runOnFxThreadAndWait {
         def stage = new Stage()
         stage.setMinWidth( 350 )
@@ -125,6 +125,28 @@ def createProgressWindow( String title, int totalImages ) {
         }
         stage.initModality( Modality.WINDOW_MODAL )
         stage.show()
+
+        // Pre-size once to fit the longest image name (plus every other row), never
+        // below the minimum width, so the window opens at its final size rather than
+        // growing as image names appear during the run. The grow-never-shrink logic
+        // stays in place as a floor so unusually long step text still can't be clipped.
+        String widestImageName = (imageNames ?: []).collect { it?.toString() ?: "" }.max { it.length() } ?: ""
+        String initialImageName = imageName.get()
+        String initialImageNum  = imageNum.get()
+        imageName.set( widestImageName )
+        imageNum.set( totalImages.toString() )
+        vbox.applyCss()
+        vbox.layout()
+        // The stage width includes the OS window frame, so the usable scene is
+        // narrower than the stage by its side borders (a few px on Windows, ~0 on
+        // macOS). Add that back or the content's right edge gets clipped.
+        double frameWidth = scene.getWidth() > 0 ? Math.max( stage.getWidth() - scene.getWidth(), 0 ) : 0
+        double contentWidth = rows.collect { it.prefWidth( -1 ) }.max() + vbox.getPadding().getLeft() + vbox.getPadding().getRight()
+        double baselineWidth = Math.max( contentWidth + frameWidth, stage.getMinWidth() )
+        if (baselineWidth > stage.getMinWidth()) { stage.setMinWidth( baselineWidth ) }
+        if (baselineWidth > stage.getWidth())    { stage.setWidth( baselineWidth ) }
+        imageName.set( initialImageName )
+        imageNum.set( initialImageNum )
         updateStageWidth()
         
         def startTime = System.nanoTime()
@@ -244,6 +266,22 @@ def updateProgressWindow( UI, Map args = [:] ) {
     }
 }
 
+// Function: Lock a node's current dimensions to prevent resizing
+def lockDimensions( Node nodes ) {
+    Platform.runLater {
+        nodes.each { node ->
+            double h = node.getHeight()
+            node.setMinHeight( h )
+            node.setPrefHeight( h )
+            node.setMaxHeight( h )
+            double w = node.getWidth()
+            node.setMinWidth( w )
+            node.setPrefWidth( w )
+            node.setMaxWidth( w )
+        }
+    }
+}
+
 // Function: Make a checkbox that selects/deselects all checkboxes
 def makeSelectAllCB( List groupCBs ) {
     def selectAllCB = new CheckBox()
@@ -281,12 +319,14 @@ def addIcon( node, iconCode, int size ) {
 
 
 // Function: Make a box with checkboxes and a modifiable header
-def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0 ) {
+def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0, String emptyMessage = "None available" ) {
     
     def checkboxBox = new VBox( 5 )
     checkboxBox.setPadding( new Insets( 5 ) )
     if (prefWidth > 0) {
         checkboxBox.setPrefWidth( prefWidth )
+        checkboxBox.setMinWidth( prefWidth )
+        checkboxBox.setMaxWidth( prefWidth )
     }
     if (prefHeight > 0) {
         checkboxBox.setPrefHeight( prefHeight )
@@ -297,15 +337,29 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     
     // Build checkboxes from supplied objects
     def checkboxes = objects.collect { obj ->
-        
+
         def cb = new CheckBox( obj.name )
         cb.setUserData( obj.data ?: obj.name )
         cb.setMnemonicParsing( false ) // so no characters are dropped
-        
+
         return cb
     }
-    
+
+    def noneAvailableLabel = new Label( emptyMessage )
+    noneAvailableLabel.setStyle( "-fx-font-style: italic; -fx-text-fill: gray;" )
+    noneAvailableLabel.setPadding( new Insets( 5 ) )
+
+    checkboxContainer.getChildren().add( noneAvailableLabel )
     checkboxes.each { checkboxContainer.getChildren().add( it ) }
+
+    // Shows "None available" whenever there are no checkboxes, or none are currently visible
+    def updateNoneAvailable = {
+        boolean anyVisible = checkboxes.any { it.isVisible() }
+        noneAvailableLabel.setVisible( !anyVisible )
+        noneAvailableLabel.setManaged( !anyVisible )
+    }
+    updateNoneAvailable()
+    checkboxes.each { cb -> cb.visibleProperty().addListener { obs, oldVal, newVal -> updateNoneAvailable() } }
     
     def selectAllCB = makeSelectAllCB( checkboxes )
     
@@ -353,10 +407,25 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     
     def titleLabel = new Label()
     titleLabel.setPadding( new Insets( 5, 0, 0, 0 ) )
-    
+
+    // Set initial wording so the box's purpose is clear even when there's nothing to check
+    titleLabel.setText( "${title.capitalize()} [0]" )
+    selectAllCB.setText( "${title.capitalize()} [0]" )
+
+    // Once shown, measure/lock against the widest possible count so later updates never get clipped
+    selectAllCB.sceneProperty().addListener { obs, oldScene, newScene ->
+        if (newScene != null) {
+            String initialText = selectAllCB.getText()
+            selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
+            Platform.runLater {  // extra pulse so CSS skin is applied
+                lockDimensions( selectAllCB )
+                Platform.runLater { selectAllCB.setText( initialText ) }
+            }
+        }
+    }
+
     // Add listeners to checkboxes (for changing instructions/labels)
-    checkboxes.each { cb ->
-        cb.selectedProperty().addListener { obs, oldVal, newVal ->            
+    def refreshLabels = {
             
             String TTword = keyWord ?: title
             
@@ -377,6 +446,9 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
             
             setTT( [titleLabel, scrollPane], tooltipText )
         }
+    checkboxes.each { cb ->
+        cb.selectedProperty().addListener { obs, oldVal, newVal -> refreshLabels() }
+        cb.textProperty().addListener { obs, oldVal, newVal -> refreshLabels() }
         
         // Double fire to spark listeners
         cb.setSelected( !cb.isSelected() )
@@ -440,6 +512,69 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
 
 
 
+// Function: Partition image entries by a keep-predicate evaluated against each image's class
+// counts from summary.json. The parallel read touches no image data; the predicate runs on the
+// calling thread (never a pool thread). Fails OPEN — if an image's summary is missing/unreadable
+// its counts are unknown and the image is kept.
+def filterImagesBySummary( List imageEntries, Closure keepPredicate ) {
+    if (imageEntries.isEmpty()) { return [toRun: [], skipped: []] }
+
+    def gson = new Gson()
+    def nThreads = Math.max( 1, Math.min( Runtime.getRuntime().availableProcessors(), imageEntries.size() ) )
+    def pool = Executors.newFixedThreadPool( nThreads )
+    def countsList
+    try {
+        def futures = imageEntries.collect { entry ->
+            pool.submit({
+                def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+                if (!Files.exists( summaryFile )) { return null }   // unknown => keep
+                try {
+                    def raw = new String( Files.readAllBytes( summaryFile ) )
+                    def summary = gson.fromJson( raw, Object )
+                    def classCounts = summary?.get( "hierarchy" )?.get( "annotationClassificationCounts" )
+                    if (!(classCounts instanceof Map)) { return null }
+                    def counts = [:]
+                    classCounts.each { k, v -> counts[ k.toString() ] = (v instanceof Number) ? ((Number) v).intValue() : 0 }
+                    return counts
+                } catch (Exception e) {
+                    logger.warn( "[AnnoTools] class pre-filter: summary parse failed for ${entry.getImageName()}: ${e.getMessage()}" )
+                    return null   // unknown => keep
+                }
+            } as Callable)
+        }
+        countsList = futures.collect { it.get() }
+    } finally {
+        pool.shutdown()
+    }
+
+    def toRun   = []
+    def skipped = []
+    imageEntries.eachWithIndex { entry, i ->
+        def counts = countsList[ i ]
+        boolean keep = (counts == null) ? true : keepPredicate( counts )
+        (keep ? toRun : skipped) << entry
+    }
+    return [toRun: toRun, skipped: skipped]
+}
+
+
+// Function: Natural (alphanumeric) comparison so embedded numbers sort numerically rather than lexically
+def naturalCompare( String s1, String s2 ) {
+    def ta = []
+    (( s1 ?: "" ).toLowerCase() =~ /\d+|\D+/).each { ta << it }
+    def tb = []
+    (( s2 ?: "" ).toLowerCase() =~ /\d+|\D+/).each { tb << it }
+    int n = Math.min( ta.size(), tb.size() )
+    for (int i = 0; i < n; i++) {
+        String x = ta[ i ]
+        String y = tb[ i ]
+        int cmp = (x ==~ /\d+/ && y ==~ /\d+/) ? ((x as BigInteger) <=> (y as BigInteger)) : (x <=> y)
+        if (cmp != 0) { return cmp }
+    }
+    return ta.size() <=> tb.size()
+}
+
+
 // Project & preferences file
 def project = getProject()
 def currentImageData = getCurrentImageData()
@@ -499,9 +634,9 @@ def codePreferences = runOnFxThreadAndWait {
         pool.submit({
             def summaryFile = entry.getEntryPath().resolve( "summary.json" )
             def counts = [:]
-            if (Files.exists(summaryFile)) {
+            if (Files.exists( summaryFile )) {
                 try {
-                    def raw = new String(Files.readAllBytes(summaryFile))
+                    def raw = new String( Files.readAllBytes( summaryFile ) )
                     def summary = gson.fromJson( raw, Object )
                     def classCounts = summary?.get( "hierarchy" )?.get( "annotationClassificationCounts" )
                     classCounts?.each { k, v ->
@@ -520,15 +655,35 @@ def codePreferences = runOnFxThreadAndWait {
         def (imgName, counts) = f.get()
         imageClassCounts[ imgName ] = counts
         counts.each { className, count ->
-            totalsByClass.merge(className, count, Integer.&sum)
+            totalsByClass.merge( className, count, Integer.&sum )
         }
     }
     pool.shutdown()
     
+    // If an image is open, use its LIVE hierarchy for that image's class counts so unsaved
+    // objects are reflected — both in the counts and in whether a class appears at all. Cheap,
+    // since the image is already loaded, and safe on the FX thread we're already running on.
+    if (currentEntry != null && currentImageData != null) {
+        def liveCounts = [:]
+        currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
+            def cn = obj.getPathClass()?.getName()
+            if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+        }
+        imageClassCounts[ currentEntry.getImageName() ] = liveCounts
+
+        // Rebuild totals in place so the override is reflected everywhere downstream
+        totalsByClass.clear()
+        imageClassCounts.each { imgName, counts ->
+            counts.each { className, count ->
+                totalsByClass.merge( className, count, Integer.&sum )
+            }
+        }
+    }
+
     // Only classes with existing annotations in project, sorted by abundance
     List pathClassCBsMap = totalsByClass
         .collect { [name: it.key, data: it.key, num: it.value] }
-        .sort { -it.num }
+        .sort { a, b -> (b.num <=> a.num) ?: naturalCompare( a.name, b.name ) }
         .collect { [name: it.name, data: it.data] } // labels set by updateClassCounts
     def pathClassBox = makeCheckboxBox( "Object classes", null, pathClassCBsMap, 200 )    
     pathClassBox.header.getChildren().addAll( pathClassBox.title, pathClassBox.spacer, pathClassBox.clear )    
@@ -751,8 +906,45 @@ if (codePreferences == null) {
 
 def imagesToRun = project.getImageList().findAll { it.getImageName() in codePreferences.selectedImages }
 
+// --- PRE-FILTER: skip selected images with no viable objects of the chosen class(es) ---
+// Non-current images are judged from the lightweight summary.json snapshot (parallel, fails open);
+// the open image is judged from its LIVE hierarchy so unsaved objects count. Both use one predicate.
+def keepImage = { counts -> codePreferences.pathClasses.any { (counts[ it ] ?: 0) > 0 } }
+def keptNonCurrent = filterImagesBySummary( imagesToRun.findAll { it != currentEntry }, keepImage ).toRun as Set
+boolean keepCurrent = false
+if (currentEntry in imagesToRun) {
+    def liveCounts = [:]
+    currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
+        def cn = obj.getPathClass()?.getName()
+        if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+    }
+    keepCurrent = keepImage( liveCounts )
+}
+def skippedImages = imagesToRun.findAll { img -> (img == currentEntry) ? !keepCurrent : !(img in keptNonCurrent) }
+imagesToRun       = imagesToRun.findAll { img -> (img == currentEntry) ?  keepCurrent :  (img in keptNonCurrent) }
+
+if (!skippedImages.isEmpty()) {
+    def skippedNames = skippedImages.collect { it.getImageName() }
+    logger.info( "[AnnoTools] Add measurements: skipping ${skippedNames.size()} selected image(s) with no viable objects: ${skippedNames.join( ', ' )}" )
+}
+if (imagesToRun.isEmpty()) {
+    runOnFxThreadAndWait {
+        def alert = new Alert( Alert.AlertType.INFORMATION )
+        alert.setTitle( "Add measurements" )
+        alert.setHeaderText( null )
+        alert.setContentText( "None of the selected images contain viable objects of the chosen class(es).\nNothing to do." )
+        def gui = QuPathGUI.getInstance()
+        if (gui != null) { alert.initOwner( gui.getStage() ) }
+        alert.showAndWait()
+    }
+    return
+}
+if (!skippedImages.isEmpty()) {
+    Dialogs.showInfoNotification( "Add measurements", "Skipping ${skippedImages.size()} selected image(s) with no viable objects of the chosen class(es)." )
+}
+
 def total = imagesToRun.size()
-def progressUI = createProgressWindow( "Processing", total )
+def progressUI = createProgressWindow( "Processing", total, imagesToRun.collect { it.getImageName() } )
 def stopNowFlag   = progressUI.stopNowFlag
 def stopLaterFlag = progressUI.stopLaterFlag
 int processed = 0
@@ -895,6 +1087,7 @@ import javafx.application.Platform
 import javafx.beans.property.SimpleStringProperty
 import javafx.geometry.*
 import javafx.scene.Scene
+import javafx.scene.Node
 import javafx.scene.control.*
 import javafx.scene.control.ButtonBar.ButtonData
 import javafx.scene.layout.*

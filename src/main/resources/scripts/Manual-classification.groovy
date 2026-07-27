@@ -176,6 +176,22 @@ class ImageCheckResult {
 
 // --- Functions ---
 
+// Function: Natural (alphanumeric) comparison so embedded numbers sort numerically rather than lexically
+def naturalCompare( String s1, String s2 ) {
+    def ta = []
+    (( s1 ?: "" ).toLowerCase() =~ /\d+|\D+/).each { ta << it }
+    def tb = []
+    (( s2 ?: "" ).toLowerCase() =~ /\d+|\D+/).each { tb << it }
+    int n = Math.min( ta.size(), tb.size() )
+    for (int i = 0; i < n; i++) {
+        String x = ta[ i ]
+        String y = tb[ i ]
+        int cmp = (x ==~ /\d+/ && y ==~ /\d+/) ? ((x as BigInteger) <=> (y as BigInteger)) : (x <=> y)
+        if (cmp != 0) { return cmp }
+    }
+    return ta.size() <=> tb.size()
+}
+
 // FX-safe helper function
 def runOnFxThreadAndWait( Closure fxCode ) {
     def latch = new CountDownLatch( 1 )
@@ -393,7 +409,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     uiElements.btnMap << [ name   : ActionStrings.NEXT,
                            action : { queue.put( ActionStrings.NEXT ) },
                            btnType: new ButtonType( "(N)ext", ButtonData.YES ),
-                           btnTT  : "Lock in current classifications and move to next group",
+                           btnTT  : "Save current classifications and move to next group",
                            key    : "n",
                            click  : MouseButton.FORWARD ]
                            
@@ -404,6 +420,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     
     // - Classification labels -
     def classLabel = new Label( "${session.classifyingName} classification:" )  
+    classLabel.setStyle( "-fx-font-weight: bold;" )
     uiElements.classesSection.getChildren().addAll( classLabel, uiElements.classesGrid )
     
     uiElements.btnMap << [ name  : "Classification label",
@@ -432,7 +449,8 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
         
     // - Image classes summary labels -
     def allClassesLabel = new Label( "SUMMARY: ${session.classifyingName} classifications from ${session.classifierMode ? session.userName : session.classifiers}:" )
-    
+    allClassesLabel.setStyle( "-fx-font-weight: bold;" )
+
     uiElements.classesSummaryToggleGroup  = new ToggleGroup()
     uiElements.classesSummaryBtns         = []
     uiElements.classesSummaryStyleMap     = [:]
@@ -455,6 +473,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     
     // - Reviewer classification buttons -
     def revClassLabel = new Label( "Set classification:" )
+    revClassLabel.setStyle( "-fx-font-weight: bold;" )
     uiElements.revClassSection.getChildren().addAll( revClassLabel, uiElements.revClassGrid )
     
     uiElements.btnMap << [ name  : "Reviewer class label",
@@ -491,6 +510,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     
     // - Channel buttons -
     def channelsLabel = new Label( "Channel controls:" )
+    channelsLabel.setStyle( "-fx-font-weight: bold;" )
     uiElements.channelSection.getChildren().addAll( channelsLabel, uiElements.channelGrid )
     
     uiElements.btnMap << [ name   : "Channel label",
@@ -503,7 +523,13 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
         String btnText = "(${idx+1}) ${ch.name}"
         ToggleButton btn = new ToggleButton( btnText )
         btn.setMnemonicParsing( false )
-        uiElements.channelGrid.getChildren().add( btn )
+        // Small faint state caption shown under each channel button (off / on / scroll)
+        def stateCaption = new Label()
+        stateCaption.setStyle( "-fx-font-size: 10px;" )
+        stateCaption.setOpacity( 0.6 )
+        def btnWithCaption = new VBox( 1, btn, stateCaption )
+        btnWithCaption.setAlignment( Pos.CENTER )
+        uiElements.channelGrid.getChildren().add( btnWithCaption )
     
         def action = {
             session.toggleChannel = ch.name
@@ -511,12 +537,13 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
         }
     
         uiElements.btnMap << [
-            name  : btnText,
-            chName: ch.name,
-            btn   : btn,
-            key   : numberTrigger,
-            action: action,
-            group : "channel"
+            name   : btnText,
+            chName : ch.name,
+            btn    : btn,
+            caption: stateCaption,
+            key    : numberTrigger,
+            action : action,
+            group  : "channel"
         ]
     }
     
@@ -814,11 +841,18 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
         -fx-border-width: 1.5;
     """.stripIndent()
     
-    def highlightedStyle = { chan -> // Channel to change brightness style
+    // Channel to change brightness style: full colored ring (same 3px colored border as the on-channel underline, all four sides) plus a faint colored glow so the actively-controllable channel still pops.
+    // Padding is trimmed 1.5 per side to offset the thicker (1.5 -> 3) border so the button size stays constant.
+    def highlightedStyle = { chan ->
         def c = new AwtColor( chan.getColor(), true )
-        return "-fx-effect: dropshadow(gaussian, rgba(${c.red},${c.green},${c.blue},1), 10, 0.2, 0, 0);"
+        return "-fx-padding: 4.5 8.5 4.5 8.5; -fx-border-color: rgb(${c.red},${c.green},${c.blue}); -fx-border-width: 3; -fx-effect: dropshadow(gaussian, rgba(${c.red},${c.green},${c.blue},0.65), 10, 0.2, 0, 0);"
     }
-    def channelSelectedStyle = "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 10, 0.2, 0, 0);" // Channel on style
+    // Channel on style: skinny colored underline bar (color localized to one edge — distinct from the brightness channel's all-around glow)
+    // Bottom padding is trimmed by the 1.5 the bottom border grows (1.5 -> 3) so the button height stays constant and the panel doesn't jump
+    def channelSelectedStyle = { chan ->
+        def c = new AwtColor( chan.getColor(), true )
+        return "-fx-padding: 6 10 4.5 10; -fx-border-color: #666666 #666666 rgb(${c.red},${c.green},${c.blue}) #666666; -fx-border-width: 1.5 1.5 3 1.5; -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 10, 0.2, 0, 0);"
+    }
     def channelUnselectedStyle = "-fx-effect: innershadow(gaussian, rgba(0,0,0,0.9), 100, 0, 0, 0);" // Channel off style
     
     // Set channel button updated style
@@ -832,8 +866,10 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
         
         // Adding their style
         boolean highlighted = (ch.channel == session.channelToChange) && (!session.freeView || session.freeViewMode != ActionStrings.ZOOM) // Setting initial style
-        def channelButtonStyle = highlighted ? highlightedStyle( ch.channel ) : btn.isSelected() ? channelSelectedStyle : channelUnselectedStyle
+        def channelButtonStyle = highlighted ? highlightedStyle( ch.channel ) : btn.isSelected() ? channelSelectedStyle( ch.channel ) : channelUnselectedStyle
         btn.setStyle( channelStandardStyle + channelButtonStyle )
+
+        entry.caption?.setText( highlighted ? "scroll" : btn.isSelected() ? "on" : "off" )
         
         def chBtnTooltipText = highlighted ? "Toggle ${ch.name} \n \n Scroll on viewer to change brightness" : "Toggle ${ch.name}"
         setTT( btn, chBtnTooltipText )
@@ -1663,7 +1699,27 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         // --- LEFT: dropdown (user box) + text fields ---
         def userLabel = new Label()
         addIcon( userLabel, FontAwesome.Glyph.USER, 14 )
-        lockDimensions( userLabel )
+
+        // Locking height as usual, but width to whichever mode label ("Classifier:" /
+        // "Reviewer:") is wider, so toggling between modes never resizes or clips it
+        Platform.runLater {
+            double h = userLabel.getHeight()
+            userLabel.setMinHeight( h )
+            userLabel.setPrefHeight( h )
+            userLabel.setMaxHeight( h )
+
+            String realText = userLabel.getText()
+            double maxW = ["Classifier:", "Reviewer:"].collect { txt ->
+                userLabel.setText( txt )
+                userLabel.applyCss()
+                userLabel.prefWidth( -1 )
+            }.max()
+            userLabel.setText( realText )
+
+            userLabel.setMinWidth( maxW )
+            userLabel.setPrefWidth( maxW )
+            userLabel.setMaxWidth( maxW )
+        }
         
         def userFieldNotice = new Label()
         userFieldNotice.setPadding( new Insets( 0, 0, 0, 10 ) )
@@ -1709,7 +1765,20 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         users.valueProperty().addListener { obs, oldVal, newVal ->
             users.setStyle( newVal ? null : outlineRedStyle )
         }
-        
+
+        // Disabling with "None available" prompt whenever the current option list is empty
+        def updateUsersAvailability = {
+            boolean noUsers = users.getItems() == null || users.getItems().isEmpty()
+            users.setDisable( noUsers )
+            users.setPromptText( noUsers ? "None available" : null )
+        }
+        users.getItems().addListener( { c -> updateUsersAvailability() } as InvalidationListener )
+        users.itemsProperty().addListener { obs, oldItems, newItems ->
+            newItems?.addListener( { c -> updateUsersAvailability() } as InvalidationListener )
+            updateUsersAvailability()
+        }
+        updateUsersAvailability()
+
         // Coloring new users with green border
         def newUsers = []
         users.setCellFactory { _ ->
@@ -1953,6 +2022,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 pool.shutdown()
                 
                 Platform.runLater {
+                    def prevUser = users.getValue() // Capture before mutating items: unique() below clears the list, which wipes the ComboBox selection
                     def newNamesSet = uniqueUsers.toSet()
                     List newClassifiers = []
                     List newReviewers = []
@@ -1974,7 +2044,10 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                     reviewerOptions = reviewerOptions.unique()
                     
                     
-                    if ( !users.getItems().isEmpty() ) {
+                    // Restore the selection the in-place unique() above wiped: keep the previous user if still valid, else default to the first
+                    if ( prevUser in users.getItems() ) {
+                        users.setValue( prevUser )
+                    } else if ( !users.getItems().isEmpty() ) {
                         users.setValue( users.getItems().first() )
                     }
                     
@@ -2006,7 +2079,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         addIcon( annoClassLabel, FontAwesome.Glyph.STAR_HALF_ALT, 14 )
         def annoClassField = new ComboBox()
         annoClassField.setMaxWidth( Double.MAX_VALUE )
-        setTT( [annoClassLabel, annoClassField], "Class of annotations to be classified. \n If missing, add to QuPath class list and/or add annotations of that class." )
+        setTT( [annoClassLabel, annoClassField], "Class of annotations to be classified. \nPopulated from classes of existing objects in project." )
         annoClassField.setStyle( outlineRedStyle ) // Start with red border
         lockDimensions( annoClassField )
         
@@ -2050,19 +2123,33 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         
         // Merge into imageClassCounts and totalsByClass
         resultMap.each { imgName, counts ->
-            imageClassCounts[imgName] = counts
+            imageClassCounts[ imgName ] = counts
             counts.each { className, count ->
-                totalsByClass.merge(className, count, Integer.&sum)
+                totalsByClass.merge( className, count, Integer.&sum )
             }
         }
         
         def currentImageName = currentImageData?.getServer()?.getMetadata()?.getName()
-        def currentImageCounts = currentImageName ? (imageClassCounts[currentImageName] ?: [:]) : [:]
+
+        // If an image is open, use its LIVE hierarchy for that image's class counts so unsaved
+        // objects are reflected (both counts and class existence). Cheap since it is already loaded.
+        if (currentImageData != null && currentImageName != null) {
+            def liveCounts = [:]
+            currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
+                def cn = obj.getPathClass()?.getName()
+                if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+            }
+            imageClassCounts[ currentImageName ] = liveCounts
+            totalsByClass.clear()
+            imageClassCounts.each { n, c -> c.each { className, count -> totalsByClass.merge( className, count, Integer.&sum ) } }
+        }
+
+        def currentImageCounts = currentImageName ? (imageClassCounts[ currentImageName ] ?: [:]) : [:]
         
         // Sort: only classes with existing annotations in project, by abundance
         List pathClassEntries = totalsByClass
             .collect { pc, count -> [name: pc, num: count, imageNum: currentImageCounts[pc] ?: 0] }
-            .sort { -it.num }
+            .sort { a, b -> (b.num <=> a.num) ?: naturalCompare( a.name, b.name ) }
         
         // Set dropdown selection to show counts
         annoClassField.setCellFactory {
@@ -2084,8 +2171,9 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         }
         
         // Set selection to show same counts as dropdown
-        annoClassField.setConverter( new StringConverter() {     
+        annoClassField.setConverter( new StringConverter() {
             String toString( def item ) {
+                if (item == null) { return "" }
                 def label = currentImageCounts != null
                     ? "${item.name}  [${item.imageNum} / ${item.num}]"
                     : "${item.name}  [${item.num}]"
@@ -2097,7 +2185,13 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         })
         
         annoClassField.setItems( FXCollections.observableArrayList( pathClassEntries ) )
-        
+
+        if (pathClassEntries.isEmpty()) {
+            annoClassField.setPromptText( "None available" )
+            annoClassField.setDisable( true )
+            annoClassField.setStyle( outlineRedStyle )
+        }
+
         // Red border if empty
         annoClassField.valueProperty().addListener { obs, oldVal, newVal ->
             annoClassField.setStyle( newVal ? null : outlineRedStyle )
@@ -2387,7 +2481,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def chBoxToolTipText = chBoxToolTipBaseText
         setTT( channelCBsBox, chBoxToolTipText )
         
-        int maxChannels = 4
+        int maxChannels = 5
         
         // Items in top channel row
         def channelsLabel = new Label( "Select up to ${maxChannels} channels: [0]" )
@@ -3443,7 +3537,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 pMap.userName instanceof String,
                 { pMap.userName in userOptions ?: userOptions.addFirst( pMap.userName );
                   users.setValue( pMap.userName ) },
-                { users.setValue( users.getItems()?.first() ) },
+                { users.setValue( users.getItems()?.isEmpty() ? null : users.getItems()?.first() ) },
                 "Username"
             )
             
@@ -3669,6 +3763,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             .or( users.valueProperty().isNull() )
             .or( gridSizeField.textProperty().isEmpty() )
             .or( anySelectedChannel.not() )
+            .or( annoClassField.valueProperty().isNull() )
         )
         
         // Making sure to bring the selection back to the ok button after re-enable first time
@@ -4089,7 +4184,8 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     // Getting channel specifics for toggling and turning off others ---
     def availableChannels = session.viewer.getImageDisplay().availableChannels()
     session.controllableChannels = availableChannels.findAll { ch ->
-        session.toggleChannels.any { ch.getName().toUpperCase().contains( it.toUpperCase() ) }
+        def chBaseName = baseChannelName( ch.getName() ) // Strip "(C1)"-style suffix to match stored base names
+        session.toggleChannels.any { it.equalsIgnoreCase( chBaseName ) } // Exact match so e.g. "CD3" no longer matches "CD31"
     }
     def intitalDisplay = session.viewer.getImageDisplay()
     session.channelSpecifics = []
@@ -4749,6 +4845,7 @@ import javafx.animation.PauseTransition
 import javafx.animation.FadeTransition
 import javafx.util.Duration
 import javafx.application.Platform
+import javafx.beans.InvalidationListener
 import javafx.beans.property.SimpleBooleanProperty
 import javafx.collections.FXCollections
 import javafx.event.*
