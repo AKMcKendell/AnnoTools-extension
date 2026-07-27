@@ -40,7 +40,7 @@ def setTT( objs, String tooltip ) {
 }
 
 // Function: Create window showing script progress
-def createProgressWindow( String title, int totalImages ) {
+def createProgressWindow( String title, int totalImages, List imageNames = [] ) {
     return runOnFxThreadAndWait {
         def stage = new Stage()
         stage.setMinWidth( 350 )
@@ -115,6 +115,28 @@ def createProgressWindow( String title, int totalImages ) {
         }
         stage.initModality( Modality.WINDOW_MODAL )
         stage.show()
+
+        // Pre-size once to fit the longest image name (plus every other row), never
+        // below the minimum width, so the window opens at its final size rather than
+        // growing as image names appear during the run. The grow-never-shrink logic
+        // stays in place as a floor so unusually long step text still can't be clipped.
+        String widestImageName = (imageNames ?: []).collect { it?.toString() ?: "" }.max { it.length() } ?: ""
+        String initialImageName = imageName.get()
+        String initialImageNum  = imageNum.get()
+        imageName.set( widestImageName )
+        imageNum.set( totalImages.toString() )
+        vbox.applyCss()
+        vbox.layout()
+        // The stage width includes the OS window frame, so the usable scene is
+        // narrower than the stage by its side borders (a few px on Windows, ~0 on
+        // macOS). Add that back or the content's right edge gets clipped.
+        double frameWidth = scene.getWidth() > 0 ? Math.max( stage.getWidth() - scene.getWidth(), 0 ) : 0
+        double contentWidth = rows.collect { it.prefWidth( -1 ) }.max() + vbox.getPadding().getLeft() + vbox.getPadding().getRight()
+        double baselineWidth = Math.max( contentWidth + frameWidth, stage.getMinWidth() )
+        if (baselineWidth > stage.getMinWidth()) { stage.setMinWidth( baselineWidth ) }
+        if (baselineWidth > stage.getWidth())    { stage.setWidth( baselineWidth ) }
+        imageName.set( initialImageName )
+        imageNum.set( initialImageNum )
         updateStageWidth()
         
         def startTime = System.nanoTime()
@@ -285,26 +307,130 @@ def resolveHierarchy( objects, hierarchy_resolve, image_resolve ) {
     return false
 }
 
+// Function: Streaming read of the classification names present in a geojson file.
+// Skips geometry (the bulk of the file), so it stays cheap even for very large annotation files.
+// Defined as a method (not a closure) so it is safe to call from worker-pool threads.
+def extractGeojsonClassNames( File f ) {
+    def names = new LinkedHashSet()
+    def reader = null
+    try {
+        reader = new JsonReader( new InputStreamReader( new FileInputStream( f ), "UTF-8" ) )
+        reader.setLenient( true )
+
+        def token = reader.peek()
+        if (token == JsonToken.BEGIN_ARRAY) {
+            readFeatureArrayClasses( reader, names )
+        } else if (token == JsonToken.BEGIN_OBJECT) {
+            reader.beginObject()
+            while (reader.hasNext()) {
+                if (reader.nextName() == "features" && reader.peek() == JsonToken.BEGIN_ARRAY) {
+                    readFeatureArrayClasses( reader, names )
+                } else {
+                    reader.skipValue()
+                }
+            }
+            reader.endObject()
+        }
+    } catch (Exception ex) {
+        logger.warn( "[AnnoTools] duplicate preview parse failed for ${f.getName()}: ${ex.getMessage()}" )
+    } finally {
+        if (reader != null) { try { reader.close() } catch (Exception ignore) {} }
+    }
+    return names
+}
+
+// Helper for extractGeojsonClassNames: walk a "features" array, pulling out
+// properties.classification.name for each feature and skipping everything else.
+def readFeatureArrayClasses( JsonReader reader, Set names ) {
+    reader.beginArray()
+    while (reader.hasNext()) {
+        if (reader.peek() != JsonToken.BEGIN_OBJECT) { reader.skipValue(); continue }
+        reader.beginObject()
+        String className = null
+        while (reader.hasNext()) {
+            if (reader.nextName() == "properties" && reader.peek() == JsonToken.BEGIN_OBJECT) {
+                reader.beginObject()
+                while (reader.hasNext()) {
+                    if (reader.nextName() == "classification" && reader.peek() == JsonToken.BEGIN_OBJECT) {
+                        reader.beginObject()
+                        while (reader.hasNext()) {
+                            if (reader.nextName() == "name" && reader.peek() == JsonToken.STRING) {
+                                className = reader.nextString()
+                            } else {
+                                reader.skipValue()
+                            }
+                        }
+                        reader.endObject()
+                    } else {
+                        reader.skipValue()
+                    }
+                }
+                reader.endObject()
+            } else {
+                reader.skipValue()
+            }
+        }
+        reader.endObject()
+        names.add( className ?: "(Unclassified)" )
+    }
+    reader.endArray()
+}
+
 // Function: Create alert selection window for user
 def showAlert( Map args ) {
     return runOnFxThreadAndWait {
         def alert = new Alert( args.type ?: Alert.AlertType.CONFIRMATION )
-        
+
         alert.setTitle( args.title ?: "" )
         alert.setHeaderText( args.header ?: null )
-        alert.setContentText( args.content ?: "" )
-        
+
+        // Optional "do not ask again" checkbox — its state is written back to the
+        // caller's AtomicBoolean holder after the dialog closes so a per-image choice
+        // can be remembered and applied to the remaining images
+        def dontAskCB = (args.dontAskAgain instanceof AtomicBoolean) ?
+            new CheckBox( args.dontAskText ?: "Do not ask again for remaining images" ) : null
+
+        if (dontAskCB != null) {
+            def contentBox = new VBox( 10 )
+            contentBox.setPadding( new Insets( 5 ) )
+            if (args.content) { contentBox.getChildren().add( new Label( args.content ) ) }
+            contentBox.getChildren().add( dontAskCB )
+            alert.getDialogPane().setContent( contentBox )
+        } else {
+            alert.setContentText( args.content ?: "" )
+        }
+
         if (args.buttons) {
             alert.getDialogPane().buttonTypes.setAll( args.buttons )
         }
-        
+
         // Set default button if provided
         if (args.defaultBtn) {
             def node = alert.getDialogPane().lookupButton( args.defaultBtn )
             node?.setDefaultButton( true )
         }
-        
-        return alert.showAndWait().orElse( args.fallback ?: args.buttons?.find { true } )
+
+        def result = alert.showAndWait().orElse( args.fallback ?: args.buttons?.find { true } )
+
+        if (dontAskCB != null) { args.dontAskAgain.set( dontAskCB.isSelected() ) }
+
+        return result
+    }
+}
+
+// Function: Lock a node's current dimensions to prevent resizing
+def lockDimensions( Node nodes ) {
+    Platform.runLater {
+        nodes.each { node ->
+            double h = node.getHeight()
+            node.setMinHeight( h )
+            node.setPrefHeight( h )
+            node.setMaxHeight( h )
+            double w = node.getWidth()
+            node.setMinWidth( w )
+            node.setPrefWidth( w )
+            node.setMaxWidth( w )
+        }
     }
 }
 
@@ -345,12 +471,14 @@ def addIcon( node, iconCode, int size ) {
 
 
 // Function: Make a box with checkboxes and a modifiable header
-def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0 ) {
+def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0, String emptyMessage = "None available" ) {
     
     def checkboxBox = new VBox( 5 )
     checkboxBox.setPadding( new Insets( 5 ) )
     if (prefWidth > 0) {
         checkboxBox.setPrefWidth( prefWidth )
+        checkboxBox.setMinWidth( prefWidth )
+        checkboxBox.setMaxWidth( prefWidth )
     }
     if (prefHeight > 0) {
         checkboxBox.setPrefHeight( prefHeight )
@@ -361,15 +489,29 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     
     // Build checkboxes from supplied objects
     def checkboxes = objects.collect { obj ->
-        
+
         def cb = new CheckBox( obj.name )
         cb.setUserData( obj.data ?: obj.name )
         cb.setMnemonicParsing( false ) // so no characters are dropped
-        
+
         return cb
     }
-    
+
+    def noneAvailableLabel = new Label( emptyMessage )
+    noneAvailableLabel.setStyle( "-fx-font-style: italic; -fx-text-fill: gray;" )
+    noneAvailableLabel.setPadding( new Insets( 5 ) )
+
+    checkboxContainer.getChildren().add( noneAvailableLabel )
     checkboxes.each { checkboxContainer.getChildren().add( it ) }
+
+    // Shows "None available" whenever there are no checkboxes, or none are currently visible
+    def updateNoneAvailable = {
+        boolean anyVisible = checkboxes.any { it.isVisible() }
+        noneAvailableLabel.setVisible( !anyVisible )
+        noneAvailableLabel.setManaged( !anyVisible )
+    }
+    updateNoneAvailable()
+    checkboxes.each { cb -> cb.visibleProperty().addListener { obs, oldVal, newVal -> updateNoneAvailable() } }
     
     def selectAllCB = makeSelectAllCB( checkboxes )
     
@@ -417,10 +559,25 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     
     def titleLabel = new Label()
     titleLabel.setPadding( new Insets( 5, 0, 0, 0 ) )
-    
+
+    // Set initial wording so the box's purpose is clear even when there's nothing to check
+    titleLabel.setText( "${title.capitalize()} [0]" )
+    selectAllCB.setText( "${title.capitalize()} [0]" )
+
+    // Once shown, measure/lock against the widest possible count so later updates never get clipped
+    selectAllCB.sceneProperty().addListener { obs, oldScene, newScene ->
+        if (newScene != null) {
+            String initialText = selectAllCB.getText()
+            selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
+            Platform.runLater {  // extra pulse so CSS skin is applied
+                lockDimensions( selectAllCB )
+                Platform.runLater { selectAllCB.setText( initialText ) }
+            }
+        }
+    }
+
     // Add listeners to checkboxes (for changing instructions/labels)
-    checkboxes.each { cb ->
-        cb.selectedProperty().addListener { obs, oldVal, newVal ->            
+    def refreshLabels = {
             
             String TTword = keyWord ?: title
             
@@ -441,6 +598,9 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
             
             setTT( [titleLabel, scrollPane], tooltipText )
         }
+    checkboxes.each { cb ->
+        cb.selectedProperty().addListener { obs, oldVal, newVal -> refreshLabels() }
+        cb.textProperty().addListener { obs, oldVal, newVal -> refreshLabels() }
         
         // Double fire to spark listeners
         cb.setSelected( !cb.isSelected() )
@@ -500,6 +660,23 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
         clear    : clearBtn,
         CBs      : checkboxes
     ]
+}
+
+
+// Function: Natural (alphanumeric) comparison so embedded numbers sort numerically rather than lexically
+def naturalCompare( String s1, String s2 ) {
+    def ta = []
+    (( s1 ?: "" ).toLowerCase() =~ /\d+|\D+/).each { ta << it }
+    def tb = []
+    (( s2 ?: "" ).toLowerCase() =~ /\d+|\D+/).each { tb << it }
+    int n = Math.min( ta.size(), tb.size() )
+    for (int i = 0; i < n; i++) {
+        String x = ta[ i ]
+        String y = tb[ i ]
+        int cmp = (x ==~ /\d+/ && y ==~ /\d+/) ? ((x as BigInteger) <=> (y as BigInteger)) : (x <=> y)
+        if (cmp != 0) { return cmp }
+    }
+    return ta.size() <=> tb.size()
 }
 
 
@@ -622,9 +799,9 @@ def codePreferences = runOnFxThreadAndWait {
         pool.submit({
             def summaryFile = entry.getEntryPath().resolve( "summary.json" )
             def counts = [:]
-            if (Files.exists(summaryFile)) {
+            if (Files.exists( summaryFile )) {
                 try {
-                    def raw = new String(Files.readAllBytes(summaryFile))
+                    def raw = new String( Files.readAllBytes( summaryFile ) )
                     def summary = gson.fromJson( raw, Object )
                     def classCounts = summary?.get( "hierarchy" )?.get( "annotationClassificationCounts" )
                     classCounts?.each { k, v ->
@@ -643,15 +820,35 @@ def codePreferences = runOnFxThreadAndWait {
         def (imgName, counts) = f.get()
         imageClassCounts[ imgName ] = counts
         counts.each { className, count ->
-            totalsByClass.merge(className, count, Integer.&sum)
+            totalsByClass.merge( className, count, Integer.&sum )
         }
     }
     pool.shutdown()
     
+    // If an image is open, use its LIVE hierarchy for that image's class counts so unsaved
+    // objects are reflected — both in the counts and in whether a class appears at all. Cheap,
+    // since the image is already loaded, and safe on the FX thread we're already running on.
+    if (currentEntry != null && currentImageData != null) {
+        def liveCounts = [:]
+        currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
+            def cn = obj.getPathClass()?.getName()
+            if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+        }
+        imageClassCounts[ currentEntry.getImageName() ] = liveCounts
+
+        // Rebuild totals in place so the override is reflected everywhere downstream
+        totalsByClass.clear()
+        imageClassCounts.each { imgName, counts ->
+            counts.each { className, count ->
+                totalsByClass.merge( className, count, Integer.&sum )
+            }
+        }
+    }
+
     // Only classes with existing annotations in project, sorted by abundance
     List pathClassCBsMap = totalsByClass
         .collect { [name: it.key, data: it.key, num: it.value] }
-        .sort { -it.num }
+        .sort { a, b -> (b.num <=> a.num) ?: naturalCompare( a.name, b.name ) }
         .collect { [name: it.name, data: it.data] } // labels set by updateClassCounts
     def pathClassBox = makeCheckboxBox( "Object classes", null, pathClassCBsMap, 200 )    
     pathClassBox.header.getChildren().addAll( pathClassBox.title, pathClassBox.spacer, pathClassBox.clear )    
@@ -1045,7 +1242,10 @@ def codePreferences = runOnFxThreadAndWait {
                 includeParents: includeParentsCheck.isSelected(),
                 selectedImages: selectedImages,
                 currentImage  : currentImageCB.isSelected(),
-                objectClasses : selectedPathClasses
+                objectClasses : selectedPathClasses,
+                // Pass the pre-run per-image existing-class snapshot through so the import
+                // duplicate dialog can show a project-wide breakdown
+                imageClassCounts: imageClassCounts
             ]
             
         } else {
@@ -1079,13 +1279,19 @@ def total = imagesToRun.size()
 def progressUI = createProgressWindow(
     (codePreferences.mode == "resolveHierarchy") ? "Nesting objects..." : 
     (codePreferences.mode == "export") ? "Exporting..." : 
-    "Importing...", total)
+    "Importing...", total, imagesToRun.collect { it.getImageName() })
 def stopLaterFlag = progressUI.stopLaterFlag
 int processed = 0
 
 // Checks on removing current objs
 boolean removeObjs = false
 boolean confirmRemoveObjsChoice = false
+boolean skipDupObjs = false   // import: skip every image that has duplicates, leaving it untouched
+
+// Remembered per-image prompt choices (set when the user ticks "do not ask again")
+String  fileExistsAction = null   // export, file exists:    "skip" | "overwrite"
+String  noObjectsAction  = null   // export, no objects:     "skip" | "exportEmpty"
+boolean skipMissingFiles = false  // import, file not found:  skip all remaining
 
 // Flag to show warning
 boolean anyNestingProblems = false
@@ -1104,18 +1310,13 @@ for (image in imagesToRun) {
     def hierarchy = imageData.getHierarchy()
     def imageName = image.getImageName()
     
-    // Helper: Create a simplified image-based filename
-    def makeFileName = {        
-        return imageName
-    }
     
     // Reporting current image
     updateProgressWindow( progressUI, [imageName: image] )
     
     
     // --- Execution ---
-    def fileName = makeFileName()
-    def filePath = buildFilePath( codePreferences.selectedFolder, fileName + ".geojson" )
+    def filePath = buildFilePath( codePreferences.selectedFolder, imageName + ".geojson" )
     def folder = new File( codePreferences.selectedFolder )
     def file = new File( filePath )
     
@@ -1129,29 +1330,44 @@ for (image in imagesToRun) {
         
         // If file exists, giving warning and option to skip/overwrite/exit
         if (file.exists()) {
-            
-            def cancelScriptBtn = new ButtonType( "Exit", ButtonBar.ButtonData.CANCEL_CLOSE )
-            def skipFileBtn     = new ButtonType( "Skip image", ButtonBar.ButtonData.HELP )
-            def okWarningBtn    = new ButtonType( "Overwrite", ButtonBar.ButtonData.HELP_2 )
-            
-            def existingFileDecision = showAlert(
-                title: "File already exists",
-                header: imageName,
-                buttons: [cancelScriptBtn, skipFileBtn, okWarningBtn],
-                defaultBtn: skipFileBtn,
-                fallback: cancelScriptBtn
-            )
-            
-            // Handling user decision logic
-            switch (existingFileDecision) {
-                case (cancelScriptBtn):
-                    break imageLoop
-                case (skipFileBtn):
-                    skipImage = true
-                    break
-                case (okWarningBtn): // Overwrite and continue script
-                    break
+
+            // Use the remembered choice if the user previously opted to apply it to all
+            String action = fileExistsAction
+
+            if (action == null) {
+                def cancelScriptBtn = new ButtonType( "Exit", ButtonBar.ButtonData.CANCEL_CLOSE )
+                def skipFileBtn     = new ButtonType( "Skip image", ButtonBar.ButtonData.HELP )
+                def okWarningBtn    = new ButtonType( "Overwrite", ButtonBar.ButtonData.HELP_2 )
+
+                def dontAsk = new AtomicBoolean( false )
+                def existingFileDecision = showAlert(
+                    title: "File already exists",
+                    header: imageName,
+                    buttons: [cancelScriptBtn, skipFileBtn, okWarningBtn],
+                    defaultBtn: skipFileBtn,
+                    fallback: cancelScriptBtn,
+                    dontAskAgain: dontAsk,
+                    dontAskText: "Apply this choice to all remaining existing files"
+                )
+
+                // Handling user decision logic
+                switch (existingFileDecision) {
+                    case (cancelScriptBtn):
+                        break imageLoop
+                    case (skipFileBtn):
+                        action = "skip"
+                        break
+                    case (okWarningBtn): // Overwrite and continue script
+                        action = "overwrite"
+                        break
+                }
+
+                // Remember the choice for the rest of the run if requested
+                if (dontAsk.get()) { fileExistsAction = action }
             }
+
+            if (action == "skip") { skipImage = true }
+            // "overwrite" continues without skipping
         }
         
         // --- Filter annotations ---
@@ -1172,30 +1388,44 @@ for (image in imagesToRun) {
         
         // --- Option to skip image if no objects to export ---
         if (finalObjects.isEmpty() && !skipImage) {
-            
-            def exitBtn        = new ButtonType( "Exit", ButtonData.CANCEL_CLOSE )
-            def skipBtn        = new ButtonType( "Skip image", ButtonData.HELP ) 
-            def exportEmptyBtn = new ButtonType( "Export empty file", ButtonData.HELP )
-            
-            def exportOrSkip = showAlert(
-                title: "No objects to export",
-                header: imageName,
-                buttons: [exitBtn, skipBtn, exportEmptyBtn],
-                defaultBtn: exportEmptyBtn,
-                fallback: exitBtn
-            )
-            
-            // Handling user decision logic
-            switch (exportOrSkip) {
-                case (exitBtn):
-                    break imageLoop
-                case (skipBtn):
-                    skipImage = true
-                    break
-                case (exportEmptyBtn):
-                    skipImage = false
-                    break
+
+            // Use the remembered choice if the user previously opted to apply it to all
+            String action = noObjectsAction
+
+            if (action == null) {
+                def exitBtn        = new ButtonType( "Exit", ButtonData.CANCEL_CLOSE )
+                def skipBtn        = new ButtonType( "Skip image", ButtonData.HELP )
+                def exportEmptyBtn = new ButtonType( "Export empty file", ButtonData.HELP )
+
+                def dontAsk = new AtomicBoolean( false )
+                def exportOrSkip = showAlert(
+                    title: "No objects to export",
+                    header: imageName,
+                    buttons: [exitBtn, skipBtn, exportEmptyBtn],
+                    defaultBtn: exportEmptyBtn,
+                    fallback: exitBtn,
+                    dontAskAgain: dontAsk,
+                    dontAskText: "Apply this choice to all remaining images with no objects"
+                )
+
+                // Handling user decision logic
+                switch (exportOrSkip) {
+                    case (exitBtn):
+                        break imageLoop
+                    case (skipBtn):
+                        action = "skip"
+                        break
+                    case (exportEmptyBtn):
+                        action = "exportEmpty"
+                        break
+                }
+
+                // Remember the choice for the rest of the run if requested
+                if (dontAsk.get()) { noObjectsAction = action }
             }
+
+            if (action == "skip") { skipImage = true }
+            // "exportEmpty" leaves skipImage false so the empty file is written
         }
         
         // --- Exporting if objects present ---
@@ -1207,34 +1437,43 @@ for (image in imagesToRun) {
     } else if (codePreferences.mode == "import") {
         
         // If cannot locate file, asking if user wants to manually locate
-        if (!file.exists()) {
-            
+        if (!file.exists() && skipMissingFiles) {
+            // User previously opted to skip all files that can't be found
+            skipImage = true
+
+        } else if (!file.exists()) {
+
             searchLoop:
             while (true) {
-            
+
                 def fileCancelBtn = new ButtonType( "Cancel", ButtonData.CANCEL_CLOSE )
                 def skipBtn       = new ButtonType( "Skip", ButtonData.HELP_2 )
                 def browseBtn     = new ButtonType( "Browse...", ButtonData.HELP )
-                
+
+                def dontAsk = new AtomicBoolean( false )
                 def findFilePreference = showAlert(
                     title: "File not found",
                     header: imageName,
                     content: "Locate file?",
                     buttons: [fileCancelBtn, skipBtn, browseBtn],
                     defaultBtn: browseBtn,
-                    fallback: fileCancelBtn
+                    fallback: fileCancelBtn,
+                    dontAskAgain: dontAsk,
+                    dontAskText: "Skip all remaining files that can't be found"
                 )
-                
+
                 // Handling user decision logic
                 switch (findFilePreference) {
-                    
+
                     case (fileCancelBtn):
                         break imageLoop
-                    
+
                     case (skipBtn):
                         skipImage = true
+                        // Remember to skip all remaining missing files if requested
+                        if (dontAsk.get()) { skipMissingFiles = true }
                         break searchLoop
-                    
+
                     case (browseBtn):
                         def selectedFile = runOnFxThreadAndWait {
                             
@@ -1284,6 +1523,7 @@ for (image in imagesToRun) {
             }
             
             // If objects of same class as imported ones exist, prompt to remove or keep once
+            boolean skipDupThisImage = false
             if (!existingObjsSameClasses.isEmpty()) {
                     
                 if (!confirmRemoveObjsChoice) {
@@ -1291,20 +1531,125 @@ for (image in imagesToRun) {
                     def exitBtn   = new ButtonType( "Exit", ButtonData.CANCEL_CLOSE )
                     def keepBtn   = new ButtonType( "Keep", ButtonData.HELP )
                     def removeBtn = new ButtonType( "Remove", ButtonData.HELP )
+                    def skipDupBtn = new ButtonType( "Skip duplicates", ButtonData.HELP )
                     
-                    def overlappingClasses = new HashSet()
-                    existingObjsSameClasses.each { overlappingClasses.add( it.getPathClass() ) }
+                    // Project-wide preview: which images have existing objects whose class also
+                    // appears in that image's import file. Existing classes come from the pre-run
+                    // summary.json snapshot captured in the preferences popup (imageClassCounts);
+                    // imported class names are read from each geojson in parallel with a streaming
+                    // reader that skips geometry, so this stays fast even for large annotation files.
+                    def existingCountsByImage = codePreferences.imageClassCounts ?: [:]
+
+                    // Only images that both have existing objects and an import file on disk can
+                    // possibly produce a duplicate — skip reading anything else.
+                    def dupCandidates = imagesToRun.findAll { img ->
+                        def existing = existingCountsByImage[ img.getImageName() ]
+                        existing && !existing.isEmpty() &&
+                            new File( buildFilePath( codePreferences.selectedFolder, img.getImageName() + ".geojson" ) ).exists()
+                    }
+
+                    // imageName -> (className -> existing count), kept only where overlap is non-empty
+                    def dupBreakdown = new LinkedHashMap()
+                    if (!dupCandidates.isEmpty()) {
+                        def dupThreads = Math.min( Runtime.getRuntime().availableProcessors(), dupCandidates.size() )
+                        def dupPool    = Executors.newFixedThreadPool( dupThreads )
+                        try {
+                            def dupFutures = dupCandidates.collect { img ->
+                                def imgName = img.getImageName()
+                                def geojson = new File( buildFilePath( codePreferences.selectedFolder, imgName + ".geojson" ) )
+                                dupPool.submit( { [imgName, extractGeojsonClassNames( geojson )] } as Callable )
+                            }
+                            dupFutures.each { fut ->
+                                def (imgName, importedNames) = fut.get()
+                                def existing = existingCountsByImage[ imgName ] ?: [:]
+                                def overlap  = new LinkedHashMap()
+                                existing.each { cn, cnt -> if (cn in importedNames) { overlap[ cn ] = cnt } }
+                                if (!overlap.isEmpty()) { dupBreakdown[ imgName ] = overlap }
+                            }
+                        } finally {
+                            dupPool.shutdown()
+                        }
+                    }
+
+                    // Always represent the current (triggering) image from its real overlap, in case
+                    // its summary.json snapshot was stale or missing. Also guarantees a non-empty list.
+                    if (!dupBreakdown.containsKey( imageName )) {
+                        def overlap = new LinkedHashMap()
+                        existingObjsSameClasses.each { o ->
+                            def cn = o.getPathClass()?.toString() ?: "(Unclassified)"
+                            overlap[ cn ] = (overlap[ cn ] ?: 0) + 1
+                        }
+                        if (!overlap.isEmpty()) { dupBreakdown[ imageName ] = overlap }
+                    }
+
+                    int affectedImages  = dupBreakdown.size()
+                    int affectedClasses = dupBreakdown.values().collect { it.keySet() }.flatten().unique().size()
                     
-                    def confirmRemoveObjs = showAlert(
-                        title: "Potential duplicate objects!",
-                        header: "There are existing objects: ${overlappingClasses}" + 
-                                "\nRemove existing objects for rest of import?" +
-                                "\nWARNING: Removed objects and their children cannot be recovered.",
-                        buttons: [exitBtn, keepBtn, removeBtn],
-                        defaultBtn: removeBtn,
-                        fallback: exitBtn
-                    )
-                    
+                    def confirmRemoveObjs = runOnFxThreadAndWait {
+                        def alert = new Alert( Alert.AlertType.CONFIRMATION )
+                        alert.setTitle( "Potential duplicate objects!" )
+                        alert.setHeaderText(
+                            "Existing objects share classes with the import.\n" +
+                            "Choose how to handle the images that already contain these classes:\n" +
+                            "  • Keep — import anyway, alongside the existing objects\n" +
+                            "  • Remove — delete the existing objects, then import\n" +
+                            "  • Skip duplicates — import only into images without duplicates\n" +
+                            "WARNING: Removed objects and their children cannot be recovered."
+                        )
+                        alert.getDialogPane().buttonTypes.setAll( exitBtn, keepBtn, removeBtn, skipDupBtn )
+                        alert.getDialogPane().lookupButton( removeBtn )?.setDefaultButton( true )
+
+                        // Expandable tree: a collapsible root holds every image; each image in turn
+                        // expands to its overlapping classes (+ existing counts)
+                        def treeRoot = new TreeItem( "Images with potential duplicates [${affectedImages}]".toString() )
+                        treeRoot.setExpanded( false )
+                        dupBreakdown.each { imgName, classes ->
+                            int imgTotal = (classes.values().sum() ?: 0)
+                            def imgItem = new TreeItem( "${imgName}  —  ${classes.size()} class(es)" )
+                            imgItem.setExpanded( dupBreakdown.size() == 1 )
+                            classes.sort { a, b -> (b.value <=> a.value) ?: (a.key <=> b.key) }.each { cn, cnt ->
+                                imgItem.getChildren().add( new TreeItem( "${cn} [${cnt} existing]".toString() ) )
+                            }
+                            treeRoot.getChildren().add( imgItem )
+                        }
+                        def tree = new TreeView( treeRoot )
+                        tree.setShowRoot( true )
+
+                        // Size the tree to its currently-visible rows so the dialog is compact when
+                        // collapsed and grows only as images/classes are expanded — capped so that many
+                        // images scroll inside the tree rather than producing an oversized window.
+                        double dupRowHeight = 24.0
+                        int    dupMaxRows   = 12
+                        tree.setFixedCellSize( dupRowHeight )
+                        tree.setPrefWidth( 480 )
+                        def sizeTreeToContent = {
+                            int rows  = Math.max( tree.getExpandedItemCount(), 1 )
+                            int shown = Math.min( rows, dupMaxRows )
+                            double h  = shown * dupRowHeight + 6
+                            tree.setMinHeight( h )
+                            tree.setPrefHeight( h )
+                            tree.setMaxHeight( h )
+                        }
+                        sizeTreeToContent()
+                        // Re-size the tree and shrink/grow the window whenever rows are expanded/collapsed
+                        tree.expandedItemCountProperty().addListener { obs, oldV, newV ->
+                            sizeTreeToContent()
+                            Platform.runLater {
+                                def w = tree.getScene()?.getWindow()
+                                if (w != null) { w.sizeToScene() }
+                            }
+                        }
+
+                        def summaryLabel = new Label( "${affectedImages} image(s) with potential duplicates across ${affectedClasses} class(es):".toString() )
+                        summaryLabel.setStyle( "-fx-font-weight: bold;" )
+                        def dupContent = new VBox( 8, summaryLabel, tree )
+                        dupContent.setPadding( new Insets( 5 ) )
+                        alert.getDialogPane().setContent( dupContent )
+                        alert.setResizable( true )
+
+                        return alert.showAndWait().orElse( exitBtn )
+                    }
+
                     // Handling user decision logic
                     switch (confirmRemoveObjs) {
                         case (exitBtn):
@@ -1317,6 +1662,10 @@ for (image in imagesToRun) {
                             removeObjs = true
                             confirmRemoveObjsChoice = true
                             break
+                        case (skipDupBtn):
+                            skipDupObjs = true
+                            confirmRemoveObjsChoice = true
+                            break
                     }
                 } 
                 
@@ -1324,18 +1673,24 @@ for (image in imagesToRun) {
                     hierarchy.removeObjects( existingObjsSameClasses, false )
                     workingObjects.removeAll( existingObjsSameClasses )
                 }
+
+                // In "skip duplicates" mode, import nothing into images that have duplicates
+                skipDupThisImage = skipDupObjs
             }
             
-            // Add all imported objects first with no nesting yet
-            importedObjects.each { obj ->
-                hierarchy.addObject( obj, false )
-                obj.setLocked( true )
-                workingObjects << obj
-            }
-            
-            // Resolving hierarchy if desired
-            if (codePreferences.includeParents) { 
-                anyNestingProblems = resolveHierarchy( workingObjects, hierarchy, image )
+            // Skip importing entirely for duplicate images when "Skip duplicates" was chosen
+            if (!skipDupThisImage) {
+                // Add all imported objects first with no nesting yet
+                importedObjects.each { obj ->
+                    hierarchy.addObject( obj, false )
+                    obj.setLocked( true )
+                    workingObjects << obj
+                }
+
+                // Resolving hierarchy if desired
+                if (codePreferences.includeParents) {
+                    anyNestingProblems = resolveHierarchy( workingObjects, hierarchy, image )
+                }
             }
         }
     }
@@ -1396,6 +1751,7 @@ import javafx.beans.property.SimpleStringProperty
 import javafx.geometry.Insets
 import javafx.geometry.*
 import javafx.scene.Scene
+import javafx.scene.Node
 import javafx.scene.control.*
 import javafx.scene.control.ButtonBar.ButtonData
 import javafx.scene.layout.*
@@ -1406,6 +1762,8 @@ import javafx.stage.*
 import javafx.beans.binding.Bindings
 import com.google.gson.GsonBuilder
 import com.google.gson.Gson
+import com.google.gson.stream.JsonReader
+import com.google.gson.stream.JsonToken
 import qupath.lib.gui.tools.IconFactory
 import org.controlsfx.glyphfont.FontAwesome
 
