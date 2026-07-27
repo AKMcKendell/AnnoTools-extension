@@ -42,7 +42,7 @@ def setTT( objs, String tooltip ) {
 }
 
 // Function: Create window showing script progress
-def createProgressWindow( String title, int totalImages, boolean simplify = false, Stage ownerStage = null ) {
+def createProgressWindow( String title, int totalImages, boolean simplify = false, Stage ownerStage = null, List imageNames = [] ) {
     return runOnFxThreadAndWait {
         def stage = new Stage()
         stage.setMinWidth( 350 )
@@ -74,7 +74,7 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         List rows = [imageRow, barRow, bottomRow]
         
         if (simplify) {
-            rows.removeAll( imageRow, bottomRow )
+            rows.removeAll( imageRow )
         }
         
         def vbox = new VBox( 10 )
@@ -110,9 +110,39 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         stage.setScene( scene )
         
         def gui = QuPathGUI.getInstance()
+        // An explicit ownerStage means we're nested inside another window that is
+        // already modal in its own right (e.g. the preferences dialog). Making this
+        // window modal too would stack a second, overlapping modal-block scope on the
+        // same owner, which is what causes the owner to get hidden instead of cleanly
+        // re-enabled once the inner window closes. Only self-modal when top-level.
+        boolean nested = ownerStage != null
         stage.initOwner( ownerStage ?: gui?.getStage() )
-        stage.initModality( Modality.WINDOW_MODAL )
+        if (!nested) {
+            stage.initModality( Modality.WINDOW_MODAL )
+        }
         stage.show()
+
+        // Pre-size once to fit the longest image name (plus every other row), never
+        // below the minimum width, so the window opens at its final size rather than
+        // growing as image names appear during the run. The grow-never-shrink logic
+        // stays in place as a floor so unusually long step text still can't be clipped.
+        String widestImageName = (imageNames ?: []).collect { it?.toString() ?: "" }.max { it.length() } ?: ""
+        String initialImageName = imageName.get()
+        String initialImageNum  = imageNum.get()
+        imageName.set( widestImageName )
+        imageNum.set( totalImages.toString() )
+        vbox.applyCss()
+        vbox.layout()
+        // The stage width includes the OS window frame, so the usable scene is
+        // narrower than the stage by its side borders (a few px on Windows, ~0 on
+        // macOS). Add that back or the content's right edge gets clipped.
+        double frameWidth = scene.getWidth() > 0 ? Math.max( stage.getWidth() - scene.getWidth(), 0 ) : 0
+        double contentWidth = rows.collect { it.prefWidth( -1 ) }.max() + vbox.getPadding().getLeft() + vbox.getPadding().getRight()
+        double baselineWidth = Math.max( contentWidth + frameWidth, stage.getMinWidth() )
+        if (baselineWidth > stage.getMinWidth()) { stage.setMinWidth( baselineWidth ) }
+        if (baselineWidth > stage.getWidth())    { stage.setWidth( baselineWidth ) }
+        imageName.set( initialImageName )
+        imageNum.set( initialImageNum )
         updateStageWidth()
         
         def startTime = System.nanoTime()
@@ -136,6 +166,7 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         timerTimeline.play()
         
         // Shared atomic state written by worker threads, read by poll timeline
+        def doneCount = new AtomicInteger( 0 )
         def lastImageName = new AtomicReference<String>( "Starting..." )
         
         // Poll at 100 ms — faster than the render pulse, so no burst is missed
@@ -193,6 +224,22 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
     }
 }
 
+// Function: Lock a node's current dimensions to prevent resizing
+def lockDimensions( Node nodes ) {
+    Platform.runLater {
+        nodes.each { node ->
+            double h = node.getHeight()
+            node.setMinHeight( h )
+            node.setPrefHeight( h )
+            node.setMaxHeight( h )
+            double w = node.getWidth()
+            node.setMinWidth( w )
+            node.setPrefWidth( w )
+            node.setMaxWidth( w )
+        }
+    }
+}
+
 // Function: Make a checkbox that selects/deselects all checkboxes
 def makeSelectAllCB( List groupCBs ) {
     def selectAllCB = new CheckBox()
@@ -224,7 +271,7 @@ def makeSelectAllCB( List groupCBs ) {
 
 
 // Function: Make a box with checkboxes and a modifiable header
-def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0 ) {
+def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0, String emptyMessage = "None available" ) {
     
     def checkboxBox = new VBox( 5 )
     checkboxBox.setPadding( new Insets( 5 ) )
@@ -241,18 +288,32 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     
     def checkboxContainer = new VBox( 5 )
     checkboxContainer.setPadding( new Insets( 5 ) )
-    
+
     // Build checkboxes from supplied objects
     def checkboxes = objects.collect { obj ->
-        
+
         def cb = new CheckBox( obj.name )
         cb.setUserData( obj.data ?: obj.name )
         cb.setMnemonicParsing( false ) // so no characters are dropped
-        
+
         return cb
     }
-    
+
+    def noneAvailableLabel = new Label( emptyMessage )
+    noneAvailableLabel.setStyle( "-fx-font-style: italic; -fx-text-fill: gray;" )
+    noneAvailableLabel.setPadding( new Insets( 5 ) )
+
+    checkboxContainer.getChildren().add( noneAvailableLabel )
     checkboxes.each { checkboxContainer.getChildren().add( it ) }
+
+    // Shows "None available" whenever there are no checkboxes, or none are currently visible
+    def updateNoneAvailable = {
+        boolean anyVisible = checkboxes.any { it.isVisible() }
+        noneAvailableLabel.setVisible( !anyVisible )
+        noneAvailableLabel.setManaged( !anyVisible )
+    }
+    updateNoneAvailable()
+    checkboxes.each { cb -> cb.visibleProperty().addListener { obs, oldVal, newVal -> updateNoneAvailable() } }
     
     def selectAllCB = makeSelectAllCB( checkboxes )
     
@@ -304,20 +365,32 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     
     def titleLabel = new Label()
     titleLabel.setPadding( new Insets( 5, 0, 0, 0 ) )
-    
+
     String TTword = keyWord ?: title
+    titleLabel.setText( "${title.capitalize()} [0]" )
     selectAllCB.setText( "${title.capitalize()} [0]" )
     setTT( selectAllCB, "Include all ${TTword.uncapitalize()}" )
-    
+
+    // Once shown, measure/lock against the widest possible count so later updates never get clipped
+    selectAllCB.sceneProperty().addListener { obs, oldScene, newScene ->
+        if (newScene != null) {
+            String initialText = selectAllCB.getText()
+            selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
+            Platform.runLater {  // extra pulse so CSS skin is applied
+                lockDimensions( selectAllCB )
+                Platform.runLater { selectAllCB.setText( initialText ) }
+            }
+        }
+    }
+
     // Add listeners to checkboxes (for changing instructions/labels)
-    checkboxes.each { cb ->
-        cb.selectedProperty().addListener { obs, oldVal, newVal ->            
-            
+    def refreshLabels = {
+
             def selectedNow = checkboxes.findAll { it.isSelected() && it.isVisible() }.collect { it.getText() }
             titleLabel.setText( "${title.capitalize()} [${selectedNow.size()}]" )
-            
+
             selectAllCB.setText( "${title.capitalize()} [${selectedNow.size()}]" )
-            
+
             String tooltipText = "Select ${TTword.uncapitalize()}"
             
             if (selectedNow.size() > 0) {
@@ -329,6 +402,9 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
             
             setTT( [titleLabel, scrollPane], tooltipText )
         }
+    checkboxes.each { cb ->
+        cb.selectedProperty().addListener { obs, oldVal, newVal -> refreshLabels() }
+        cb.textProperty().addListener { obs, oldVal, newVal -> refreshLabels() }
         
         cb.visibleProperty().addListener { obs, oldVal, newVal ->
             cb.setSelected( !cb.isSelected() )
@@ -404,14 +480,22 @@ def addIcon( node, iconCode, int size ) {
 // Function: Scan the entire project to collect annotation field availability by class
 def collectProjectAnnotationIndex( project, Stage ownerStage = null, Collection omittedMdKeys = [] ) {
     List projectImages = project.getImageList()
-    def collectingUI = createProgressWindow( "Getting project specifics", projectImages.size(), true, ownerStage )
+    def collectingUI = createProgressWindow( "Getting project specifics", projectImages.size(), true, ownerStage, projectImages.collect { it.getImageName() } )
     int total = projectImages.size()
-    
+    def stopLaterFlag = collectingUI.stopLaterFlag
+
     def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), total )
     def pool = Executors.newFixedThreadPool( nThreads )
-    
+
     def futures = projectImages.collect { entry ->
         pool.submit({
+            // Bail out before touching image data once a stop has been requested
+            if (stopLaterFlag.get()) {
+                collectingUI.lastImageName.set( entry.getImageName() )
+                collectingUI.doneCount.incrementAndGet()
+                return [ classCounts: [:], measurements: [:], metadata: [:] ]
+            }
+
             def localClassCounts     = [:].withDefault { 0 }
             def localMeasurements    = [:].withDefault { new LinkedHashSet() }
             def localMetadata        = [:].withDefault { new LinkedHashSet() }
@@ -465,9 +549,27 @@ def collectProjectAnnotationIndex( project, Stage ownerStage = null, Collection 
     index.measurementsByClass = index.measurementsByClass.collectEntries { k, v -> [k, new LinkedHashSet( v )] }
     index.metadataByClass     = index.metadataByClass.collectEntries     { k, v -> [k, new LinkedHashSet( v )] }
     index.classCounts         = index.classCounts.collectEntries         { k, v -> [k, v as int] }
+    index.cancelled           = stopLaterFlag.get()
     return index
 }
 
+
+
+// Function: Natural (alphanumeric) comparison so embedded numbers sort numerically rather than lexically
+def naturalCompare( String s1, String s2 ) {
+    def ta = []
+    (( s1 ?: "" ).toLowerCase() =~ /\d+|\D+/).each { ta << it }
+    def tb = []
+    (( s2 ?: "" ).toLowerCase() =~ /\d+|\D+/).each { tb << it }
+    int n = Math.min( ta.size(), tb.size() )
+    for (int i = 0; i < n; i++) {
+        String x = ta[ i ]
+        String y = tb[ i ]
+        int cmp = (x ==~ /\d+/ && y ==~ /\d+/) ? ((x as BigInteger) <=> (y as BigInteger)) : (x <=> y)
+        if (cmp != 0) { return cmp }
+    }
+    return ta.size() <=> tb.size()
+}
 
 
 // Project & preferences file
@@ -511,10 +613,12 @@ def projectFingerprint = { proj ->
 // If not, regenerates by scanning the project
 def loadProjectCache = { proj, File cacheFile, boolean forceReload = false, Stage ownerStage = null ->
     def currentFingerprint = projectFingerprint( proj )
-    if (cacheFile.exists() && cacheFile.length() > 0L && !forceReload) {
+    def previousCache = null
+    if (cacheFile.exists() && cacheFile.length() > 0L) {
         try {
             def cached = inputGson.fromJson( cacheFile.text, Object )
-            if (cached?.fingerprint == currentFingerprint && cached?.index instanceof Map) {
+            if (cached instanceof Map) { previousCache = cached }
+            if (!forceReload && cached?.fingerprint == currentFingerprint && cached?.index instanceof Map) {
                 return cached
             }
         } catch (Exception ignored) {
@@ -523,6 +627,20 @@ def loadProjectCache = { proj, File cacheFile, boolean forceReload = false, Stag
     }
 
     def builtIndex = collectProjectAnnotationIndex( proj, ownerStage, omittedMdKeys )
+
+    if (builtIndex.cancelled) {
+        // Stopped partway through — keep whatever was already on disk rather than
+        // persisting a partial scan as if it were complete, current data
+        return previousCache ?
+            previousCache + [ cancelled: true ] :
+            [
+                timeStamp  : "No cached data available",
+                fingerprint: currentFingerprint,
+                index      : builtIndex,
+                cancelled  : true
+            ]
+    }
+
     def timestamp = LocalDateTime.now().format(
         DateTimeFormatter.ofPattern( "yyyy-MM-dd HH:mm:ss" )
     )
@@ -569,9 +687,9 @@ def codePreferences = runOnFxThreadAndWait {
         pool.submit({
             def summaryFile = entry.getEntryPath().resolve( "summary.json" )
             def counts = [:]
-            if (Files.exists(summaryFile)) {
+            if (Files.exists( summaryFile )) {
                 try {
-                    def raw = new String(Files.readAllBytes(summaryFile))
+                    def raw = new String( Files.readAllBytes( summaryFile ) )
                     def summary = gson.fromJson( raw, Object )
                     def classCounts = summary?.get( "hierarchy" )?.get( "annotationClassificationCounts" )
                     classCounts?.each { k, v ->
@@ -585,22 +703,42 @@ def codePreferences = runOnFxThreadAndWait {
         } as Callable)
     }
     
-    // Serial merge — directly into imageClassCounts and totalsByClass, no intermediate map needed
+    // Serial merge directly into imageClassCounts and totalsByClass, no intermediate map needed
     futures.each { f ->
         def (imgName, counts) = f.get()
         imageClassCounts[ imgName ] = counts
         counts.each { className, count ->
-            totalsByClass.merge(className, count, Integer.&sum)
+            totalsByClass.merge( className, count, Integer.&sum )
         }
     }
     pool.shutdown()
     
+    // If an image is open, use its LIVE hierarchy for that image's class counts so unsaved
+    // objects are reflected — both in the counts and in whether a class appears at all. Cheap,
+    // since the image is already loaded, and safe on the FX thread we're already running on.
+    if (currentEntry != null && currentImageData != null) {
+        def liveCounts = [:]
+        currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
+            def cn = obj.getPathClass()?.getName()
+            if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+        }
+        imageClassCounts[ currentEntry.getImageName() ] = liveCounts
+
+        // Rebuild totals in place so the override is reflected everywhere downstream
+        totalsByClass.clear()
+        imageClassCounts.each { imgName, counts ->
+            counts.each { className, count ->
+                totalsByClass.merge( className, count, Integer.&sum )
+            }
+        }
+    }
+
     // Only classes with existing annotations in project, sorted by abundance
     List pathClassCBsMap = totalsByClass
         .collect { [name: it.key, data: it.key, num: it.value] }
-        .sort { -it.num }
+        .sort { a, b -> (b.num <=> a.num) ?: naturalCompare( a.name, b.name ) }
         .collect { [name: it.name, data: it.data] } // labels set by updateClassCounts
-    def pathClassBox = makeCheckboxBox( "Available classes", null, pathClassCBsMap, 200 )
+    def pathClassBox = makeCheckboxBox( "Available classes", "classes of existing objects", pathClassCBsMap, 200 )
     pathClassBox.header.getChildren().addAll( pathClassBox.selectAll )
     pathClassBox.CBs.each { it.setSelected( it.getUserData() in prePrefsMap.objectClasses ) }
     BorderPane.setMargin( pathClassBox.box, new Insets( 0, 15, 0, 0 ) )
@@ -691,14 +829,14 @@ def codePreferences = runOnFxThreadAndWait {
         def measurementsByClass = projectCache.index.measurementsByClass ?: [:]
         LinkedHashSet allMeasurements = new LinkedHashSet( (measurementsByClass.values() ?: []).collectMany { it ?: [] } )
         def allMeasurementsMap = allMeasurements.collect { [name: it] }
-        measurementsBox = makeCheckboxBox( "Available measurements", "available measurements within objects of the selected classes", allMeasurementsMap, 350 )
+        measurementsBox = makeCheckboxBox( "Available measurements", "existing measurements from objects of the selected classes", allMeasurementsMap, 250, 0, "None available for selected object classes" )
         measurementsBox.header.getChildren().add( measurementsBox.selectAll )
         measurementsBox.box.setMinWidth( Region.USE_PREF_SIZE )
         
         def metadataByClass = projectCache.index.metadataByClass ?: [:]
         LinkedHashSet allMetadata = new LinkedHashSet( (metadataByClass.values() ?: []).collectMany { it ?: [] } )
         def allMetadataMap = allMetadata.collect { [name: it] }
-        metadataBox = makeCheckboxBox( "Available metadata", "available metadata within objects of the selected classes", allMetadataMap, 250 )
+        metadataBox = makeCheckboxBox( "Available metadata", "existing metadata from objects of the selected classes", allMetadataMap, 250, 0, "None available for selected object classes" )
         metadataBox.header.getChildren().add( metadataBox.selectAll )
         metadataBox.box.setMinWidth( Region.USE_PREF_SIZE )
         
@@ -740,7 +878,7 @@ def codePreferences = runOnFxThreadAndWait {
     timeStamp.setPadding( new Insets( 5 ) )
     def refreshBtn = new Button( " Refresh project data" )
     addIcon( refreshBtn, FontAwesome.Glyph.REFRESH, 12 )
-    setTT( refreshBtn, "Re-scan project to update available object classes, measurements, and metadata.")
+    setTT( refreshBtn, "Re-scan project to update existing measurements and metadata." )
     def topRow = new HBox( 10, refreshBtn, timeStamp )
     
     def rightPanel = new VBox( 10, topRow, bottomRightPanel )
@@ -812,29 +950,56 @@ def codePreferences = runOnFxThreadAndWait {
     refreshBtn.setOnAction {
         refreshBtn.setDisable( true )
         def dialogStage = dialog.getDialogPane().getScene().getWindow() as Stage
-        
+
+        // The progress window is non-modal while nested under this dialog (see
+        // createProgressWindow), so disable the dialog's own content/buttons here
+        // instead — it stands in for the modality we can no longer use
+        dialog.getDialogPane().setDisable( true )
+
         List measurementsSelected = liveRightCBs.mmCBs.findResults { it.isSelected() ? it.getText() : null }
         List metadataSelected     = liveRightCBs.mdCBs.findResults { it.isSelected() ? it.getText() : null }
-        
+
         Thread.startDaemon {
             def newCache = loadProjectCache( project, fieldCacheFile, true, dialogStage )
-    
+
             Platform.runLater {
                 projectCache = newCache
                 liveRightCBs = setRightBox()
                 selectSpecificCBs( liveRightCBs.mmCBs, measurementsSelected )
                 selectSpecificCBs( liveRightCBs.mdCBs, metadataSelected )
-                timeStamp.setText( " Last refresh: ${projectCache.timeStamp}  [CURRENT DATA]" )
-                refreshBtn.setDisable( true )
+
+                if (projectCache.cancelled) {
+                    // Refresh didn't finish — leave the timestamp/button as if it
+                    // never ran, rather than claiming the (possibly stale) data is current
+                    timeStamp.setText( " Last refresh: ${projectCache.timeStamp}" )
+                    refreshBtn.setDisable( false )
+                } else {
+                    timeStamp.setText( " Last refresh: ${projectCache.timeStamp}  [CURRENT DATA]" )
+                    refreshBtn.setDisable( true )
+                }
+
+                dialog.getDialogPane().setDisable( false )
                 rebindOkBtn()
+
+                // The progress window's owner here is the dialog, not the root QuPath
+                // stage — so the root window never gets implicitly refocused when the
+                // progress window/Alert close. Bring both back explicitly, main window
+                // first so the dialog ends up on top of it, not the other way round.
+                QuPathGUI.getInstance().getStage()?.toFront()
+                dialogStage.toFront()
             }
         }
     }
     
     
     // Attach root & show dialog
-    dialog.getDialogPane().content = root   
+    dialog.getDialogPane().content = root
     dialog.showAndWait()
+
+    // Same owner-chain gap as the refresh progress window — closing this dialog can
+    // leave the root QuPath stage behind other applications, especially if a refresh
+    // was cancelled earlier in the session
+    QuPathGUI.getInstance().getStage()?.toFront()
     
     if (save) {
         def selectedImages = imagesBox.CBs
@@ -878,7 +1043,7 @@ if (codePreferences == null) {
 def imagesToRun = project.getImageList().findAll { it.getImageName() in codePreferences.selectedImages }
 
 def total = imagesToRun.size()
-def progressUI = createProgressWindow( "Processing", total )
+def progressUI = createProgressWindow( "Processing", total, false, null, imagesToRun.collect { it.getImageName() } )
 def stopLaterFlag = progressUI.stopLaterFlag
 
 // Making a matrix for all images
@@ -1049,6 +1214,7 @@ import javafx.beans.property.SimpleStringProperty
 import javafx.event.ActionEvent
 import javafx.geometry.*
 import javafx.scene.Scene
+import javafx.scene.Node
 import javafx.scene.control.*
 import javafx.scene.control.ButtonBar.ButtonData
 import javafx.scene.layout.*
