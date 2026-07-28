@@ -409,7 +409,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     uiElements.btnMap << [ name   : ActionStrings.NEXT,
                            action : { queue.put( ActionStrings.NEXT ) },
                            btnType: new ButtonType( "(N)ext", ButtonData.YES ),
-                           btnTT  : "Lock in current classifications and move to next group",
+                           btnTT  : "Save current classifications and move to next group",
                            key    : "n",
                            click  : MouseButton.FORWARD ]
                            
@@ -830,11 +830,16 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
         -fx-border-width: 1.5;
     """.stripIndent()
     
-    def highlightedStyle = { chan -> // Channel to change brightness style
+    def highlightedStyle = { chan -> // Channel to change brightness style: soft colored glow (halo)
         def c = new AwtColor( chan.getColor(), true )
         return "-fx-effect: dropshadow(gaussian, rgba(${c.red},${c.green},${c.blue},1), 10, 0.2, 0, 0);"
     }
-    def channelSelectedStyle = "-fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 10, 0.2, 0, 0);" // Channel on style
+    // Channel on style: skinny colored underline bar (color localized to one edge — distinct from the brightness channel's all-around glow)
+    // Bottom padding is trimmed by the 1.5 the bottom border grows (1.5 -> 3) so the button height stays constant and the panel doesn't jump
+    def channelSelectedStyle = { chan ->
+        def c = new AwtColor( chan.getColor(), true )
+        return "-fx-padding: 6 10 4.5 10; -fx-border-color: #666666 #666666 rgb(${c.red},${c.green},${c.blue}) #666666; -fx-border-width: 1.5 1.5 3 1.5; -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 10, 0.2, 0, 0);"
+    }
     def channelUnselectedStyle = "-fx-effect: innershadow(gaussian, rgba(0,0,0,0.9), 100, 0, 0, 0);" // Channel off style
     
     // Set channel button updated style
@@ -848,7 +853,7 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
         
         // Adding their style
         boolean highlighted = (ch.channel == session.channelToChange) && (!session.freeView || session.freeViewMode != ActionStrings.ZOOM) // Setting initial style
-        def channelButtonStyle = highlighted ? highlightedStyle( ch.channel ) : btn.isSelected() ? channelSelectedStyle : channelUnselectedStyle
+        def channelButtonStyle = highlighted ? highlightedStyle( ch.channel ) : btn.isSelected() ? channelSelectedStyle( ch.channel ) : channelUnselectedStyle
         btn.setStyle( channelStandardStyle + channelButtonStyle )
         
         def chBtnTooltipText = highlighted ? "Toggle ${ch.name} \n \n Scroll on viewer to change brightness" : "Toggle ${ch.name}"
