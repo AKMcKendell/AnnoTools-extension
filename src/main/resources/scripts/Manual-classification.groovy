@@ -4160,7 +4160,8 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     // Getting channel specifics for toggling and turning off others ---
     def availableChannels = session.viewer.getImageDisplay().availableChannels()
     session.controllableChannels = availableChannels.findAll { ch ->
-        session.toggleChannels.any { ch.getName().toUpperCase().contains( it.toUpperCase() ) }
+        def chBaseName = baseChannelName( ch.getName() ) // Strip "(C1)"-style suffix to match stored base names
+        session.toggleChannels.any { it.equalsIgnoreCase( chBaseName ) } // Exact match so e.g. "CD3" no longer matches "CD31"
     }
     def intitalDisplay = session.viewer.getImageDisplay()
     session.channelSpecifics = []
