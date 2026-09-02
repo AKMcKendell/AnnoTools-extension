@@ -420,6 +420,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     
     // - Classification labels -
     def classLabel = new Label( "${session.classifyingName} classification:" )  
+    classLabel.setStyle( "-fx-font-weight: bold;" )
     uiElements.classesSection.getChildren().addAll( classLabel, uiElements.classesGrid )
     
     uiElements.btnMap << [ name  : "Classification label",
@@ -448,7 +449,8 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
         
     // - Image classes summary labels -
     def allClassesLabel = new Label( "SUMMARY: ${session.classifyingName} classifications from ${session.classifierMode ? session.userName : session.classifiers}:" )
-    
+    allClassesLabel.setStyle( "-fx-font-weight: bold;" )
+
     uiElements.classesSummaryToggleGroup  = new ToggleGroup()
     uiElements.classesSummaryBtns         = []
     uiElements.classesSummaryStyleMap     = [:]
@@ -471,6 +473,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     
     // - Reviewer classification buttons -
     def revClassLabel = new Label( "Set classification:" )
+    revClassLabel.setStyle( "-fx-font-weight: bold;" )
     uiElements.revClassSection.getChildren().addAll( revClassLabel, uiElements.revClassGrid )
     
     uiElements.btnMap << [ name  : "Reviewer class label",
@@ -507,6 +510,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     
     // - Channel buttons -
     def channelsLabel = new Label( "Channel controls:" )
+    channelsLabel.setStyle( "-fx-font-weight: bold;" )
     uiElements.channelSection.getChildren().addAll( channelsLabel, uiElements.channelGrid )
     
     uiElements.btnMap << [ name   : "Channel label",
@@ -519,7 +523,13 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
         String btnText = "(${idx+1}) ${ch.name}"
         ToggleButton btn = new ToggleButton( btnText )
         btn.setMnemonicParsing( false )
-        uiElements.channelGrid.getChildren().add( btn )
+        // Small faint state caption shown under each channel button (off / on / scroll)
+        def stateCaption = new Label()
+        stateCaption.setStyle( "-fx-font-size: 10px;" )
+        stateCaption.setOpacity( 0.6 )
+        def btnWithCaption = new VBox( 1, btn, stateCaption )
+        btnWithCaption.setAlignment( Pos.CENTER )
+        uiElements.channelGrid.getChildren().add( btnWithCaption )
     
         def action = {
             session.toggleChannel = ch.name
@@ -527,12 +537,13 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
         }
     
         uiElements.btnMap << [
-            name  : btnText,
-            chName: ch.name,
-            btn   : btn,
-            key   : numberTrigger,
-            action: action,
-            group : "channel"
+            name   : btnText,
+            chName : ch.name,
+            btn    : btn,
+            caption: stateCaption,
+            key    : numberTrigger,
+            action : action,
+            group  : "channel"
         ]
     }
     
@@ -830,9 +841,11 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
         -fx-border-width: 1.5;
     """.stripIndent()
     
-    def highlightedStyle = { chan -> // Channel to change brightness style: soft colored glow (halo)
+    // Channel to change brightness style: full colored ring (same 3px colored border as the on-channel underline, all four sides) plus a faint colored glow so the actively-controllable channel still pops.
+    // Padding is trimmed 1.5 per side to offset the thicker (1.5 -> 3) border so the button size stays constant.
+    def highlightedStyle = { chan ->
         def c = new AwtColor( chan.getColor(), true )
-        return "-fx-effect: dropshadow(gaussian, rgba(${c.red},${c.green},${c.blue},1), 10, 0.2, 0, 0);"
+        return "-fx-padding: 4.5 8.5 4.5 8.5; -fx-border-color: rgb(${c.red},${c.green},${c.blue}); -fx-border-width: 3; -fx-effect: dropshadow(gaussian, rgba(${c.red},${c.green},${c.blue},0.65), 10, 0.2, 0, 0);"
     }
     // Channel on style: skinny colored underline bar (color localized to one edge — distinct from the brightness channel's all-around glow)
     // Bottom padding is trimmed by the 1.5 the bottom border grows (1.5 -> 3) so the button height stays constant and the panel doesn't jump
@@ -855,6 +868,8 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
         boolean highlighted = (ch.channel == session.channelToChange) && (!session.freeView || session.freeViewMode != ActionStrings.ZOOM) // Setting initial style
         def channelButtonStyle = highlighted ? highlightedStyle( ch.channel ) : btn.isSelected() ? channelSelectedStyle( ch.channel ) : channelUnselectedStyle
         btn.setStyle( channelStandardStyle + channelButtonStyle )
+
+        entry.caption?.setText( highlighted ? "scroll" : btn.isSelected() ? "on" : "off" )
         
         def chBtnTooltipText = highlighted ? "Toggle ${ch.name} \n \n Scroll on viewer to change brightness" : "Toggle ${ch.name}"
         setTT( btn, chBtnTooltipText )
@@ -2007,6 +2022,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 pool.shutdown()
                 
                 Platform.runLater {
+                    def prevUser = users.getValue() // Capture before mutating items: unique() below clears the list, which wipes the ComboBox selection
                     def newNamesSet = uniqueUsers.toSet()
                     List newClassifiers = []
                     List newReviewers = []
@@ -2028,7 +2044,10 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                     reviewerOptions = reviewerOptions.unique()
                     
                     
-                    if ( !users.getItems().isEmpty() ) {
+                    // Restore the selection the in-place unique() above wiped: keep the previous user if still valid, else default to the first
+                    if ( prevUser in users.getItems() ) {
+                        users.setValue( prevUser )
+                    } else if ( !users.getItems().isEmpty() ) {
                         users.setValue( users.getItems().first() )
                     }
                     
@@ -2462,7 +2481,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def chBoxToolTipText = chBoxToolTipBaseText
         setTT( channelCBsBox, chBoxToolTipText )
         
-        int maxChannels = 4
+        int maxChannels = 5
         
         // Items in top channel row
         def channelsLabel = new Label( "Select up to ${maxChannels} channels: [0]" )

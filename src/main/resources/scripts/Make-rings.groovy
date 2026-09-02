@@ -1227,8 +1227,8 @@ for (image in imagesToRun) {
             // Clear previous expansions
             def objectsToRemove = hierarchy.getAnnotationObjects().findAll { 
                 def pathClassName = it.getPathClass()?.getName()
-                pathClassName in expansionClasses ||
-                ( pathClassName.contains( objectClass + "_" ) && it.getParent() in baseObjs )
+                pathClassName && (pathClassName in expansionClasses ||
+                ( pathClassName.contains( objectClass + "_" ) && it.getParent() in baseObjs ))
             }
             hierarchy.removeObjects( objectsToRemove, false )
             
