@@ -899,7 +899,7 @@ def codePreferences = runOnFxThreadAndWait {
         )
         
         def startingDir = prePrefsMap.folder ?
-            new File( prePrefsMap.folder ) :
+            new File( prePrefsMap.folder ) ?: project.getBaseDirectory() :
             project.getBaseDirectory()
     
         chooser.setInitialFileName( "results.csv" )
