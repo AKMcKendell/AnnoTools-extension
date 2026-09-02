@@ -11,12 +11,74 @@ import qupath.fx.dialogs.Dialogs
 import qupath.lib.common.Version
 import qupath.lib.gui.tools.IconFactory
 import org.controlsfx.glyphfont.FontAwesome
+import java.util.concurrent.atomic.AtomicBoolean
 
 class AnnoToolsExtension implements QuPathExtension {
 
     String name = "AnnoTools"
     String description = "Toolbar dropdown launcher for annoToolScripts"
     Version quPathVersion = Version.parse("v0.7.0")
+
+    // Runs a tool script with visible "loading" feedback. Some scripts take a
+    // moment to build their UI before showing a window, and until now that gap
+    // had no indication beyond a WAIT cursor — QuPath stayed fully interactive,
+    // so users could click around mid-load. This blocks the main window and
+    // posts a notification immediately, then unblocks as soon as either the
+    // script's own window steals focus, or the script thread finishes (covers
+    // scripts that error out or never open a window at all).
+    private static void runToolScript( QuPathGUI qupath, File file, String label ) {
+        if (!qupath.getProject()) {
+            Dialogs.showWarningNotification( "No project open!", "Open a project to use tools." )
+            return
+        }
+
+        def stage = qupath.getStage()
+        def scene = stage.getScene()
+        def root = scene.getRoot()
+
+        Dialogs.showPlainNotification( label, "Loading…" )
+
+        def resumed = new AtomicBoolean( false )
+        def resumeInteraction = {
+            if (resumed.compareAndSet( false, true )) {
+                Platform.runLater {
+                    scene.setCursor( Cursor.DEFAULT )
+                    root.setDisable( false )
+                }
+            }
+        }
+
+        Platform.runLater {
+            scene.setCursor( Cursor.WAIT )
+            root.setDisable( true )
+        }
+
+        // Resume as soon as the script's UI appears (main stage loses focus)
+        def listener
+        listener = { obs, oldVal, newVal ->
+            if (!newVal) {
+                resumeInteraction()
+                stage.focusedProperty().removeListener( listener )
+            }
+        } as javafx.beans.value.ChangeListener
+        stage.focusedProperty().addListener( listener )
+
+        def runner = new Thread({
+            try {
+                qupath.runScript( file, null )
+            } catch ( Throwable t ) {
+                t.printStackTrace()
+            } finally {
+                // Catches scripts that error before showing a window, or that
+                // never open one (e.g. run to completion headlessly)
+                resumeInteraction()
+                Platform.runLater { stage.focusedProperty().removeListener( listener ) }
+            }
+        } as Runnable, "Run-${file.name}")
+
+        runner.setDaemon( true )
+        runner.start()
+    }
 
     @Override
     void installExtension(QuPathGUI qupath) {
@@ -132,47 +194,19 @@ class AnnoToolsExtension implements QuPathExtension {
                         item.setGraphic( graphic )
                     }
 
-                    item.setOnAction {
-                        if (!qupath.getProject()) {
-                            Dialogs.showWarningNotification( "No project open!", "Open a project to use tools." )
-                            return
-                        }
-
-                        def scene = qupath.getStage().getScene()
-                        Platform.runLater { scene.setCursor( Cursor.WAIT ) }
-
-                        // Reset cursor when the script UI appears (stage loses focus)
-                        def listener
-                        listener = { obs, oldVal, newVal ->
-                            if (!newVal) {
-                                Platform.runLater { scene.setCursor( Cursor.DEFAULT ) }
-                                qupath.getStage().focusedProperty().removeListener( listener )
-                            }
-                        } as javafx.beans.value.ChangeListener
-                        qupath.getStage().focusedProperty().addListener( listener )
-
-                        def runner = new Thread({
-                            try {
-                                qupath.runScript( file, null )
-                            } catch ( Throwable t ) {
-                                t.printStackTrace()
-                                Platform.runLater { 
-                                    scene.setCursor( Cursor.DEFAULT )
-                                    qupath.getStage().focusedProperty().removeListener( listener )
-                                }
-                            }
-                        } as Runnable, "Run-${file.name}")
-
-                        runner.setDaemon( true )
-                        runner.start()
-                    }
+                    item.setOnAction { runToolScript( qupath, file, label ) }
 
                     menuButton.getItems().add( item )
                 }
+            }
 
-                if (scriptFiles.size() > 1) {
-                    menuButton.getItems().add( 0, new SeparatorMenuItem() )
-                }
+            // Popups resolve looked-up colours through their owner node, so if the toolbar
+            // overflows (menu button moved into the overflow menu) the item labels inherit
+            // '-fx-background' from the highlighted outer menu item and render dark.
+            // Pin it to the theme base so the text ladder stays correct in light and dark.
+            menuButton.setOnShowing {
+                def popup = menuButton.getItems()*.getParentPopup().find { it != null }
+                popup?.setStyle( '-fx-background: -fx-base;' )
             }
 
             toolbar.getItems().add( menuButton )
@@ -191,40 +225,7 @@ class AnnoToolsExtension implements QuPathExtension {
                     def label = file.getName().replace( "-", " " ).replace( ".groovy", "" )
                     def item = new MenuItem( label )
 
-                    item.setOnAction {
-                        if (!qupath.getProject()) {
-                            Dialogs.showWarningNotification( "No project open!", "Open a project to use tools." )
-                            return
-                        }
-
-                        def scene = qupath.getStage().getScene()
-                        Platform.runLater { scene.setCursor( Cursor.WAIT ) }
-
-                        // Reset cursor when the script UI appears (stage loses focus)
-                        def listener
-                        listener = { obs, oldVal, newVal ->
-                            if (!newVal) {
-                                Platform.runLater { scene.setCursor( Cursor.DEFAULT ) }
-                                qupath.getStage().focusedProperty().removeListener( listener )
-                            }
-                        } as javafx.beans.value.ChangeListener
-                        qupath.getStage().focusedProperty().addListener( listener )
-
-                        def runner = new Thread({
-                            try {
-                                qupath.runScript( file, null )
-                            } catch ( Throwable t ) {
-                                t.printStackTrace()
-                                Platform.runLater { 
-                                    scene.setCursor( Cursor.DEFAULT )
-                                    qupath.getStage().focusedProperty().removeListener( listener )
-                                }
-                            }
-                        } as Runnable, "Run-${file.name}")
-
-                        runner.setDaemon( true )
-                        runner.start()
-                    }
+                    item.setOnAction { runToolScript( qupath, file, label ) }
 
                     extMenu.getItems().add( item )
                 }
