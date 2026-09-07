@@ -371,7 +371,7 @@ def readFeatureArrayClasses( JsonReader reader, Set names ) {
             }
         }
         reader.endObject()
-        names.add( className ?: "(Unclassified)" )
+        names.add( className ?: "Unclassified" )
     }
     reader.endArray()
 }
@@ -469,6 +469,24 @@ def addIcon( node, iconCode, int size ) {
     node.setGraphic( icon )
 }
 
+// Function: Outline an input in red for as long as it is a reason the "OK" button is disabled
+def flagWhenBlocking( node, blocking, String blockedStyle = null ) {
+    def outlineRedStyle = """
+        -fx-border-color: red;
+        -fx-border-radius: 3;
+    """
+    def flaggedStyle = blockedStyle ?: outlineRedStyle // e.g. an underline in place of an outline
+    def clearedStyle = node.getStyle()                 // however the input looks when it isn't blocking
+
+    // Hold the binding on the node — a derived binding (e.g. someBinding.not()) is only weakly
+    // referenced by its dependencies, so otherwise it can be collected part way through the dialog
+    node.getProperties().put( "flagWhenBlocking", blocking )
+
+    def applyStyle = { boolean isBlocking -> node.setStyle( isBlocking ? flaggedStyle : clearedStyle ) }
+    blocking.addListener { obs, oldVal, newVal -> applyStyle( newVal ) }
+    applyStyle( blocking.getValue() )
+}
+
 
 // Function: Make a box with checkboxes and a modifiable header
 def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0, String emptyMessage = "None available" ) {
@@ -564,14 +582,27 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     titleLabel.setText( "${title.capitalize()} [0]" )
     selectAllCB.setText( "${title.capitalize()} [0]" )
 
-    // Once shown, measure/lock against the widest possible count so later updates never get clipped
-    selectAllCB.sceneProperty().addListener { obs, oldScene, newScene ->
-        if (newScene != null) {
-            String initialText = selectAllCB.getText()
-            selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
-            Platform.runLater {  // extra pulse so CSS skin is applied
-                lockDimensions( selectAllCB )
-                Platform.runLater { selectAllCB.setText( initialText ) }
+    // Reserve at least the widest-count width so the count changing (e.g. [9] -> [10]) never nudges the
+    // header — but only as a *floor* (minWidth), never a fixed or max width. Capping the width to a
+    // measurement is exactly what clipped the title: the first box is laid out before the app's font is
+    // applied, so its measured width comes out too small, and a hard cap then truncates the label for
+    // good (later boxes, rebuilt after the window is styled, measured fine — hence "[0]" clipped but a
+    // rebuilt "[1]" didn't). With only a floor the checkbox always takes at least its own preferred width
+    // for the current text, so the title can never be clipped no matter when we happen to measure.
+    boolean selectAllFloorSet = false
+    selectAllCB.widthProperty().addListener { obs, oldW, newW ->
+        if (!selectAllFloorSet && newW.doubleValue() > 0) {
+            selectAllFloorSet = true
+            Platform.runLater {
+                String initialText = selectAllCB.getText()
+                selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
+                selectAllCB.applyCss()
+                double w = selectAllCB.prefWidth( -1 )
+                double h = selectAllCB.prefHeight( w )
+                selectAllCB.setText( initialText )
+
+                selectAllCB.setMinWidth( w )
+                selectAllCB.setMinHeight( h )
             }
         }
     }
@@ -677,6 +708,15 @@ def naturalCompare( String s1, String s2 ) {
         if (cmp != 0) { return cmp }
     }
     return ta.size() <=> tb.size()
+}
+
+
+// Function: The class label used to identify an object by class. Mirrors QuPath's project
+// summary (DefaultProject.HierarchySummary.pathClassToString), which labels null-class
+// (unclassified) objects "Unclassified". That's the label the class list offers, so null-class
+// objects must map back to it here — otherwise "Unclassified" is selectable but never matches.
+def classLabelForObject( obj ) {
+    return obj.getPathClass()?.getName() ?: "Unclassified"
 }
 
 
@@ -831,8 +871,8 @@ def codePreferences = runOnFxThreadAndWait {
     if (currentEntry != null && currentImageData != null) {
         def liveCounts = [:]
         currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-            def cn = obj.getPathClass()?.getName()
-            if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+            def cn = classLabelForObject( obj )
+            liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
         }
         imageClassCounts[ currentEntry.getImageName() ] = liveCounts
 
@@ -1207,7 +1247,15 @@ def codePreferences = runOnFxThreadAndWait {
         .or( importButton.selectedProperty()
                 .and( hasGeoJsonFiles.not() ) )
     )
-    
+
+    // Red outline on each input while it is a reason the "OK" button is disabled
+    flagWhenBlocking( folderRow,
+        folderPathLabel.textProperty().isEqualTo( "No folder selected" )
+        .or( importButton.selectedProperty().and( hasGeoJsonFiles.not() ) ) )
+    flagWhenBlocking( imagesBox.box, anySelectedImage.not() )
+    flagWhenBlocking( pathClassBox.box,
+        exportButton.selectedProperty().and( anySelectedPathClass.not() ) )
+
     // Disabling the "Nest existing objects" button if no images are selected
     resolveHierarchyBtn.disableProperty().bind(
         anySelectedImage.not()
@@ -1287,6 +1335,8 @@ int processed = 0
 boolean removeObjs = false
 boolean confirmRemoveObjsChoice = false
 boolean skipDupObjs = false   // import: skip every image that has duplicates, leaving it untouched
+def skipDupImageNames = null  // names of those duplicate images, taken from the project-wide preview
+def skippedDupImages = []     // names actually passed over, reported once the run finishes
 
 // Remembered per-image prompt choices (set when the user ticks "do not ask again")
 String  fileExistsAction = null   // export, file exists:    "skip" | "overwrite"
@@ -1296,19 +1346,35 @@ boolean skipMissingFiles = false  // import, file not found:  skip all remaining
 // Flag to show warning
 boolean anyNestingProblems = false
 
+// Image being worked on, so the handler below can name it when a run dies — "stopped after
+// an error" is useless when the run covered a hundred images
+String imageInFlight = null
+
+try {
 imageLoop:
-for (image in imagesToRun) { 
+for (image in imagesToRun) {
     // Stopping when requested
     if (stopLaterFlag.get()) { break }
-    
+
+    imageInFlight = image.getImageName()
+
     boolean skipImage = false
     boolean nestingProblem = false
-    
-    // If working on current image, modifying respective image data
-    def imageData = image == currentEntry ? currentImageData : image.readImageData()
-    
-    def hierarchy = imageData.getHierarchy()
     def imageName = image.getImageName()
+
+    // Image data is read lazily: an image that ends up skipped (nothing to export, no import file,
+    // or a duplicate in "Skip duplicates" mode) never pays for reading — or writing back — its
+    // data, which is what made skipping feel as slow as importing.
+    def imageData = null
+    def hierarchy = null
+    boolean dataChanged = false
+    def loadData = {
+        if (imageData == null) {
+            // If working on current image, modifying respective image data
+            imageData = image == currentEntry ? currentImageData : image.readImageData()
+            hierarchy = imageData.getHierarchy()
+        }
+    }
     
     
     // Reporting current image
@@ -1323,8 +1389,10 @@ for (image in imagesToRun) {
     
     // Fixing hierarchy if desired
     if (codePreferences.mode == "resolveHierarchy") {
+        loadData()
         def objectsToresolve = hierarchy.getAnnotationObjects()
         anyNestingProblems = resolveHierarchy( objectsToresolve, hierarchy, image )
+        dataChanged = true
         
     } else if (codePreferences.mode == "export") {
         
@@ -1370,9 +1438,10 @@ for (image in imagesToRun) {
             // "overwrite" continues without skipping
         }
         
-        // --- Filter annotations ---
-        def annotationsForExport = hierarchy.getAnnotationObjects().findAll {
-            def matchClass = it.getPathClass()?.getName() in codePreferences.objectClasses
+        // --- Filter annotations (only for images that are actually being exported) ---
+        if (!skipImage) { loadData() }
+        def annotationsForExport = skipImage ? [] : hierarchy.getAnnotationObjects().findAll {
+            def matchClass = classLabelForObject( it ) in codePreferences.objectClasses
             return matchClass
         }
         
@@ -1501,16 +1570,25 @@ for (image in imagesToRun) {
         }
         
         
+        // In "Skip duplicates" mode the duplicate images are already known from the project-wide
+        // preview, so they are passed over here without their image data ever being read
+        if (!skipImage && skipDupObjs && skipDupImageNames?.contains( imageName )) {
+            skipImage = true
+            skippedDupImages << imageName
+        }
+
         // -- Importing objects if image is not being skipped --
         if (!skipImage) {
-            
+
+            loadData()
+
             // Local snapshot of what already exists in the image
             def workingObjects = hierarchy.getAnnotationObjects().toList()
             
             // Read imported objects
             def importedObjects = []
             try {
-                importedObjects = PathIO.readObjects(file)
+                importedObjects = PathIO.readObjects( file )
             } catch (Exception e) {
                 Dialogs.showErrorNotification( "Skipping import for '${file.getName()}'", e.getMessage() )
                 logger.error( "Skipping import for '${file.getName()}': ${e.getMessage()}" )
@@ -1576,7 +1654,7 @@ for (image in imagesToRun) {
                     if (!dupBreakdown.containsKey( imageName )) {
                         def overlap = new LinkedHashMap()
                         existingObjsSameClasses.each { o ->
-                            def cn = o.getPathClass()?.toString() ?: "(Unclassified)"
+                            def cn = classLabelForObject( o )
                             overlap[ cn ] = (overlap[ cn ] ?: 0) + 1
                         }
                         if (!overlap.isEmpty()) { dupBreakdown[ imageName ] = overlap }
@@ -1665,6 +1743,9 @@ for (image in imagesToRun) {
                         case (skipDupBtn):
                             skipDupObjs = true
                             confirmRemoveObjsChoice = true
+                            // Remember the images the preview flagged, so the rest of the run can
+                            // pass over them without reading their image data
+                            skipDupImageNames = new HashSet( dupBreakdown.keySet() )
                             break
                     }
                 } 
@@ -1672,14 +1753,18 @@ for (image in imagesToRun) {
                 if (removeObjs) {
                     hierarchy.removeObjects( existingObjsSameClasses, false )
                     workingObjects.removeAll( existingObjsSameClasses )
+                    dataChanged = true
                 }
 
                 // In "skip duplicates" mode, import nothing into images that have duplicates
                 skipDupThisImage = skipDupObjs
+                if (skipDupThisImage) { skippedDupImages << imageName }
             }
             
             // Skip importing entirely for duplicate images when "Skip duplicates" was chosen
             if (!skipDupThisImage) {
+                dataChanged = true
+
                 // Add all imported objects first with no nesting yet
                 importedObjects.each { obj ->
                     hierarchy.addObject( obj, false )
@@ -1696,19 +1781,22 @@ for (image in imagesToRun) {
     }
     
     
-    // Updating viewer and saving (when relevant)
-    if (codePreferences.mode in ["resolveHierarchy", "import"]) {
-        // Saving data
-        image.saveImageData( imageData )
-        
-        // Ensure current viewer updates its annotation list when working on the current image
-        if (image == currentEntry) {
-            runOnFxThreadAndWait {
-                def viewer = getCurrentViewer()
-                if (viewer != null) {
-                    // Re-assign the same ImageData to force a UI refresh
-                    imageData.getHierarchy().fireHierarchyChangedEvent( this )
-                    viewer.setImageData( imageData )
+    // Updating viewer and saving (when relevant) — only images whose data was actually read and
+    // changed are written back; skipped images are left completely untouched
+    if (imageData != null && codePreferences.mode in ["resolveHierarchy", "import"]) {
+        if (dataChanged) {
+            // Saving data
+            image.saveImageData( imageData )
+            
+            // Ensure current viewer updates its annotation list when working on the current image
+            if (image == currentEntry) {
+                runOnFxThreadAndWait {
+                    def viewer = getCurrentViewer()
+                    if (viewer != null) {
+                        // Re-assign the same ImageData to force a UI refresh
+                        imageData.getHierarchy().fireHierarchyChangedEvent( this )
+                        viewer.setImageData( imageData )
+                    }
                 }
             }
         }
@@ -1726,10 +1814,29 @@ for (image in imagesToRun) {
     updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
     System.sleep( 10 )
 }
+} catch (Throwable err) {
+    // Runs outside the script editor, so a thrown error would be invisible: log it (the full stack
+    // trace goes to QuPath's log), point the user there, and close the modal window so QuPath isn't
+    // left blocked. Then stop.
+    String failedOn = imageInFlight ? " on image '${imageInFlight}'" : ""
+    logger.error( "Export / Import stopped after an error" + failedOn, err )
+    Dialogs.showErrorNotification( "Export / Import", "Stopped after an error" + failedOn + ". See the log for details." )
+    Platform.runLater { progressUI.stage.close() }
+    return
+}
 
-// Closing progress bar window
+// Closing progress bar window (runs on the success path)
 Platform.runLater {
     progressUI.stage.close()
+}
+
+// Reporting how many images were passed over as duplicates
+if (!skippedDupImages.isEmpty()) {
+    logger.info( "[AnnoTools] Export / Import: skipped ${skippedDupImages.size()} selected image(s) with duplicate class objects: ${skippedDupImages.join( ', ' )}" )
+    Dialogs.showInfoNotification(
+        "Export / Import",
+        "Skipped ${skippedDupImages.size()} selected image(s) with duplicate class objects."
+    )
 }
 
 // Showing warning message if any nesting problems

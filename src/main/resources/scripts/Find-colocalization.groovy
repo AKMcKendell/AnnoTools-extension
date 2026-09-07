@@ -7,11 +7,9 @@
 
 // Class for nesting option strings
 class NestStrings {
-    static final String CLASS1        = "Under class 1 object"
-    static final String CLASS2        = "Under class 2 object"
-    static final String CLASS1_PARENT = "Under class 1 object parent"
-    static final String CLASS2_PARENT = "Under class 2 object parent"
-    static final String NONE          = "None"
+    static final String CLASS1     = "Under class 1 object"
+    static final String TOP_OBJECT = "Under top object in hierarchy"
+    static final String NONE       = "None"
 }
 
 
@@ -29,6 +27,158 @@ def runOnFxThreadAndWait( Closure fxCode ) {
     }
     latch.await()
     return result.value
+}
+
+// Function: Build a project-wide breakdown of images that already contain objects a run would
+// affect. Counts are read cheaply from each image's summary.json (no image load); the open image
+// is overridden with its live hierarchy so unsaved objects are reflected. classMatches( className )
+// decides which class names are pre-existing objects. Returns imageName -> (className -> count),
+// ordered by descending total, for affected images only.
+def existingObjectsBreakdown( List images, Closure classMatches, currentEntry, currentImageData ) {
+    if (images.isEmpty()) { return [:] }
+
+    def gson = new Gson()
+    def nThreads = Math.max( 1, Math.min( Runtime.getRuntime().availableProcessors(), images.size() ) )
+    def pool = Executors.newFixedThreadPool( nThreads )
+    def rawList
+    try {
+        def futures = images.collect { entry ->
+            pool.submit({
+                def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+                def counts = [:]
+                if (Files.exists( summaryFile )) {
+                    try {
+                        def raw = new String( Files.readAllBytes( summaryFile ) )
+                        def summary = gson.fromJson( raw, Object )
+                        def classCounts = summary?.get( "hierarchy" )?.get( "annotationClassificationCounts" )
+                        if (classCounts instanceof Map) {
+                            classCounts.each { k, v ->
+                                def n = k.toString()
+                                if (classMatches( n )) { counts[ n ] = (v instanceof Number) ? ((Number) v).intValue() : 0 }
+                            }
+                        }
+                    } catch (Exception e) {
+                        logger.warn( "[AnnoTools] existing-object scan: summary parse failed for ${entry.getImageName()}: ${e.getMessage()}" )
+                    }
+                }
+                return [entry.getImageName(), counts]
+            } as Callable)
+        }
+        rawList = futures.collect { it.get() }
+    } finally {
+        pool.shutdown()
+    }
+
+    def breakdown = new LinkedHashMap()
+    rawList.each { pair ->
+        def (imgName, counts) = pair
+        if (!counts.isEmpty()) { breakdown[ imgName ] = counts }
+    }
+
+    // Override the open image with its live hierarchy so unsaved objects are reflected accurately
+    if (currentEntry != null && currentImageData != null && images.any { it.getImageName() == currentEntry.getImageName() }) {
+        def curName = currentEntry.getImageName()
+        def live = runOnFxThreadAndWait {
+            def m = new LinkedHashMap()
+            currentImageData.getHierarchy().getAnnotationObjects().each { o ->
+                def n = classLabelForObject( o )
+                if (classMatches( n )) { m[ n ] = (m[ n ] ?: 0) + 1 }
+            }
+            return m
+        }
+        if (live.isEmpty()) { breakdown.remove( curName ) } else { breakdown[ curName ] = live }
+    }
+
+    // Order affected images by descending existing-object total, then image name
+    return breakdown.sort { a, b ->
+        int ta = (a.value.values().sum() ?: 0)
+        int tb = (b.value.values().sum() ?: 0)
+        (tb <=> ta) ?: naturalCompare( a.key, b.key )
+    }
+}
+
+// Function: Show the collapsible existing-objects breakdown and return the run-wide choice:
+// "keep" | "remove" | "skipDup" | "exit". objectNoun labels the objects (e.g. "colocalization").
+def showExistingObjectsDialog( Map breakdown, String objectNoun ) {
+    def exitBtn    = new ButtonType( "Exit", ButtonData.CANCEL_CLOSE )
+    def keepBtn    = new ButtonType( "Keep", ButtonData.HELP )
+    def removeBtn  = new ButtonType( "Remove", ButtonData.HELP )
+    def skipDupBtn = new ButtonType( "Skip duplicates", ButtonData.HELP )
+
+    int affectedImages  = breakdown.size()
+    int affectedClasses = breakdown.values().collect { it.keySet() }.flatten().unique().size()
+    int totalObjects    = (breakdown.values().collect { (it.values().sum() ?: 0) }.sum() ?: 0)
+
+    def choice = runOnFxThreadAndWait {
+        def alert = new Alert( Alert.AlertType.CONFIRMATION )
+        alert.setTitle( "Existing objects found" )
+        alert.setHeaderText(
+            "Some images already contain ${objectNoun} objects from a previous run.\n" +
+            "Choose how to handle every image that already contains them:\n" +
+            "  • Keep — generate anyway, alongside the existing objects (may duplicate)\n" +
+            "  • Remove — delete the existing objects, then generate\n" +
+            "  • Skip duplicates — only process images without existing objects\n" +
+            "WARNING: Removed objects and their children cannot be recovered."
+        )
+        alert.getDialogPane().buttonTypes.setAll( exitBtn, keepBtn, removeBtn, skipDupBtn )
+        alert.getDialogPane().lookupButton( removeBtn )?.setDefaultButton( true )
+        // Size each button to its own label rather than a uniform (widest-button) width
+        [exitBtn, keepBtn, removeBtn, skipDupBtn].each { bt ->
+            def n = alert.getDialogPane().lookupButton( bt )
+            if (n != null) { ButtonBar.setButtonUniformSize( n, false ) }
+        }
+
+        // Collapsible root holds every affected image; each image expands to its existing classes
+        def treeRoot = new TreeItem( "Images with existing objects [${affectedImages}]".toString() )
+        treeRoot.setExpanded( false )
+        breakdown.each { imgName, classes ->
+            def imgItem = new TreeItem( "${imgName}  —  ${classes.size()} class(es)".toString() )
+            imgItem.setExpanded( breakdown.size() == 1 )
+            classes.sort { a, b -> (b.value <=> a.value) ?: naturalCompare( a.key, b.key ) }.each { cn, cnt ->
+                imgItem.getChildren().add( new TreeItem( "${cn} [${cnt} existing]".toString() ) )
+            }
+            treeRoot.getChildren().add( imgItem )
+        }
+        def tree = new TreeView( treeRoot )
+        tree.setShowRoot( true )
+
+        // Size the tree to visible rows: compact when collapsed, growing as rows expand, capped so
+        // many images scroll inside the tree rather than producing an oversized window.
+        double rowHeight = 24.0
+        int    maxRows   = 12
+        tree.setFixedCellSize( rowHeight )
+        tree.setPrefWidth( 480 )
+        def sizeTreeToContent = {
+            int rows  = Math.max( tree.getExpandedItemCount(), 1 )
+            int shown = Math.min( rows, maxRows )
+            double h  = shown * rowHeight + 6
+            tree.setMinHeight( h )
+            tree.setPrefHeight( h )
+            tree.setMaxHeight( h )
+        }
+        sizeTreeToContent()
+        tree.expandedItemCountProperty().addListener { obs, oldV, newV ->
+            sizeTreeToContent()
+            Platform.runLater {
+                def w = tree.getScene()?.getWindow()
+                if (w != null) { w.sizeToScene() }
+            }
+        }
+
+        def summaryLabel = new Label( "${affectedImages} image(s) contain ${totalObjects} existing ${objectNoun} object(s) across ${affectedClasses} class(es):".toString() )
+        summaryLabel.setStyle( "-fx-font-weight: bold;" )
+        def content = new VBox( 8, summaryLabel, tree )
+        content.setPadding( new Insets( 5 ) )
+        alert.getDialogPane().setContent( content )
+        alert.setResizable( true )
+
+        return alert.showAndWait().orElse( exitBtn )
+    }
+
+    if (choice == keepBtn)    { return "keep" }
+    if (choice == removeBtn)  { return "remove" }
+    if (choice == skipDupBtn) { return "skipDup" }
+    return "exit"
 }
 
 // Function: Assign or update tooltips
@@ -328,6 +478,24 @@ def addIcon( node, iconCode, int size ) {
     node.setGraphic( icon )
 }
 
+// Function: Outline an input in red for as long as it is a reason the "OK" button is disabled
+def flagWhenBlocking( node, blocking, String blockedStyle = null ) {
+    def outlineRedStyle = """
+        -fx-border-color: red;
+        -fx-border-radius: 3;
+    """
+    def flaggedStyle = blockedStyle ?: outlineRedStyle // e.g. an underline in place of an outline
+    def clearedStyle = node.getStyle()                 // however the input looks when it isn't blocking
+
+    // Hold the binding on the node — a derived binding (e.g. someBinding.not()) is only weakly
+    // referenced by its dependencies, so otherwise it can be collected part way through the dialog
+    node.getProperties().put( "flagWhenBlocking", blocking )
+
+    def applyStyle = { boolean isBlocking -> node.setStyle( isBlocking ? flaggedStyle : clearedStyle ) }
+    blocking.addListener { obs, oldVal, newVal -> applyStyle( newVal ) }
+    applyStyle( blocking.getValue() )
+}
+
 
 // Function: Make a box with checkboxes and a modifiable header
 def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0, String emptyMessage = "None available" ) {
@@ -423,14 +591,27 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     titleLabel.setText( "${title.capitalize()} [0]" )
     selectAllCB.setText( "${title.capitalize()} [0]" )
 
-    // Once shown, measure/lock against the widest possible count so later updates never get clipped
-    selectAllCB.sceneProperty().addListener { obs, oldScene, newScene ->
-        if (newScene != null) {
-            String initialText = selectAllCB.getText()
-            selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
-            Platform.runLater {  // extra pulse so CSS skin is applied
-                lockDimensions( selectAllCB )
-                Platform.runLater { selectAllCB.setText( initialText ) }
+    // Reserve at least the widest-count width so the count changing (e.g. [9] -> [10]) never nudges the
+    // header — but only as a *floor* (minWidth), never a fixed or max width. Capping the width to a
+    // measurement is exactly what clipped the title: the first box is laid out before the app's font is
+    // applied, so its measured width comes out too small, and a hard cap then truncates the label for
+    // good (later boxes, rebuilt after the window is styled, measured fine — hence "[0]" clipped but a
+    // rebuilt "[1]" didn't). With only a floor the checkbox always takes at least its own preferred width
+    // for the current text, so the title can never be clipped no matter when we happen to measure.
+    boolean selectAllFloorSet = false
+    selectAllCB.widthProperty().addListener { obs, oldW, newW ->
+        if (!selectAllFloorSet && newW.doubleValue() > 0) {
+            selectAllFloorSet = true
+            Platform.runLater {
+                String initialText = selectAllCB.getText()
+                selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
+                selectAllCB.applyCss()
+                double w = selectAllCB.prefWidth( -1 )
+                double h = selectAllCB.prefHeight( w )
+                selectAllCB.setText( initialText )
+
+                selectAllCB.setMinWidth( w )
+                selectAllCB.setMinHeight( h )
             }
         }
     }
@@ -611,6 +792,27 @@ def naturalCompare( String s1, String s2 ) {
 }
 
 
+// Function: The class label used to identify an object by class. Mirrors QuPath's project
+// summary (DefaultProject.HierarchySummary.pathClassToString), which labels null-class
+// (unclassified) objects "Unclassified". That's the label the class list offers, so null-class
+// objects must map back to it here — otherwise "Unclassified" is selectable but never matches.
+def classLabelForObject( obj ) {
+    return obj.getPathClass()?.getName() ?: "Unclassified"
+}
+
+
+// Function: Walk up the hierarchy to an object's topmost ancestor — the annotation whose
+// parent is the root object. Returns the object itself when it's already top-level. This is
+// a read-only traversal, so it's safe to call from the parallel geometry phase.
+def findTopAncestor( obj ) {
+    def current = obj
+    while (current?.getParent() != null && !current.getParent().isRootObject()) {
+        current = current.getParent()
+    }
+    return current
+}
+
+
 // Project & preferences file
 def project = getProject()
 def currentImageData = getCurrentImageData()
@@ -660,7 +862,7 @@ def codePreferences = runOnFxThreadAndWait {
     
     def nestDropdown = new ComboBox()
     def nestOptions = [ NestStrings.CLASS1,
-                        NestStrings.CLASS1_PARENT,
+                        NestStrings.TOP_OBJECT,
                         NestStrings.NONE ]
     nestDropdown.getItems().addAll( nestOptions )
     setTT( [nestDropdownLabel, nestDropdown], "Where should new objects be nested?" )
@@ -742,8 +944,8 @@ def codePreferences = runOnFxThreadAndWait {
     if (currentEntry != null && currentImageData != null) {
         def liveCounts = [:]
         currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-            def cn = obj.getPathClass()?.getName()
-            if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+            def cn = classLabelForObject( obj )
+            liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
         }
         imageClassCounts[ currentEntry.getImageName() ] = liveCounts
 
@@ -885,7 +1087,12 @@ def codePreferences = runOnFxThreadAndWait {
         .or( anySelectedClass1.not() )
         .or( anySelectedClass2.not() )
     )
-    
+
+    // Red outline on each input while it is a reason the "OK" button is disabled
+    flagWhenBlocking( imagesBox.box, anySelectedImage.not() )
+    flagWhenBlocking( pathClassBox1.box, anySelectedClass1.not() )
+    flagWhenBlocking( pathClassBox2.box, anySelectedClass2.not() )
+
     
     // Attach root & show dialog
     dialog.getDialogPane().content = root
@@ -946,8 +1153,8 @@ boolean keepCurrent = false
 if (currentEntry in imagesToRun) {
     def liveCounts = [:]
     currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-        def cn = obj.getPathClass()?.getName()
-        if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+        def cn = classLabelForObject( obj )
+        liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
     }
     keepCurrent = keepImage( liveCounts )
 }
@@ -974,6 +1181,20 @@ if (!skippedImages.isEmpty()) {
     Dialogs.showInfoNotification( "Find colocalization", "Skipping ${skippedImages.size()} selected image(s) lacking both chosen class groups." )
 }
 
+// If any selected image already contains colocalization objects from a previous run, ask once — up
+// front — how to handle them across the whole run. The breakdown is read cheaply from summary.json.
+def colocNames = codePreferences.objectClasses1.collectMany { c1 ->
+    codePreferences.objectClasses2.collect { c2 -> (c1 + "-" + c2).toString() }
+} as Set
+def isExistingColocClass = { String n -> n != null && colocNames.contains( n ) }
+
+def existingBreakdown = existingObjectsBreakdown( imagesToRun, isExistingColocClass, currentEntry, currentImageData )
+String existingObjsAction = "remove"   // no pre-existing objects => proceed as before
+if (!existingBreakdown.isEmpty()) {
+    existingObjsAction = showExistingObjectsDialog( existingBreakdown, "colocalization" )
+    if (existingObjsAction == "exit") { return }
+}
+
 def total = imagesToRun.size()
 def progressUI = createProgressWindow( "Processing", total, imagesToRun.collect { it.getImageName() } )
 def stopNowFlag = progressUI.stopNowFlag
@@ -985,11 +1206,18 @@ int netSteps = codePreferences.objectClasses1.size() * codePreferences.objectCla
 def pool = Executors.newFixedThreadPool( Runtime.getRuntime().availableProcessors() )
 progressUI.poolRef.set( pool )
 
+// Image being worked on, so the handler below can name it when a run dies — "stopped after
+// an error" is useless when the run covered a hundred images
+String imageInFlight = null
+
+try {
 imageLoop:
 for (image in imagesToRun) {
     // Stopping when requested
     if (stopNowFlag.get() || stopLaterFlag.get()) { break }
-    
+
+    imageInFlight = image.getImageName()
+
     // Reporting current image
     updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image, imageNum: processed+1] )
     
@@ -997,8 +1225,21 @@ for (image in imagesToRun) {
     def imageData = image == currentEntry ? currentImageData : image.readImageData()
     def hierarchy = imageData.getHierarchy()
     def annotations = hierarchy.getAnnotationObjects()
-    def annosByClass = annotations.groupBy { it.getPathClass()?.getName() }
-    
+    def annosByClass = annotations.groupBy { classLabelForObject( it ) }
+
+    // Apply the up-front existing-objects choice for this image.
+    boolean removeExisting = (existingObjsAction == "remove")
+    if (existingObjsAction == "skipDup") {
+        // Skip images that already contain colocalization objects; process the rest normally.
+        boolean hasExistingColoc = annotations.any { isExistingColocClass( it.getPathClass()?.getName() ) }
+        if (hasExistingColoc) {
+            if (image != currentEntry) { imageData.close() }
+            processed++
+            updateProgressWindow( progressUI, [imagePer: processed / total] )
+            continue imageLoop
+        }
+    }
+
     int step = 1
     
     // --- EXECUTION ---
@@ -1011,17 +1252,21 @@ for (image in imagesToRun) {
             String newClass = class1 + "-" + class2 
             updateProgressWindow( progressUI, [stepNum: step, stepName: "Working on ${newClass}"] )
             
-            // Adding the new class to the pathclass list if it is not already on it
-            def availableClasses = getQuPath().getAvailablePathClasses()               
+            // Adding the new class to the pathclass list if it is not already on it.
+            // getAvailablePathClasses() backs QuPath's class pane, so the mutation
+            // must run on the FX application thread.
+            def availableClasses = getQuPath().getAvailablePathClasses()
             if (!availableClasses.contains( getPathClass( newClass )) ) {
-                availableClasses << getPathClass( newClass )
-            }               
+                Platform.runLater { availableClasses << getPathClass( newClass ) }
+            }
        
             // Clearing objects if they already exist to not double add
-            def oldObjects = annotations.findAll {
-                it.getPathClass()?.getName() == newClass
+            if (removeExisting) {
+                def oldObjects = annotations.findAll {
+                    it.getPathClass()?.getName() == newClass
+                }
+                hierarchy.removeObjects( oldObjects, false )
             }
-            hierarchy.removeObjects( oldObjects, false )
             
             //Setting the color of the new class
             int color1 = getPathClass( class1 ).getColor()
@@ -1085,9 +1330,9 @@ for (image in imagesToRun) {
                     pool.submit({
                         def class1Anno = class1Annos[ idx ]
                         def class1Geom = cleanForROI( class1Anno.getROI().getGeometry() )
-                        def parent = (codePreferences.nestBehavior == NestStrings.CLASS1)        ? class1Anno :
-                                     (codePreferences.nestBehavior == NestStrings.CLASS1_PARENT) ? class1Anno.getParent() :
-                                                                                                    hierarchy.getRootObject()
+                        def parent = (codePreferences.nestBehavior == NestStrings.CLASS1)     ? class1Anno :
+                                     (codePreferences.nestBehavior == NestStrings.TOP_OBJECT) ? findTopAncestor( class1Anno ) :
+                                                                                                 hierarchy.getRootObject()
                         def localResults = []
                         if (class1Geom != null && !class1Geom.isEmpty()) {
                             class2Tree.query( class1Geom.getEnvelopeInternal() ).each { i ->
@@ -1177,8 +1422,19 @@ for (image in imagesToRun) {
 }
 
 pool.shutdown()
+} catch (Throwable err) {
+    // Runs outside the script editor, so a thrown error would be invisible: kill the pool, log it (the
+    // full stack trace goes to QuPath's log), point the user there, and close the modal window so QuPath
+    // isn't left blocked. Then stop.
+    pool.shutdownNow()
+    String failedOn = imageInFlight ? " on image '${imageInFlight}'" : ""
+    logger.error( "Find colocalization stopped after an error" + failedOn, err )
+    Dialogs.showErrorNotification( "Find colocalization", "Stopped after an error" + failedOn + ". See the log for details." )
+    Platform.runLater { progressUI.stage.close() }
+    return
+}
 
-// Closing progress bar window
+// Closing progress bar window (runs on the success path)
 Platform.runLater {
     progressUI.stage.close()
 }

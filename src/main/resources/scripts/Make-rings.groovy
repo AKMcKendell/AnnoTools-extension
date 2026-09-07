@@ -5,6 +5,14 @@
 */
 
 
+// Class for nesting option strings
+class NestStrings {
+    static final String CENTER     = "Under center object"
+    static final String TOP_OBJECT = "Under top object in hierarchy"
+    static final String NONE       = "None"
+}
+
+
 // --- FUNCTIONS ---
 // Function: Helper to run on FX thread
 def runOnFxThreadAndWait( Closure fxCode ) {
@@ -19,6 +27,158 @@ def runOnFxThreadAndWait( Closure fxCode ) {
     }
     latch.await()
     return result.value
+}
+
+// Function: Build a project-wide breakdown of images that already contain objects a run would
+// affect. Counts are read cheaply from each image's summary.json (no image load); the open image
+// is overridden with its live hierarchy so unsaved objects are reflected. classMatches( className )
+// decides which class names are pre-existing objects. Returns imageName -> (className -> count),
+// ordered by descending total, for affected images only.
+def existingObjectsBreakdown( List images, Closure classMatches, currentEntry, currentImageData ) {
+    if (images.isEmpty()) { return [:] }
+
+    def gson = new Gson()
+    def nThreads = Math.max( 1, Math.min( Runtime.getRuntime().availableProcessors(), images.size() ) )
+    def pool = Executors.newFixedThreadPool( nThreads )
+    def rawList
+    try {
+        def futures = images.collect { entry ->
+            pool.submit({
+                def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+                def counts = [:]
+                if (Files.exists( summaryFile )) {
+                    try {
+                        def raw = new String( Files.readAllBytes( summaryFile ) )
+                        def summary = gson.fromJson( raw, Object )
+                        def classCounts = summary?.get( "hierarchy" )?.get( "annotationClassificationCounts" )
+                        if (classCounts instanceof Map) {
+                            classCounts.each { k, v ->
+                                def n = k.toString()
+                                if (classMatches( n )) { counts[ n ] = (v instanceof Number) ? ((Number) v).intValue() : 0 }
+                            }
+                        }
+                    } catch (Exception e) {
+                        logger.warn( "[AnnoTools] existing-object scan: summary parse failed for ${entry.getImageName()}: ${e.getMessage()}" )
+                    }
+                }
+                return [entry.getImageName(), counts]
+            } as Callable)
+        }
+        rawList = futures.collect { it.get() }
+    } finally {
+        pool.shutdown()
+    }
+
+    def breakdown = new LinkedHashMap()
+    rawList.each { pair ->
+        def (imgName, counts) = pair
+        if (!counts.isEmpty()) { breakdown[ imgName ] = counts }
+    }
+
+    // Override the open image with its live hierarchy so unsaved objects are reflected accurately
+    if (currentEntry != null && currentImageData != null && images.any { it.getImageName() == currentEntry.getImageName() }) {
+        def curName = currentEntry.getImageName()
+        def live = runOnFxThreadAndWait {
+            def m = new LinkedHashMap()
+            currentImageData.getHierarchy().getAnnotationObjects().each { o ->
+                def n = classLabelForObject( o )
+                if (classMatches( n )) { m[ n ] = (m[ n ] ?: 0) + 1 }
+            }
+            return m
+        }
+        if (live.isEmpty()) { breakdown.remove( curName ) } else { breakdown[ curName ] = live }
+    }
+
+    // Order affected images by descending existing-object total, then image name
+    return breakdown.sort { a, b ->
+        int ta = (a.value.values().sum() ?: 0)
+        int tb = (b.value.values().sum() ?: 0)
+        (tb <=> ta) ?: naturalCompare( a.key, b.key )
+    }
+}
+
+// Function: Show the collapsible existing-objects breakdown and return the run-wide choice:
+// "keep" | "remove" | "skipDup" | "exit". objectNoun labels the objects (e.g. "ring").
+def showExistingObjectsDialog( Map breakdown, String objectNoun ) {
+    def exitBtn    = new ButtonType( "Exit", ButtonData.CANCEL_CLOSE )
+    def keepBtn    = new ButtonType( "Keep", ButtonData.HELP )
+    def removeBtn  = new ButtonType( "Remove", ButtonData.HELP )
+    def skipDupBtn = new ButtonType( "Skip duplicates", ButtonData.HELP )
+
+    int affectedImages  = breakdown.size()
+    int affectedClasses = breakdown.values().collect { it.keySet() }.flatten().unique().size()
+    int totalObjects    = (breakdown.values().collect { (it.values().sum() ?: 0) }.sum() ?: 0)
+
+    def choice = runOnFxThreadAndWait {
+        def alert = new Alert( Alert.AlertType.CONFIRMATION )
+        alert.setTitle( "Existing objects found" )
+        alert.setHeaderText(
+            "Some images already contain ${objectNoun} objects from a previous run.\n" +
+            "Choose how to handle every image that already contains them:\n" +
+            "  • Keep — generate anyway, alongside the existing objects (may duplicate)\n" +
+            "  • Remove — delete the existing objects, then generate\n" +
+            "  • Skip duplicates — only process images without existing objects\n" +
+            "WARNING: Removed objects and their children cannot be recovered."
+        )
+        alert.getDialogPane().buttonTypes.setAll( exitBtn, keepBtn, removeBtn, skipDupBtn )
+        alert.getDialogPane().lookupButton( removeBtn )?.setDefaultButton( true )
+        // Size each button to its own label rather than a uniform (widest-button) width
+        [exitBtn, keepBtn, removeBtn, skipDupBtn].each { bt ->
+            def n = alert.getDialogPane().lookupButton( bt )
+            if (n != null) { ButtonBar.setButtonUniformSize( n, false ) }
+        }
+
+        // Collapsible root holds every affected image; each image expands to its existing classes
+        def treeRoot = new TreeItem( "Images with existing objects [${affectedImages}]".toString() )
+        treeRoot.setExpanded( false )
+        breakdown.each { imgName, classes ->
+            def imgItem = new TreeItem( "${imgName}  —  ${classes.size()} class(es)".toString() )
+            imgItem.setExpanded( breakdown.size() == 1 )
+            classes.sort { a, b -> (b.value <=> a.value) ?: naturalCompare( a.key, b.key ) }.each { cn, cnt ->
+                imgItem.getChildren().add( new TreeItem( "${cn} [${cnt} existing]".toString() ) )
+            }
+            treeRoot.getChildren().add( imgItem )
+        }
+        def tree = new TreeView( treeRoot )
+        tree.setShowRoot( true )
+
+        // Size the tree to visible rows: compact when collapsed, growing as rows expand, capped so
+        // many images scroll inside the tree rather than producing an oversized window.
+        double rowHeight = 24.0
+        int    maxRows   = 12
+        tree.setFixedCellSize( rowHeight )
+        tree.setPrefWidth( 480 )
+        def sizeTreeToContent = {
+            int rows  = Math.max( tree.getExpandedItemCount(), 1 )
+            int shown = Math.min( rows, maxRows )
+            double h  = shown * rowHeight + 6
+            tree.setMinHeight( h )
+            tree.setPrefHeight( h )
+            tree.setMaxHeight( h )
+        }
+        sizeTreeToContent()
+        tree.expandedItemCountProperty().addListener { obs, oldV, newV ->
+            sizeTreeToContent()
+            Platform.runLater {
+                def w = tree.getScene()?.getWindow()
+                if (w != null) { w.sizeToScene() }
+            }
+        }
+
+        def summaryLabel = new Label( "${affectedImages} image(s) contain ${totalObjects} existing ${objectNoun} object(s) across ${affectedClasses} class(es):".toString() )
+        summaryLabel.setStyle( "-fx-font-weight: bold;" )
+        def content = new VBox( 8, summaryLabel, tree )
+        content.setPadding( new Insets( 5 ) )
+        alert.getDialogPane().setContent( content )
+        alert.setResizable( true )
+
+        return alert.showAndWait().orElse( exitBtn )
+    }
+
+    if (choice == keepBtn)    { return "keep" }
+    if (choice == removeBtn)  { return "remove" }
+    if (choice == skipDupBtn) { return "skipDup" }
+    return "exit"
 }
 
 // Function: Assign or update tooltips
@@ -412,6 +572,24 @@ def addIcon( node, iconCode, int size ) {
     node.setGraphic( icon )
 }
 
+// Function to outline an input in red for as long as it is a reason the "OK" button is disabled
+def flagWhenBlocking( node, blocking, String blockedStyle = null ) {
+    def outlineRedStyle = """
+        -fx-border-color: red;
+        -fx-border-radius: 3;
+    """
+    def flaggedStyle = blockedStyle ?: outlineRedStyle // e.g. an underline in place of an outline
+    def clearedStyle = node.getStyle()                 // however the input looks when it isn't blocking
+
+    // Hold the binding on the node — a derived binding (e.g. someBinding.not()) is only weakly
+    // referenced by its dependencies, so otherwise it can be collected part way through the dialog
+    node.getProperties().put( "flagWhenBlocking", blocking )
+
+    def applyStyle = { boolean isBlocking -> node.setStyle( isBlocking ? flaggedStyle : clearedStyle ) }
+    blocking.addListener { obs, oldVal, newVal -> applyStyle( newVal ) }
+    applyStyle( blocking.getValue() )
+}
+
 // Function: Make a box with checkboxes and a modifiable header
 def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0, String emptyMessage = "None available" ) {
     
@@ -506,14 +684,27 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     titleLabel.setText( "${title.capitalize()} [0]" )
     selectAllCB.setText( "${title.capitalize()} [0]" )
 
-    // Once shown, measure/lock against the widest possible count so later updates never get clipped
-    selectAllCB.sceneProperty().addListener { obs, oldScene, newScene ->
-        if (newScene != null) {
-            String initialText = selectAllCB.getText()
-            selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
-            Platform.runLater {  // extra pulse so CSS skin is applied
-                lockDimensions( selectAllCB )
-                Platform.runLater { selectAllCB.setText( initialText ) }
+    // Reserve at least the widest-count width so the count changing (e.g. [9] -> [10]) never nudges the
+    // header — but only as a *floor* (minWidth), never a fixed or max width. Capping the width to a
+    // measurement is exactly what clipped the title: the first box is laid out before the app's font is
+    // applied, so its measured width comes out too small, and a hard cap then truncates the label for
+    // good (later boxes, rebuilt after the window is styled, measured fine — hence "[0]" clipped but a
+    // rebuilt "[1]" didn't). With only a floor the checkbox always takes at least its own preferred width
+    // for the current text, so the title can never be clipped no matter when we happen to measure.
+    boolean selectAllFloorSet = false
+    selectAllCB.widthProperty().addListener { obs, oldW, newW ->
+        if (!selectAllFloorSet && newW.doubleValue() > 0) {
+            selectAllFloorSet = true
+            Platform.runLater {
+                String initialText = selectAllCB.getText()
+                selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
+                selectAllCB.applyCss()
+                double w = selectAllCB.prefWidth( -1 )
+                double h = selectAllCB.prefHeight( w )
+                selectAllCB.setText( initialText )
+
+                selectAllCB.setMinWidth( w )
+                selectAllCB.setMinHeight( h )
             }
         }
     }
@@ -670,6 +861,26 @@ def naturalCompare( String s1, String s2 ) {
 }
 
 
+// Function: The class label used to identify an object by class. Mirrors QuPath's project
+// summary (DefaultProject.HierarchySummary.pathClassToString), which labels null-class
+// (unclassified) objects "Unclassified". That's the label the class list offers, so null-class
+// objects must map back to it here — otherwise "Unclassified" is selectable but never matches.
+def classLabelForObject( obj ) {
+    return obj.getPathClass()?.getName() ?: "Unclassified"
+}
+
+
+// Function: Walk up the hierarchy to an object's topmost ancestor — the annotation whose
+// parent is the root object. Returns the object itself when it's already top-level.
+def findTopAncestor( obj ) {
+    def current = obj
+    while (current?.getParent() != null && !current.getParent().isRootObject()) {
+        current = current.getParent()
+    }
+    return current
+}
+
+
 // Project & preferences file
 def project = getProject()
 def currentImageData = getCurrentImageData()
@@ -704,7 +915,7 @@ def codePreferences = runOnFxThreadAndWait {
     dialog.setTitle( "What rings should be generated?" )
     
     def root = new BorderPane()
-    root.setPrefHeight( 350 )
+    root.setPrefHeight( 430 )
     
     dialog.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.CANCEL )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
@@ -798,10 +1009,27 @@ def codePreferences = runOnFxThreadAndWait {
         ""
     )
     
+    // Nesting target for the new rings (defaults to the central object)
+    def nestDropdownLabel = new Label( " Nest new rings?" )
+    addIcon( nestDropdownLabel, FontAwesome.Glyph.SIGN_IN, 14 )
+    nestDropdownLabel.setPadding( new Insets( 5, 5, 5, 0 ) )
+
+    def nestDropdown = new ComboBox()
+    def nestOptions = [ NestStrings.CENTER,
+                        NestStrings.TOP_OBJECT,
+                        NestStrings.NONE ]
+    nestDropdown.getItems().addAll( nestOptions )
+    setTT( [nestDropdownLabel, nestDropdown], "Where should new rings be nested?" )
+    nestDropdown.setValue( prePrefsMap.nestBehavior in nestOptions ? prePrefsMap.nestBehavior : nestOptions[0] )
+
     def expansionRow = new HBox( 8, expansionLabel, expansionField, previewLabel, expansionsPreview, topSpacer )
     expansionRow.setAlignment( Pos.CENTER_LEFT )
-    def classPrevRow = new HBox( 8, outputClassPreview ) 
-    def topBox = new VBox( 8, expansionRow, classPrevRow )
+    def classPrevRow = new HBox( 8, outputClassPreview )
+    // Nest control sits on its own row beneath the output class preview so it can't get cut off
+    def nestRow = new HBox( 8, nestDropdownLabel, nestDropdown )
+    nestRow.setAlignment( Pos.CENTER_LEFT )
+    nestRow.setPadding( new Insets( 8, 0, 0, 0 ) )
+    def topBox = new VBox( 8, expansionRow, classPrevRow, nestRow )
     topBox.setPadding( new Insets( 5, 0, 20, 5 ) )
     topBox.setAlignment( Pos.CENTER_LEFT )
     
@@ -855,8 +1083,8 @@ def codePreferences = runOnFxThreadAndWait {
     if (currentEntry != null && currentImageData != null) {
         def liveCounts = [:]
         currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-            def cn = obj.getPathClass()?.getName()
-            if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+            def cn = classLabelForObject( obj )
+            liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
         }
         imageClassCounts[ currentEntry.getImageName() ] = liveCounts
 
@@ -1071,7 +1299,12 @@ def codePreferences = runOnFxThreadAndWait {
             .or( hasExpansions.not() )
             .or( onlyZero )
     )
-    
+
+    // Red outline on each input while it is a reason the "OK" button is disabled
+    flagWhenBlocking( imagesBox.box, anySelectedImage.not() )
+    flagWhenBlocking( pathClassBox.box, anySelectedPathClass.not() )
+    flagWhenBlocking( expansionField, hasExpansions.not().or( onlyZero ) )
+
     
     // Attach root & show dialog
     dialog.getDialogPane().content = root
@@ -1096,7 +1329,8 @@ def codePreferences = runOnFxThreadAndWait {
             expandOnlyOutward : expandOnlyOutwardCheck.isSelected(),
             constrainToParent : contstrainToParentCheck.isSelected(),
             simplifyGeometry  : simplifyGeomCheck.isSelected(),
-            maxVertices       : maxVerticesSlider.getValue().toInteger() * 1000
+            maxVertices       : maxVerticesSlider.getValue().toInteger() * 1000,
+            nestBehavior      : nestDropdown.getValue()
         ]
         
     } else {
@@ -1141,8 +1375,8 @@ boolean keepCurrent = false
 if (currentEntry in imagesToRun) {
     def liveCounts = [:]
     currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-        def cn = obj.getPathClass()?.getName()
-        if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+        def cn = classLabelForObject( obj )
+        liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
     }
     keepCurrent = keepImage( liveCounts )
 }
@@ -1175,6 +1409,19 @@ if (!skippedImages.isEmpty()) {
         "Skipping ${skippedImages.size()} selected image(s) with none of the chosen class(es)." )
 }
 
+// If any selected image already contains rings from a previous run, ask how to
+// handle them across the whole run. The breakdown is read cheaply from summary.json.
+def ringPatterns = codePreferences.objectClasses.collect { ~/\Q${it}\E_\d+/ }
+def centralClassNames = codePreferences.objectClasses as Set
+def isExistingRingClass = { String n -> n && !(n in centralClassNames) && ringPatterns.any { p -> p.matcher( n ).matches() } }
+
+def existingBreakdown = existingObjectsBreakdown( imagesToRun, isExistingRingClass, currentEntry, currentImageData )
+String existingObjsAction = "remove"   // no pre-existing objects => proceed as before
+if (!existingBreakdown.isEmpty()) {
+    existingObjsAction = showExistingObjectsDialog( existingBreakdown, "ring" )
+    if (existingObjsAction == "exit") { return }
+}
+
 def total = imagesToRun.size()
 def progressUI = createProgressWindow( "Processing", total, imagesToRun.collect { it.getImageName() } )
 def stopNowFlag   = progressUI.stopNowFlag
@@ -1184,11 +1431,18 @@ int processed = 0
 // Number of vertices calculated when buffering geometries (standard is 8)
 def bufParams = new BufferParameters( codePreferences.simplifyGeometry ? 4 : 8 )
 
+// Image being worked on, so the handler below can name it when a run dies — "stopped after
+// an error" is useless when the run covered a hundred images
+String imageInFlight = null
+
+try {
 imageLoop:
 for (image in imagesToRun) {
     // Stopping when requested
     if (stopNowFlag.get() || stopLaterFlag.get()) { break }
-    
+
+    imageInFlight = image.getImageName()
+
     // Reporting current image
     updateProgressWindow( progressUI, [imageName: image, imageNum: processed+1] )
     
@@ -1199,7 +1453,20 @@ for (image in imagesToRun) {
     double pixelSize = cal.getAveragedPixelSizeMicrons()
     
     def hierarchy = imageData.getHierarchy()
-    
+
+    // Apply the existing-objects choice for this image.
+    boolean removeExisting = (existingObjsAction == "remove")
+    if (existingObjsAction == "skipDup") {
+        // Skip images that already contain rings; process the rest normally.
+        boolean hasExistingRings = hierarchy.getAnnotationObjects().any { isExistingRingClass( it.getPathClass()?.getName() ) }
+        if (hasExistingRings) {
+            if (image != currentEntry) { imageData.close() }
+            processed++
+            updateProgressWindow( progressUI, [imagePer: processed / total] )
+            continue imageLoop
+        }
+    }
+
     int netSteps = (codePreferences.objectClasses.size() * ((codePreferences.expansionsMicrons.size() * 2) + 1))
     updateProgressWindow( progressUI, [stepMax: netSteps] )
     int step = 1
@@ -1213,7 +1480,7 @@ for (image in imagesToRun) {
             
             // Get central objects
             def baseObjs = hierarchy.getAnnotationObjects().findAll {
-                it.getPathClass()?.getName() == objectClass && 
+                classLabelForObject( it ) == objectClass &&
                 it.getROI()?.getArea() > 0
             }
             baseObjs.each { it.setLocked( true ) }
@@ -1224,20 +1491,31 @@ for (image in imagesToRun) {
                 return expPathClassName
             }
             
-            // Clear previous expansions
-            def objectsToRemove = hierarchy.getAnnotationObjects().findAll { 
-                def pathClassName = it.getPathClass()?.getName()
-                pathClassName && (pathClassName in expansionClasses ||
-                ( pathClassName.contains( objectClass + "_" ) && it.getParent() in baseObjs ))
+            // Clear previous rings for this central class. Rings are named "<class>_<number>", a
+            // naming this script owns, so match that pattern to clear rings from earlier runs no
+            // matter where they were nested (center object, top object, or root). Never remove an
+            // object that is itself a selected central class, so a "<class>_<number>"-named central
+            // isn't deleted out from under the run.
+            if (removeExisting) {
+                def ringNamePattern = ~/\Q${objectClass}\E_\d+/
+                def centralClasses = codePreferences.objectClasses as Set
+                def objectsToRemove = hierarchy.getAnnotationObjects().findAll {
+                    def pathClassName = it.getPathClass()?.getName()
+                    pathClassName && ringNamePattern.matcher( pathClassName ).matches() && !(pathClassName in centralClasses)
+                }
+                hierarchy.removeObjects( objectsToRemove, false )
             }
-            hierarchy.removeObjects( objectsToRemove, false )
             
-            // Making sure new class(es) are in project classes
+            // Making sure new class(es) are in project classes.
+            // getAvailablePathClasses() returns the observable list backing QuPath's
+            // class pane, so the mutation must run on the FX application thread.
             def availableClasses = getQuPath().getAvailablePathClasses()
             def missingClasses = expansionClasses
                     .collect { getPathClass( it ) }
                     .findAll { it !in availableClasses }
-            availableClasses.addAll( missingClasses )
+            if (!missingClasses.isEmpty()) {
+                Platform.runLater { availableClasses.addAll( missingClasses ) }
+            }
             
             
             // --- RING GENERATION ---
@@ -1464,7 +1742,10 @@ for (image in imagesToRun) {
                         def centerObj = objGroup.centerObj
                         def ringROI = GeometryTools.geometryToROI( ringGeom, centerObj.getROI().getImagePlane() )
                         def ringObj = PathObjects.createAnnotationObject( ringROI, getPathClass( expClass ) )
-                        hierarchy.addObjectBelowParent( centerObj, ringObj, false )
+                        def nestParent = (codePreferences.nestBehavior == NestStrings.TOP_OBJECT) ? findTopAncestor( centerObj ) :
+                                         (codePreferences.nestBehavior == NestStrings.NONE)       ? hierarchy.getRootObject() :
+                                                                                                    centerObj
+                        hierarchy.addObjectBelowParent( nestParent, ringObj, false )
                         objGroup.ringObjs << ringObj
                         ringObj.setLocked( true )
                     }
@@ -1504,8 +1785,19 @@ for (image in imagesToRun) {
     double frac = processed / total 
     updateProgressWindow( progressUI, [imagePer: frac] )
 }
+} catch (Throwable err) {
+    // Runs outside the script editor, so a thrown error would be invisible: kill the pool, log it (the
+    // full stack trace goes to QuPath's log), point the user there, and close the modal window so QuPath
+    // isn't left blocked. Then stop.
+    progressUI.poolRef.get()?.shutdownNow()
+    String failedOn = imageInFlight ? " on image '${imageInFlight}'" : ""
+    logger.error( "Make rings stopped after an error" + failedOn, err )
+    Dialogs.showErrorNotification( "Make rings", "Stopped after an error" + failedOn + ". See the log for details." )
+    Platform.runLater { progressUI.stage.close() }
+    return
+}
 
-// Closing progress bar window
+// Closing progress bar window (runs on the success path)
 Platform.runLater {
     progressUI.stage.close()
 }

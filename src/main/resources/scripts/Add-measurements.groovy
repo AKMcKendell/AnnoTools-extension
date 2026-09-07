@@ -317,6 +317,24 @@ def addIcon( node, iconCode, int size ) {
     node.setGraphic( icon )
 }
 
+// Function: Outline an input in red for as long as it is a reason the "OK" button is disabled
+def flagWhenBlocking( node, blocking, String blockedStyle = null ) {
+    def outlineRedStyle = """
+        -fx-border-color: red;
+        -fx-border-radius: 3;
+    """
+    def flaggedStyle = blockedStyle ?: outlineRedStyle // e.g. an underline in place of an outline
+    def clearedStyle = node.getStyle()                 // however the input looks when it isn't blocking
+
+    // Hold the binding on the node — a derived binding (e.g. someBinding.not()) is only weakly
+    // referenced by its dependencies, so otherwise it can be collected part way through the dialog
+    node.getProperties().put( "flagWhenBlocking", blocking )
+
+    def applyStyle = { boolean isBlocking -> node.setStyle( isBlocking ? flaggedStyle : clearedStyle ) }
+    blocking.addListener { obs, oldVal, newVal -> applyStyle( newVal ) }
+    applyStyle( blocking.getValue() )
+}
+
 
 // Function: Make a box with checkboxes and a modifiable header
 def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0, String emptyMessage = "None available" ) {
@@ -412,14 +430,27 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     titleLabel.setText( "${title.capitalize()} [0]" )
     selectAllCB.setText( "${title.capitalize()} [0]" )
 
-    // Once shown, measure/lock against the widest possible count so later updates never get clipped
-    selectAllCB.sceneProperty().addListener { obs, oldScene, newScene ->
-        if (newScene != null) {
-            String initialText = selectAllCB.getText()
-            selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
-            Platform.runLater {  // extra pulse so CSS skin is applied
-                lockDimensions( selectAllCB )
-                Platform.runLater { selectAllCB.setText( initialText ) }
+    // Reserve at least the widest-count width so the count changing (e.g. [9] -> [10]) never nudges the
+    // header — but only as a *floor* (minWidth), never a fixed or max width. Capping the width to a
+    // measurement is exactly what clipped the title: the first box is laid out before the app's font is
+    // applied, so its measured width comes out too small, and a hard cap then truncates the label for
+    // good (later boxes, rebuilt after the window is styled, measured fine — hence "[0]" clipped but a
+    // rebuilt "[1]" didn't). With only a floor the checkbox always takes at least its own preferred width
+    // for the current text, so the title can never be clipped no matter when we happen to measure.
+    boolean selectAllFloorSet = false
+    selectAllCB.widthProperty().addListener { obs, oldW, newW ->
+        if (!selectAllFloorSet && newW.doubleValue() > 0) {
+            selectAllFloorSet = true
+            Platform.runLater {
+                String initialText = selectAllCB.getText()
+                selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
+                selectAllCB.applyCss()
+                double w = selectAllCB.prefWidth( -1 )
+                double h = selectAllCB.prefHeight( w )
+                selectAllCB.setText( initialText )
+
+                selectAllCB.setMinWidth( w )
+                selectAllCB.setMinHeight( h )
             }
         }
     }
@@ -575,6 +606,213 @@ def naturalCompare( String s1, String s2 ) {
 }
 
 
+// Function: The class label used to identify an object by class. Mirrors QuPath's project
+// summary (DefaultProject.HierarchySummary.pathClassToString), which labels null-class
+// (unclassified) objects "Unclassified". That's the label the class list offers, so null-class
+// objects must map back to it here — otherwise "Unclassified" is selectable but never matches.
+def classLabelForObject( obj ) {
+    return obj.getPathClass()?.getName() ?: "Unclassified"
+}
+
+
+// Function: Full-resolution intensity measurements for a single annotation, computed by TILING the
+// ROI's bounding box so the whole region — and every pixel value — is never held in memory at once.
+// This is what lets very large masks (e.g. collagen per layer) be measured without a Java-heap-space
+// crash: QuPath's native addIntensityMeasurements reads the entire bounding box in one buffer AND keeps
+// every masked pixel value (Apache DescriptiveStatistics) to compute its percentile, so a whole-layer
+// mask needs many GB. This streams the same statistics tile-by-tile instead, with bounded memory.
+//
+// It produces the SAME measurement columns as the native method ("<channel>: Mean", "<channel>:
+// Std.Dev.", ...) with matching definitions: mean, sample (n-1) variance/std dev, min, max, and a
+// histogram median (exact for integer pixel types up to 16-bit, sub-quantization accuracy for
+// floating-point types). `downsample` is 1.0 for full resolution; the caller passes a larger value only
+// as a speed fallback for enormous masks.
+def addIntensityMeasurementsTiled( server, anno, double downsample, Collection measurements,
+                                   List channelNames, int tileSize, AtomicBoolean stopFlag ) {
+    def roi = anno.getROI()
+    if (roi == null) { return }
+
+    def MEAS = ObjectMeasurements.Measurements
+    boolean wantMean   = measurements.contains( MEAS.MEAN )
+    boolean wantMedian = measurements.contains( MEAS.MEDIAN )
+    boolean wantMin    = measurements.contains( MEAS.MIN )
+    boolean wantMax    = measurements.contains( MEAS.MAX )
+    boolean wantStd    = measurements.contains( MEAS.STD_DEV )
+    boolean wantVar    = measurements.contains( MEAS.VARIANCE )
+
+    int nCh = channelNames.size()
+    if (nCh == 0) { return }
+
+    // Per-channel streaming accumulators (mean/std/min/max computed from these, no per-pixel retention)
+    long[]   count = new long[ nCh ]
+    double[] sum   = new double[ nCh ]
+    double[] sumSq = new double[ nCh ]
+    double[] minV  = new double[ nCh ]
+    double[] maxV  = new double[ nCh ]
+    for (int c = 0; c < nCh; c++) {
+        minV[ c ] = Double.POSITIVE_INFINITY
+        maxV[ c ] = Double.NEGATIVE_INFINITY
+    }
+
+    // Median needs a histogram (sorting every value is the memory cost we're avoiding). Integer types
+    // up to 16-bit get an exact histogram over their whole value range, filled in the same pass;
+    // anything else gets a second pass over [min, max] once those are known.
+    def pixelType = server.getPixelType()
+    boolean intHist = wantMedian && !pixelType.isFloatingPoint() && pixelType.getBitsPerPixel() <= 16
+    int histLo   = 0
+    int histSize = 0
+    long[][] hist = null
+    if (intHist) {
+        histLo   = pixelType.getLowerBound().intValue()
+        histSize = pixelType.getUpperBound().intValue() - histLo + 1
+        hist     = new long[ nCh ][ histSize ]
+    }
+
+    // ROI bounding box in full-resolution pixels, clipped to the image
+    int x0 = Math.max( 0, (int) Math.floor( roi.getBoundsX() ) )
+    int y0 = Math.max( 0, (int) Math.floor( roi.getBoundsY() ) )
+    int x1 = Math.min( server.getWidth(),  (int) Math.ceil( roi.getBoundsX() + roi.getBoundsWidth() ) )
+    int y1 = Math.min( server.getHeight(), (int) Math.ceil( roi.getBoundsY() + roi.getBoundsHeight() ) )
+    int z = roi.getZ()
+    int t = roi.getT()
+    String path = server.getPath()
+
+    // The ROI's fill shape, built ONCE. roi.getShape() would wrap the geometry in a java.awt.geom.Area
+    // — one of the most memory-hungry objects in Java2D for a complex per-layer mask — so we take the raw
+    // Path2D from geometryToShape instead. It's the exact shape getShape() wraps (same winding), so
+    // createShapeMask's Graphics2D.fill produces the same mask, holes included, at a fraction of the
+    // memory. (QuPath's createROIMask builds the Area AND rebuilt it per tile — the original heap sink.)
+    def maskShape = GeometryTools.geometryToShape( roi.getGeometry() )
+
+    // Reusable per-tile buffers. This method runs on a single pooled thread per annotation, so these
+    // are private to it — the parallelism is across annotations, not within one.
+    int cap = tileSize * tileSize
+    int[]    maskBuf = new int[ cap ]
+    double[] valBuf  = new double[ cap ]
+
+    // --- Pass 1: mean / std / min / max (+ integer-histogram median in the same pass) ---
+    for (int ty = y0; ty < y1; ty += tileSize) {
+        for (int tx = x0; tx < x1; tx += tileSize) {
+            if (stopFlag?.get()) { return }
+            int tw = Math.min( tileSize, x1 - tx )
+            int th = Math.min( tileSize, y1 - ty )
+            if (!maskShape.intersects( (double) tx, (double) ty, (double) tw, (double) th )) { continue }
+
+            def request = RegionRequest.createInstance( path, downsample, tx, ty, tw, th, z, t )
+            def img = server.readRegion( request )
+            def raster = img.getRaster()
+            int iw = raster.getWidth()
+            int ih = raster.getHeight()
+            def maskRaster = BufferedImageTools.createShapeMask( iw, ih, maskShape, (double) tx, (double) ty, downsample ).getRaster()
+            int nPix = iw * ih
+            maskRaster.getSamples( 0, 0, iw, ih, 0, maskBuf )
+
+            for (int c = 0; c < nCh; c++) {
+                raster.getSamples( 0, 0, iw, ih, c, valBuf )
+                long   cnt = count[ c ]
+                double s   = sum[ c ]
+                double sq  = sumSq[ c ]
+                double mn  = minV[ c ]
+                double mx  = maxV[ c ]
+                long[] h   = intHist ? hist[ c ] : null
+                for (int i = 0; i < nPix; i++) {
+                    if (maskBuf[ i ] == 0) { continue }
+                    double v = valBuf[ i ]
+                    cnt++
+                    s  += v
+                    sq += v * v
+                    if (v < mn) { mn = v }
+                    if (v > mx) { mx = v }
+                    if (h != null) {
+                        int bin = (int) Math.round( v ) - histLo
+                        if (bin < 0) { bin = 0 } else if (bin >= histSize) { bin = histSize - 1 }
+                        h[ bin ]++
+                    }
+                }
+                count[ c ] = cnt
+                sum[ c ]   = s
+                sumSq[ c ] = sq
+                minV[ c ]  = mn
+                maxV[ c ]  = mx
+            }
+        }
+    }
+
+    // --- Pass 2 (floating-point median only): histogram over the discovered [min, max] range ---
+    double[] binWidth = null
+    if (wantMedian && !intHist) {
+        int bins = 65536
+        hist     = new long[ nCh ][ bins ]
+        histSize = bins
+        binWidth = new double[ nCh ]
+        for (int c = 0; c < nCh; c++) {
+            double range = maxV[ c ] - minV[ c ]
+            binWidth[ c ] = range > 0 ? range / bins : 1.0d
+        }
+        for (int ty = y0; ty < y1; ty += tileSize) {
+            for (int tx = x0; tx < x1; tx += tileSize) {
+                if (stopFlag?.get()) { return }
+                int tw = Math.min( tileSize, x1 - tx )
+                int th = Math.min( tileSize, y1 - ty )
+                if (!maskShape.intersects( (double) tx, (double) ty, (double) tw, (double) th )) { continue }
+
+                def request = RegionRequest.createInstance( path, downsample, tx, ty, tw, th, z, t )
+                def img = server.readRegion( request )
+                def raster = img.getRaster()
+                int iw = raster.getWidth()
+                int ih = raster.getHeight()
+                def maskRaster = BufferedImageTools.createShapeMask( iw, ih, maskShape, (double) tx, (double) ty, downsample ).getRaster()
+                int nPix = iw * ih
+                maskRaster.getSamples( 0, 0, iw, ih, 0, maskBuf )
+                for (int c = 0; c < nCh; c++) {
+                    raster.getSamples( 0, 0, iw, ih, c, valBuf )
+                    double lo = minV[ c ]
+                    double bw = binWidth[ c ]
+                    long[] h  = hist[ c ]
+                    for (int i = 0; i < nPix; i++) {
+                        if (maskBuf[ i ] == 0) { continue }
+                        int bin = (int) ( (valBuf[ i ] - lo) / bw )
+                        if (bin < 0) { bin = 0 } else if (bin >= bins) { bin = bins - 1 }
+                        h[ bin ]++
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Write measurements, using the exact column names QuPath's native method produces ---
+    def ml = anno.getMeasurementList()
+    for (int c = 0; c < nCh; c++) {
+        long n = count[ c ]
+        if (n <= 0) { continue }
+        String base = channelNames[ c ]
+        if (wantMean) { ml.put( (base + ": Mean") as String, sum[ c ] / n ) }
+        if (wantMin)  { ml.put( (base + ": Min")  as String, minV[ c ] ) }
+        if (wantMax)  { ml.put( (base + ": Max")  as String, maxV[ c ] ) }
+        if (wantStd || wantVar) {
+            double variance = n > 1 ? Math.max( 0.0d, (sumSq[ c ] - (sum[ c ] * sum[ c ]) / n) / (n - 1) ) : 0.0d
+            if (wantVar) { ml.put( (base + ": Variance") as String, variance ) }
+            if (wantStd) { ml.put( (base + ": Std.Dev.") as String, Math.sqrt( variance ) ) }
+        }
+        if (wantMedian && hist != null) {
+            long target = (n + 1L) / 2L
+            long cum = 0
+            int medBin = histSize - 1
+            for (int b = 0; b < histSize; b++) {
+                cum += hist[ c ][ b ]
+                if (cum >= target) { medBin = b; break }
+            }
+            double medVal
+            if (intHist)                    { medVal = (double)(medBin + histLo) }
+            else if (maxV[ c ] > minV[ c ]) { medVal = minV[ c ] + (medBin + 0.5d) * binWidth[ c ] }
+            else                            { medVal = minV[ c ] }   // channel constant over the mask
+            ml.put( (base + ": Median") as String, medVal )
+        }
+    }
+    ml.close()
+}
+
+
 // Project & preferences file
 def project = getProject()
 def currentImageData = getCurrentImageData()
@@ -666,8 +904,8 @@ def codePreferences = runOnFxThreadAndWait {
     if (currentEntry != null && currentImageData != null) {
         def liveCounts = [:]
         currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-            def cn = obj.getPathClass()?.getName()
-            if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+            def cn = classLabelForObject( obj )
+            liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
         }
         imageClassCounts[ currentEntry.getImageName() ] = liveCounts
 
@@ -762,13 +1000,29 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     // RIGHT PANEL: Intensity and Morphology measurements
-    
+
+    // The two panel headers are flagged with an underline instead of an outline, which sits too
+    // tight around the words. Both states carry the same border, so its space is always reserved
+    // and flagging can never change the height of the panel underneath. The negative bottom inset
+    // drops the line clear of the text — it only moves where the border is painted, not the layout
+    def clearUnderlineStyle = """
+        -fx-border-color: transparent;
+        -fx-border-width: 0 0 1 0;
+        -fx-border-insets: 0 0 -4 0;
+    """
+    def underlineRedStyle = """
+        -fx-border-color: red;
+        -fx-border-width: 0 0 1 0;
+        -fx-border-insets: 0 0 -4 0;
+    """
+
     // INTENSITY MEASUREMENTS
     // Getting comomon available channels across project images
     def addIntensityMeasurementsCB = new CheckBox( "Intensity measurements" )
     setTT( addIntensityMeasurementsCB, "Include intensity measurements" )
     addIntensityMeasurementsCB.setSelected( prePrefsMap.addIntensityMeasurements == true )
-    
+    addIntensityMeasurementsCB.setStyle( clearUnderlineStyle )
+
     def serverGson = new Gson()
     def commonChannels = null
     
@@ -805,7 +1059,8 @@ def codePreferences = runOnFxThreadAndWait {
     def addMorphologyMeasurementsCB = new CheckBox( "Morphology measurements" )
     setTT( addMorphologyMeasurementsCB, "Include morphology measurements" )
     addMorphologyMeasurementsCB.setSelected( prePrefsMap.addMorphologyMeasurements == true )
-    
+    addMorphologyMeasurementsCB.setStyle( clearUnderlineStyle )
+
     List morphologyMeasurementsMap = ObjectMeasurements.ShapeFeatures.values().collect { [name: it.toString(), data: it] }
     def morphologyMeasurementsBox = makeCheckboxBox( "Measurements", "morphology measurements", morphologyMeasurementsMap, 220 )
     morphologyMeasurementsBox.header.getChildren().addAll( morphologyMeasurementsBox.selectAll )
@@ -846,18 +1101,32 @@ def codePreferences = runOnFxThreadAndWait {
         *morphologyMeasurementsBox.CBs.collect { it.selectedProperty() }
     )
     
+    def noMeasurementType = addIntensityMeasurementsCB.selectedProperty().not()
+        .and( addMorphologyMeasurementsCB.selectedProperty().not() )
+
     okBtn.disableProperty().bind(
         anySelectedImage.not()
         .or( anySelectedClass.not() )
-        .or( addIntensityMeasurementsCB.selectedProperty().not()
-            .and( addMorphologyMeasurementsCB.selectedProperty().not() ) )
+        .or( noMeasurementType )
         .or( addIntensityMeasurementsCB.selectedProperty()
             .and( anySelectedChannel.not()
                 .or ( anySelectedIntensityMeasurement.not() ) ) )
         .or( addMorphologyMeasurementsCB.selectedProperty()
             .and( anySelectedMorphologyMeasurement.not() ) )
     )
-    
+
+    // Red outline on each input while it is a reason the "OK" button is disabled
+    flagWhenBlocking( imagesBox.box, anySelectedImage.not() )
+    flagWhenBlocking( pathClassBox.box, anySelectedClass.not() )
+    flagWhenBlocking( addIntensityMeasurementsCB, noMeasurementType, underlineRedStyle )
+    flagWhenBlocking( addMorphologyMeasurementsCB, noMeasurementType, underlineRedStyle )
+    flagWhenBlocking( intensityChannelsBox.box,
+        addIntensityMeasurementsCB.selectedProperty().and( anySelectedChannel.not() ) )
+    flagWhenBlocking( intensityMeasurementsBox.box,
+        addIntensityMeasurementsCB.selectedProperty().and( anySelectedIntensityMeasurement.not() ) )
+    flagWhenBlocking( morphologyMeasurementsBox.box,
+        addMorphologyMeasurementsCB.selectedProperty().and( anySelectedMorphologyMeasurement.not() ) )
+
     
     // Attach root & show dialog
     dialog.getDialogPane().content = root
@@ -915,8 +1184,8 @@ boolean keepCurrent = false
 if (currentEntry in imagesToRun) {
     def liveCounts = [:]
     currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-        def cn = obj.getPathClass()?.getName()
-        if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+        def cn = classLabelForObject( obj )
+        liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
     }
     keepCurrent = keepImage( liveCounts )
 }
@@ -951,15 +1220,60 @@ int processed = 0
 int netSteps = (codePreferences.addIntensityMeasurements ? 1 : 0) +
                (codePreferences.addMorphologyMeasurements ? 1 : 0)
 
-def pool = Executors.newFixedThreadPool( Runtime.getRuntime().availableProcessors() )
-progressUI.poolRef.set( pool )
+// Fixed, machine-independent thresholds for the intensity step (hoisted so both the heap-aware
+// concurrency sizing below and the per-image dispatch can see them). Keeping these constant keeps the
+// measured values reproducible across machines; only the concurrency adapts to the hardware.
+long nativeSampleBudget = 8_000_000L        // pixels x channels the native path may hold in memory
+long tiledFullResBudget = 1_000_000_000L    // bbox pixels read at full res before the tiled path coarsens
+// tileSize is sized to the image's channel count in the Tier-1 block below (a tile read pulls ALL
+// channels, so on a high-plex image a 1024² tile is huge).
+
+def pool = null
+
+// Image being worked on, so the handler below can name it when a run dies — "stopped after
+// an error" is useless when the run covered a hundred images
+String imageInFlight = null
 
 try {
+    // --- Tier 1: size intensity tile size AND concurrency to the heap AND the channel count ---
+    // The dominant cost is reading tiles: extractChannels subsets AFTER the read, so every tile pulls
+    // ALL of the image's channels. On a 38-channel UINT16 image a 1024² tile is ~80 MB, QuPath also
+    // caches those tiles, and one task per core drove the allocation rate past the GC — which is what
+    // exhausted a 12 GB heap here. So: shrink the tile until one all-channels read is modest, and cap
+    // concurrency by channel count so high-plex images run only a few masks (and reads) at once.
+    Runtime rt   = Runtime.getRuntime()
+    long maxHeap = rt.maxMemory()                        // the -Xmx ceiling that actually OOMs (not RAM)
+    long usedNow = rt.totalMemory() - rt.freeMemory()    // live footprint right now (open image, UI, cache)
+    long headroom        = Math.max( maxHeap - usedNow, maxHeap / 8 )   // floored so we never trust it to ~0
+    long intensityBudget = (long)( headroom * 0.5d )     // leave half of headroom for QuPath's own churn
+    int  bytesPerSample  = (currentImageData?.getServer()?.getPixelType()?.getBytesPerPixel()) ?: 2
+    int  imageChannels   = (currentImageData?.getServer()?.nChannels()) ?: 1   // ALL are read per tile
+
+    // Tile size: halve from 1024 until one all-channels tile read is within ~32 MB (floor 128).
+    int tileSize = 1024
+    while (tileSize > 128 && (long) tileSize * tileSize * imageChannels * bytesPerSample > 32L * 1024 * 1024) {
+        tileSize >>= 1
+    }
+
+    // Concurrency: the smaller of what the heap allows (native per-task peak) and what keeps concurrent
+    // multi-channel tile data bounded — the latter scales with channels, so high-plex images run fewer
+    // masks in parallel (which also keeps the allocation rate under the GC's throughput).
+    long nativePeak      = nativeSampleBudget * (bytesPerSample + 8L) * 2L
+    long perMaskHotBytes = 16_000_000L * imageChannels * bytesPerSample   // ~16 MP of a mask "hot" at once
+    int  byHeap          = (int) Math.max( 1L, intensityBudget / Math.max( 1L, nativePeak ) )
+    int  byChannels      = (int) Math.max( 1L, intensityBudget / Math.max( 1L, perMaskHotBytes ) )
+    int  intensityThreads = Math.max( 1, Math.min( rt.availableProcessors(), Math.min( byHeap, byChannels ) ) )
+
+    pool = Executors.newFixedThreadPool( intensityThreads )
+    progressUI.poolRef.set( pool )
+
     imageLoop:
     for (image in imagesToRun) {
         // Stopping when requested
         if (stopNowFlag.get() || stopLaterFlag.get()) { break }
-        
+
+        imageInFlight = image.getImageName()
+
         // Reporting current image
         updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image, imageNum: processed+1] )
         
@@ -969,11 +1283,10 @@ try {
         def server = imageData.getServer()
         def metadata = server.getMetadata()
         def channels = metadata.getChannels()
-        double pixelConversionFactor = metadata.getAveragedPixelSize()
-        
+
         // Filter annotations of interest
         List annotations = imageData.getHierarchy().getAnnotationObjects().findAll {
-            it.getPathClass()?.getName() in codePreferences.pathClasses
+            classLabelForObject( it ) in codePreferences.pathClasses
         }
         
         int step = 1
@@ -986,23 +1299,56 @@ try {
             def modifiedChannelServer = new TransformedServerBuilder( server )
                 .extractChannels( *codePreferences.intensityChannels )
                 .build()
-            
+
+            // Channel names in the extracted server's band order — used to build measurement column
+            // names ("<channel>: Mean", ...) that exactly match QuPath's native output.
+            List channelNames = modifiedChannelServer.getMetadata().getChannels().collect { it.getName() }
+            int nSelectedChannels = Math.max( 1, channelNames.size() )
+
+            // Each annotation is measured one of two ways, chosen by size (the nativeSampleBudget /
+            // tiledFullResBudget / tileSize thresholds are hoisted above the image loop so the heap-aware
+            // concurrency sizing can use them too):
+            //  - Small/normal objects: QuPath's native addIntensityMeasurements at FULL resolution
+            //    (downsample 1.0) — exact, and identical to what QuPath's GUI would produce.
+            //  - Large masks (e.g. collagen per layer): a TILED full-resolution reader that streams the
+            //    same statistics without holding the whole region — or every pixel value, as the native
+            //    path does — in memory. This is what fixes the Java-heap-space crash. If a mask is so
+            //    enormous that even tiled full-res would be too slow, it coarsens the read (downsample).
             def doneCount = new AtomicInteger( 0 )
             int numAnnos = annotations.size()
             int lastPct = -1
-            
+
             // Parallel processing the measurements
             def futures = annotations.collect { anno ->
                 if (stopNowFlag.get()) { return null }
                 try {
                     pool.submit({
-                        ObjectMeasurements.addIntensityMeasurements(
-                            modifiedChannelServer,
-                            anno,
-                            pixelConversionFactor,
-                            codePreferences.intensityMeasurements,
-                            []
-                        )
+                        def roi = anno.getROI()
+                        double bboxArea = roi ? (roi.getBoundsWidth() * roi.getBoundsHeight()) : 0d
+                        long sampleLoad = (long) bboxArea * nSelectedChannels
+                        if (sampleLoad <= nativeSampleBudget) {
+                            // Small enough to measure whole, at full resolution, the native way
+                            ObjectMeasurements.addIntensityMeasurements(
+                                modifiedChannelServer,
+                                anno,
+                                1.0d,
+                                codePreferences.intensityMeasurements,
+                                []
+                            )
+                        } else {
+                            // Too big to hold in memory — tile it. Full res unless it's so large that
+                            // even tiling would be too slow, in which case coarsen the read just enough.
+                            double tiledDownsample = Math.max( 1.0d, Math.sqrt( bboxArea / tiledFullResBudget ) )
+                            addIntensityMeasurementsTiled(
+                                modifiedChannelServer,
+                                anno,
+                                tiledDownsample,
+                                codePreferences.intensityMeasurements,
+                                channelNames,
+                                tileSize,
+                                stopNowFlag
+                            )
+                        }
                         int pDone = ( doneCount.incrementAndGet() / numAnnos * 100 ) as int
                         if (pDone != lastPct) {
                             updateProgressWindow( progressUI, [stepPer: pDone] )
@@ -1067,14 +1413,23 @@ try {
         double frac = processed / total  
         updateProgressWindow( progressUI, [imagePer: frac] )
     }
+} catch (Throwable err) {
+    // Any failure (out-of-memory, I/O, a bad region read, ...) stops the run hard: signal in-flight
+    // tiled reads to bail and kill the pool so it stops consuming memory. This runs outside the script
+    // editor, so instead of rethrowing (which would be invisible) we log the error — full stack trace
+    // to QuPath's log — and show a notification pointing there. The finally still closes the window.
+    stopNowFlag.set( true )
+    pool?.shutdownNow()
+    String failedOn = imageInFlight ? " on image '${imageInFlight}'" : ""
+    logger.error( "Add measurements stopped after an error" + failedOn, err )
+    Dialogs.showErrorNotification( "Add measurements", "Stopped after an error" + failedOn + ". See the log for details." )
+    return
 } finally {
-    pool.shutdown()
+    // Always runs — on success, error, or user stop — so the modal progress window can never be left
+    // open blocking the rest of QuPath.
+    pool?.shutdown()
     progressUI.poolRef.set( null )
-}
-
-// Closing progress bar window
-Platform.runLater {
-    progressUI.stage.close()
+    Platform.runLater { progressUI.stage.close() }
 }
 
 
@@ -1101,6 +1456,9 @@ import qupath.lib.analysis.features.ObjectMeasurements
 import qupath.lib.analysis.features.ObjectMeasurements.ShapeFeatures
 
 import qupath.lib.images.servers.TransformedServerBuilder
+import qupath.lib.regions.RegionRequest
+import qupath.lib.awt.common.BufferedImageTools
+import qupath.lib.roi.GeometryTools
 
 import qupath.lib.gui.tools.IconFactory
 import org.controlsfx.glyphfont.FontAwesome

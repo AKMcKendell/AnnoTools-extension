@@ -372,14 +372,27 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     selectAllCB.setText( "${title.capitalize()} [0]" )
     setTT( selectAllCB, "Include all ${TTword.uncapitalize()}" )
 
-    // Once shown, measure/lock against the widest possible count so later updates never get clipped
-    selectAllCB.sceneProperty().addListener { obs, oldScene, newScene ->
-        if (newScene != null) {
-            String initialText = selectAllCB.getText()
-            selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
-            Platform.runLater {  // extra pulse so CSS skin is applied
-                lockDimensions( selectAllCB )
-                Platform.runLater { selectAllCB.setText( initialText ) }
+    // Reserve at least the widest-count width so the count changing (e.g. [9] -> [10]) never nudges the
+    // header — but only as a *floor* (minWidth), never a fixed or max width. Capping the width to a
+    // measurement is exactly what clipped the title: the first box is laid out before the app's font is
+    // applied, so its measured width comes out too small, and a hard cap then truncates the label for
+    // good (later boxes, rebuilt after the window is styled, measured fine — hence "[0]" clipped but a
+    // rebuilt "[1]" didn't). With only a floor the checkbox always takes at least its own preferred width
+    // for the current text, so the title can never be clipped no matter when we happen to measure.
+    boolean selectAllFloorSet = false
+    selectAllCB.widthProperty().addListener { obs, oldW, newW ->
+        if (!selectAllFloorSet && newW.doubleValue() > 0) {
+            selectAllFloorSet = true
+            Platform.runLater {
+                String initialText = selectAllCB.getText()
+                selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
+                selectAllCB.applyCss()
+                double w = selectAllCB.prefWidth( -1 )
+                double h = selectAllCB.prefHeight( w )
+                selectAllCB.setText( initialText )
+
+                selectAllCB.setMinWidth( w )
+                selectAllCB.setMinHeight( h )
             }
         }
     }
@@ -501,6 +514,24 @@ def collectAllMetadata( objects ) {
 def addIcon( node, iconCode, int size ) {
     def icon = IconFactory.createNode( iconCode, size )
     node.setGraphic( icon )
+}
+
+// Function: Outline an input in red for as long as it is a reason the "OK" button is disabled
+def flagWhenBlocking( node, blocking, String blockedStyle = null ) {
+    def outlineRedStyle = """
+        -fx-border-color: red;
+        -fx-border-radius: 3;
+    """
+    def flaggedStyle = blockedStyle ?: outlineRedStyle // e.g. an underline in place of an outline
+    def clearedStyle = node.getStyle()                 // however the input looks when it isn't blocking
+
+    // Hold the binding on the node — a derived binding (e.g. someBinding.not()) is only weakly
+    // referenced by its dependencies, so otherwise it can be collected part way through the dialog
+    node.getProperties().put( "flagWhenBlocking", blocking )
+
+    def applyStyle = { boolean isBlocking -> node.setStyle( isBlocking ? flaggedStyle : clearedStyle ) }
+    blocking.addListener { obs, oldVal, newVal -> applyStyle( newVal ) }
+    applyStyle( blocking.getValue() )
 }
 
 // Function: Scan the entire project to collect annotation field availability by class
@@ -641,6 +672,15 @@ def naturalCompare( String s1, String s2 ) {
         if (cmp != 0) { return cmp }
     }
     return ta.size() <=> tb.size()
+}
+
+
+// Function: The class label used to identify an object by class. Mirrors QuPath's project
+// summary (DefaultProject.HierarchySummary.pathClassToString), which labels null-class
+// (unclassified) objects "Unclassified". That's the label the class list offers, so null-class
+// objects must map back to it here — otherwise "Unclassified" is selectable but never matches.
+def classLabelForObject( obj ) {
+    return obj.getPathClass()?.getName() ?: "Unclassified"
 }
 
 
@@ -788,8 +828,8 @@ def codePreferences = runOnFxThreadAndWait {
     if (currentEntry != null && currentImageData != null) {
         def liveCounts = [:]
         currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-            def cn = obj.getPathClass()?.getName()
-            if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+            def cn = classLabelForObject( obj )
+            liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
         }
         imageClassCounts[ currentEntry.getImageName() ] = liveCounts
 
@@ -898,14 +938,14 @@ def codePreferences = runOnFxThreadAndWait {
         def measurementsByClass = projectCache.index.measurementsByClass ?: [:]
         LinkedHashSet allMeasurements = new LinkedHashSet( (measurementsByClass.values() ?: []).collectMany { it ?: [] } )
         def allMeasurementsMap = allMeasurements.collect { [name: it] }
-        measurementsBox = makeCheckboxBox( "Available measurements", "existing measurements from objects of the selected classes", allMeasurementsMap, 250, 0, "None available for selected object classes" )
+        measurementsBox = makeCheckboxBox( "Available measurements", "existing measurements from objects of the selected classes", allMeasurementsMap, 250, 0, "None for selected classes" )
         measurementsBox.header.getChildren().add( measurementsBox.selectAll )
         measurementsBox.box.setMinWidth( Region.USE_PREF_SIZE )
         
         def metadataByClass = projectCache.index.metadataByClass ?: [:]
         LinkedHashSet allMetadata = new LinkedHashSet( (metadataByClass.values() ?: []).collectMany { it ?: [] } )
         def allMetadataMap = allMetadata.collect { [name: it] }
-        metadataBox = makeCheckboxBox( "Available metadata", "existing metadata from objects of the selected classes", allMetadataMap, 250, 0, "None available for selected object classes" )
+        metadataBox = makeCheckboxBox( "Available metadata", "existing metadata from objects of the selected classes", allMetadataMap, 250, 0, "None for selected classes" )
         metadataBox.header.getChildren().add( metadataBox.selectAll )
         metadataBox.box.setMinWidth( Region.USE_PREF_SIZE )
         
@@ -976,17 +1016,34 @@ def codePreferences = runOnFxThreadAndWait {
             *metadataBox.CBs.collect { it.selectedProperty() }
         )
         
+        def noFieldsSelected = anySelectedMeasurements.not().and( anySelectedMetadata.not() )
+
         okBtn.disableProperty().bind(
             anySelectedImage.not()
             .or( anySelectedClass.not() )
-            .or( anySelectedMeasurements.not()
-                .and( anySelectedMetadata.not() ) )
+            .or( noFieldsSelected )
         )
+
+        // Red outline while neither box has a selection — re-applied here because a refresh
+        // rebuilds both boxes, so these are new nodes every time
+        flagWhenBlocking( measurementsBox.box, noFieldsSelected )
+        flagWhenBlocking( metadataBox.box, noFieldsSelected )
     }
-    
+
     // Initial bind
     rebindOkBtn()
-    
+
+    // Red outline on the image/class boxes while they are blocking the "OK" button. These boxes
+    // are never rebuilt, so they're flagged once rather than on every rebind
+    flagWhenBlocking( imagesBox.box, Bindings.createBooleanBinding(
+        { !imagesBox.CBs.any { it.isSelected() } },
+        *imagesBox.CBs.collect { it.selectedProperty() }
+    ) )
+    flagWhenBlocking( pathClassBox.box, Bindings.createBooleanBinding(
+        { !pathClassBox.CBs.any { it.isSelected() } },
+        *pathClassBox.CBs.collect { it.selectedProperty() }
+    ) )
+
     
     // Refresh project details
     refreshBtn.setOnAction { e ->
@@ -1119,8 +1176,8 @@ boolean keepCurrent = false
 if (currentEntry in imagesToRun) {
     def liveCounts = [:]
     currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-        def cn = obj.getPathClass()?.getName()
-        if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+        def cn = classLabelForObject( obj )
+        liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
     }
     keepCurrent = keepImage( liveCounts )
 }
@@ -1160,15 +1217,31 @@ List emptyImages = []
 def nThreads = Math.min( Runtime.getRuntime().availableProcessors() * 2, imagesToRun.size() )
 def pool = Executors.newFixedThreadPool( nThreads )
 
+// Image a failing task was working on, so the handler below can name it — "stopped after an
+// error" is useless when the run covered a hundred images. First failure wins; the rest of the
+// pool is torn down anyway.
+def imageInFlight = new AtomicReference<String>( null )
+def onImage = { String imageName, Closure work ->
+    return {
+        try {
+            return work()
+        } catch (Throwable t) {
+            imageInFlight.compareAndSet( null, imageName )
+            throw t
+        }
+    }
+}
+
+try {
 // Parallel processing images
 def futures = imagesToRun.findAll { it != currentEntry }.collect { image ->
     if (stopLaterFlag.get()) return null
-    pool.submit({
+    pool.submit( onImage( image.getImageName(), {
         def imageData = image.readImageData()
         try {
             def hierarchy = imageData.getHierarchy()
             def annotations = hierarchy.getAnnotationObjects().findAll {
-                it.getPathClass()?.getName() in codePreferences.objectClasses
+                classLabelForObject( it ) in codePreferences.objectClasses
             }
             annotations.each { anno ->
                 codePreferences.metadata.each { anno.getMetadata().remove( it ) }
@@ -1181,7 +1254,7 @@ def futures = imagesToRun.findAll { it != currentEntry }.collect { image ->
         
         progressUI.lastImageName.set( image.getImageName() )
         progressUI.doneCount.incrementAndGet()
-    } as Callable)
+    }) as Callable)
 }.findAll { it != null }
 
 futures.each { it.get() }
@@ -1189,24 +1262,26 @@ pool.shutdown()
 
 // Current image handled serially after
 if (!stopLaterFlag.get() && currentEntry in imagesToRun) {
-    def hierarchy = currentImageData.getHierarchy()
-    def annotations = hierarchy.getAnnotationObjects().findAll {
-        it.getPathClass()?.getName() in codePreferences.objectClasses
-    }
-    annotations.each { anno ->
-        codePreferences.metadata.each { anno.getMetadata().remove( it ) }
-        codePreferences.measurements.each { anno.getMeasurements().remove( it ) }
-    }
-    currentEntry.saveImageData( currentImageData )
-    runOnFxThreadAndWait {
-        def viewer = getCurrentViewer()
-        if (viewer != null) {
-            currentImageData.getHierarchy().fireHierarchyChangedEvent( this )
-            viewer.setImageData( currentImageData )
+    onImage( currentEntry.getImageName(), {
+        def hierarchy = currentImageData.getHierarchy()
+        def annotations = hierarchy.getAnnotationObjects().findAll {
+            classLabelForObject( it ) in codePreferences.objectClasses
         }
-    }
-    progressUI.lastImageName.set( currentEntry.getImageName() )
-    progressUI.doneCount.incrementAndGet()
+        annotations.each { anno ->
+            codePreferences.metadata.each { anno.getMetadata().remove( it ) }
+            codePreferences.measurements.each { anno.getMeasurements().remove( it ) }
+        }
+        currentEntry.saveImageData( currentImageData )
+        runOnFxThreadAndWait {
+            def viewer = getCurrentViewer()
+            if (viewer != null) {
+                currentImageData.getHierarchy().fireHierarchyChangedEvent( this )
+                viewer.setImageData( currentImageData )
+            }
+        }
+        progressUI.lastImageName.set( currentEntry.getImageName() )
+        progressUI.doneCount.incrementAndGet()
+    }).call()
 }
 
 
@@ -1223,9 +1298,20 @@ List outputMatrix = completeMatrixMap.collect { rowMap ->
 
 // Add header
 outputMatrix.addFirst( headerRow )
+} catch (Throwable err) {
+    // Runs outside the script editor, so a thrown error would be invisible: kill the pool, log it (the
+    // full stack trace goes to QuPath's log), point the user there, and close the modal window so QuPath
+    // isn't left blocked. Then stop.
+    pool.shutdownNow()
+    String failedOn = imageInFlight.get() ? " on image '${imageInFlight.get()}'" : ""
+    logger.error( "Remove measurements stopped after an error" + failedOn, err )
+    Dialogs.showErrorNotification( "Remove measurements", "Stopped after an error" + failedOn + ". See the log for details." )
+    Platform.runLater { progressUI.stage.close() }
+    return
+}
 
 
-// Closing progress bar window
+// Closing progress bar window (runs on the success path)
 Thread.sleep( 200 )
 Platform.runLater {
     progressUI.stage.close()

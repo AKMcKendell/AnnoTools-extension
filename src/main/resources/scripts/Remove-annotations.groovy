@@ -264,6 +264,24 @@ def addIcon( node, iconCode, int size ) {
     node.setGraphic( icon )
 }
 
+// Function: Outline an input in red for as long as it is a reason the "OK" button is disabled
+def flagWhenBlocking( node, blocking, String blockedStyle = null ) {
+    def outlineRedStyle = """
+        -fx-border-color: red;
+        -fx-border-radius: 3;
+    """
+    def flaggedStyle = blockedStyle ?: outlineRedStyle // e.g. an underline in place of an outline
+    def clearedStyle = node.getStyle()                 // however the input looks when it isn't blocking
+
+    // Hold the binding on the node — a derived binding (e.g. someBinding.not()) is only weakly
+    // referenced by its dependencies, so otherwise it can be collected part way through the dialog
+    node.getProperties().put( "flagWhenBlocking", blocking )
+
+    def applyStyle = { boolean isBlocking -> node.setStyle( isBlocking ? flaggedStyle : clearedStyle ) }
+    blocking.addListener { obs, oldVal, newVal -> applyStyle( newVal ) }
+    applyStyle( blocking.getValue() )
+}
+
 
 // Function: Make a box with checkboxes and a modifiable header
 def makeCheckboxBox( String title, String keyWord = null, List objects, int prefWidth = 0, int prefHeight = 0, String emptyMessage = "None available" ) {
@@ -361,14 +379,27 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     titleLabel.setText( "${title.capitalize()} [0]" )
     selectAllCB.setText( "${title.capitalize()} [0]" )
 
-    // Once shown, measure/lock against the widest possible count so later updates never get clipped
-    selectAllCB.sceneProperty().addListener { obs, oldScene, newScene ->
-        if (newScene != null) {
-            String initialText = selectAllCB.getText()
-            selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
-            Platform.runLater {  // extra pulse so CSS skin is applied
-                lockDimensions( selectAllCB )
-                Platform.runLater { selectAllCB.setText( initialText ) }
+    // Reserve at least the widest-count width so the count changing (e.g. [9] -> [10]) never nudges the
+    // header — but only as a *floor* (minWidth), never a fixed or max width. Capping the width to a
+    // measurement is exactly what clipped the title: the first box is laid out before the app's font is
+    // applied, so its measured width comes out too small, and a hard cap then truncates the label for
+    // good (later boxes, rebuilt after the window is styled, measured fine — hence "[0]" clipped but a
+    // rebuilt "[1]" didn't). With only a floor the checkbox always takes at least its own preferred width
+    // for the current text, so the title can never be clipped no matter when we happen to measure.
+    boolean selectAllFloorSet = false
+    selectAllCB.widthProperty().addListener { obs, oldW, newW ->
+        if (!selectAllFloorSet && newW.doubleValue() > 0) {
+            selectAllFloorSet = true
+            Platform.runLater {
+                String initialText = selectAllCB.getText()
+                selectAllCB.setText( "${title.capitalize()} [${checkboxes.size()}]" )
+                selectAllCB.applyCss()
+                double w = selectAllCB.prefWidth( -1 )
+                double h = selectAllCB.prefHeight( w )
+                selectAllCB.setText( initialText )
+
+                selectAllCB.setMinWidth( w )
+                selectAllCB.setMinHeight( h )
             }
         }
     }
@@ -524,6 +555,15 @@ def naturalCompare( String s1, String s2 ) {
 }
 
 
+// Function: The class label used to identify an object for removal. Mirrors QuPath's project
+// summary (DefaultProject.HierarchySummary.pathClassToString), which labels null-class
+// (unclassified) objects "Unclassified". That's the label the class list offers, so null-class
+// objects must map back to it here — otherwise "Unclassified" is selectable but never matches.
+def classLabelForObject( obj ) {
+    return obj.getPathClass()?.getName() ?: "Unclassified"
+}
+
+
 // Project & preferences file
 def project = getProject()
 def currentImageData = getCurrentImageData()
@@ -612,8 +652,8 @@ def codePreferences = runOnFxThreadAndWait {
     if (currentEntry != null && currentImageData != null) {
         def liveCounts = [:]
         currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-            def cn = obj.getPathClass()?.getName()
-            if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+            def cn = classLabelForObject( obj )
+            liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
         }
         imageClassCounts[ currentEntry.getImageName() ] = liveCounts
 
@@ -720,7 +760,11 @@ def codePreferences = runOnFxThreadAndWait {
         anySelectedImage.not()
         .or( anySelectedPathClass.not() )
     )
-    
+
+    // Red outline on each input while it is a reason the "OK" button is disabled
+    flagWhenBlocking( imagesBox.box, anySelectedImage.not() )
+    flagWhenBlocking( pathClassBox.box, anySelectedPathClass.not() )
+
     // Requesting confirmation to remove
     boolean confirmRemove = false
     okBtn.addEventFilter( ActionEvent.ACTION ) { e ->
@@ -790,8 +834,8 @@ boolean keepCurrent = false
 if (currentEntry in imagesToRun) {
     def liveCounts = [:]
     currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-        def cn = obj.getPathClass()?.getName()
-        if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+        def cn = classLabelForObject( obj )
+        liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
     }
     keepCurrent = keepImage( liveCounts )
 }
@@ -828,15 +872,31 @@ def nThreads = Math.min(
 )
 def pool = Executors.newFixedThreadPool( nThreads )
 
+// Image a failing task was working on, so the handler below can name it — "stopped after an
+// error" is useless when the run covered a hundred images. First failure wins; the rest of the
+// pool is torn down anyway.
+def imageInFlight = new AtomicReference<String>( null )
+def onImage = { String imageName, Closure work ->
+    return {
+        try {
+            return work()
+        } catch (Throwable t) {
+            imageInFlight.compareAndSet( null, imageName )
+            throw t
+        }
+    }
+}
+
+try {
 // Parallel running images
 def futures = imagesToRun.findAll { it != currentEntry }.collect { image ->
     if (stopLaterFlag.get()) return null
-    pool.submit({
+    pool.submit( onImage( image.getImageName(), {
         def imageData = image.readImageData()
         try {
             def hierarchy = imageData.getHierarchy()
             def objectsToRemove = hierarchy.getAnnotationObjects().findAll {
-                it.getPathClass()?.getName() in codePreferences.objectClasses
+                classLabelForObject( it ) in codePreferences.objectClasses
             }
             hierarchy.removeObjects( objectsToRemove, false )
             image.saveImageData( imageData )
@@ -847,7 +907,7 @@ def futures = imagesToRun.findAll { it != currentEntry }.collect { image ->
         // Write atomic state — poll timeline reads these on its own schedule
         progressUI.lastImageName.set( image.getImageName() )
         progressUI.doneCount.incrementAndGet()
-    } as Callable)
+    }) as Callable)
 }.findAll { it != null }
 
 futures.each { it.get() }
@@ -855,25 +915,40 @@ pool.shutdown()
 
 // Current image handled serially after
 if (!stopLaterFlag.get() && currentEntry in imagesToRun) {
-    def hierarchy = currentImageData.getHierarchy()
-    def objectsToRemove = hierarchy.getAnnotationObjects().findAll {
-        it.getPathClass()?.getName() in codePreferences.objectClasses
-    }
-    hierarchy.removeObjects( objectsToRemove, false )
-    currentEntry.saveImageData( currentImageData )
-    runOnFxThreadAndWait {
-        def viewer = getCurrentViewer()
-        if (viewer != null) {
-            currentImageData.getHierarchy().fireHierarchyChangedEvent( this )
-            viewer.setImageData( currentImageData )
+    onImage( currentEntry.getImageName(), {
+        def hierarchy = currentImageData.getHierarchy()
+        def objectsToRemove = hierarchy.getAnnotationObjects().findAll {
+            classLabelForObject( it ) in codePreferences.objectClasses
         }
-    }
-    progressUI.lastImageName.set( currentEntry.getImageName() )
-    progressUI.doneCount.incrementAndGet()
+        hierarchy.removeObjects( objectsToRemove, false )
+        currentEntry.saveImageData( currentImageData )
+        runOnFxThreadAndWait {
+            def viewer = getCurrentViewer()
+            if (viewer != null) {
+                currentImageData.getHierarchy().fireHierarchyChangedEvent( this )
+                viewer.setImageData( currentImageData )
+            }
+        }
+        progressUI.lastImageName.set( currentEntry.getImageName() )
+        progressUI.doneCount.incrementAndGet()
+    }).call()
 }
 
 // Brief pause so the poll timeline renders the completed state before close
 Thread.sleep( 200 )
+} catch (Throwable err) {
+    // Runs outside the script editor, so a thrown error would be invisible: kill the pool, log it (the
+    // full stack trace goes to QuPath's log), point the user there, and close the modal window so QuPath
+    // isn't left blocked. Then stop.
+    pool.shutdownNow()
+    String failedOn = imageInFlight.get() ? " on image '${imageInFlight.get()}'" : ""
+    logger.error( "Remove annotations stopped after an error" + failedOn, err )
+    Dialogs.showErrorNotification( "Remove annotations", "Stopped after an error" + failedOn + ". See the log for details." )
+    Platform.runLater { progressUI.stage.close() }
+    return
+}
+
+// Closing progress bar window (runs on the success path)
 Platform.runLater {
     progressUI.stage.close()
 }

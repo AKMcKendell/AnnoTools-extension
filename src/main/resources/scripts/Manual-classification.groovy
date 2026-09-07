@@ -192,6 +192,15 @@ def naturalCompare( String s1, String s2 ) {
     return ta.size() <=> tb.size()
 }
 
+
+// Function: The class label used to identify an object by class. Mirrors QuPath's project
+// summary (DefaultProject.HierarchySummary.pathClassToString), which labels null-class
+// (unclassified) objects "Unclassified". That's the label the class list offers, so null-class
+// objects must map back to it here — otherwise "Unclassified" is selectable but never matches.
+def classLabelForObject( obj ) {
+    return obj.getPathClass()?.getName() ?: "Unclassified"
+}
+
 // FX-safe helper function
 def runOnFxThreadAndWait( Closure fxCode ) {
     def latch = new CountDownLatch( 1 )
@@ -1766,15 +1775,35 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             users.setStyle( newVal ? null : outlineRedStyle )
         }
 
+        // The button is a ListCell wired to the popup's ListView, so its "empty" refresh (on layout, or when
+        // the skin reprocesses an items change) resets the text to null, wiping the prompt the skin had just
+        // painted. Owning the cell makes that refresh repaint the prompt instead of blanking it: without this
+        // the prompt only survived where something called users.show() afterwards.
+        users.setButtonCell( new ListCell<String>() {
+            @Override
+            protected void updateItem( String item, boolean empty ) {
+                super.updateItem( item, empty )
+                setText( item != null ? item : users.getPromptText() )
+            }
+        } )
+
         // Disabling with "None available" prompt whenever the current option list is empty
         def updateUsersAvailability = {
             boolean noUsers = users.getItems() == null || users.getItems().isEmpty()
-            users.setDisable( noUsers )
+
             users.setPromptText( noUsers ? "None available" : null )
+            users.setDisable( noUsers )
+
+            // Emptying the list clears the selected index but leaves the value behind, which would otherwise
+            // keep painting the old name over the prompt
+            if (noUsers) { users.getSelectionModel().clearSelection() }
         }
-        users.getItems().addListener( { c -> updateUsersAvailability() } as InvalidationListener )
+
+        def usersItemsListener = { c -> updateUsersAvailability() } as InvalidationListener
+        users.getItems().addListener( usersItemsListener )
         users.itemsProperty().addListener { obs, oldItems, newItems ->
-            newItems?.addListener( { c -> updateUsersAvailability() } as InvalidationListener )
+            oldItems?.removeListener( usersItemsListener )   // Otherwise every mode switch stacks another copy
+            newItems?.addListener( usersItemsListener )
             updateUsersAvailability()
         }
         updateUsersAvailability()
@@ -2136,8 +2165,8 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         if (currentImageData != null && currentImageName != null) {
             def liveCounts = [:]
             currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-                def cn = obj.getPathClass()?.getName()
-                if (cn != null) { liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1 }
+                def cn = classLabelForObject( obj )
+                liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
             }
             imageClassCounts[ currentImageName ] = liveCounts
             totalsByClass.clear()
@@ -2497,7 +2526,34 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def topChannelRow = new HBox( 5 )
         topChannelRow.setPadding( new Insets( 8 ) )
         topChannelRow.getChildren().addAll( channelsLabel, fullChannelsBoxSpacer, clearChannelsBtn )
-        lockDimensions( topChannelRow )
+        // Reserve the count label's width for the widest possible count, so toggling between counts whose
+        // digits differ in width (e.g. [1] <-> [0]) neither clips the label nor resizes the row and jiggles
+        // the box. Floor its minWidth to the widest count string, measured once the label is laid out so the
+        // real font is applied. A floor (not min=pref=max) means an early/mis-measure can only pad it wider,
+        // never clip; and since the floor >= every count's width, the label stays a constant width.
+        boolean channelsLabelFloorSet = false
+        channelsLabel.widthProperty().addListener { obs, oldW, newW ->
+            if (!channelsLabelFloorSet && newW.doubleValue() > 0) {
+                channelsLabelFloorSet = true
+                Platform.runLater {
+                    String liveText = channelsLabel.getText()
+                    double widest = (0..maxChannels).collect { n ->
+                        channelsLabel.setText( "Select up to ${maxChannels} channels: [${n}]" )
+                        channelsLabel.applyCss()
+                        channelsLabel.prefWidth( -1 )
+                    }.max()
+                    channelsLabel.setText( liveText )
+                    channelsLabel.setMinWidth( widest )
+                }
+            }
+        }
+        // Keep the row height stable; its width now follows the fixed-width label, so no width lock is needed.
+        Platform.runLater {
+            double rowHeight = topChannelRow.getHeight()
+            topChannelRow.setMinHeight( rowHeight )
+            topChannelRow.setPrefHeight( rowHeight )
+            topChannelRow.setMaxHeight( rowHeight )
+        }
         
         // Add channel checkboxes and listeners to enforce max number
         channelCheckboxes.each { cb ->
@@ -3877,12 +3933,19 @@ while (true) {
     def nThreads = Math.min( Runtime.getRuntime().availableProcessors() * 2, imageOrder.size() )
     def pool = Executors.newFixedThreadPool( nThreads )
     
+    // The open image's LIVE data may hold unsaved objects (e.g. a freshly drawn, still-unclassified
+    // annotation). readImageData() only sees what's on disk, so scan the current entry from its live
+    // hierarchy — otherwise an image whose only matching object is unsaved is judged to have none and
+    // gets dropped from the work list, blocking the run at the image checks.
+    def liveCurrentData = getCurrentImageData()
+
     def futures = imageOrder.collect { image ->
         pool.submit({
-            def imageAnnos = image.readImageData()
+            def imageData = (image == session.currentEntry) ? liveCurrentData : image.readImageData()
+            def imageAnnos = imageData
                 .getHierarchy()
                 .getAnnotationObjects()
-                .findAll { it.getPathClass()?.getName() == session.annoClass }
+                .findAll { classLabelForObject( it ) == session.annoClass }
                 
             if (imageAnnos.isEmpty()) {
                 return new ImageCheckResult(image: image, imageName: image.getImageName(), hasNoAnnos: true,
@@ -4175,7 +4238,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     
     // Get all desired class annotations
     session.allClassAnnos = session.hierarchy.getAnnotationObjects().findAll {
-        it.getPathClass()?.getName() == session.annoClass
+        classLabelForObject( it ) == session.annoClass
     }
     
     // Getting annotations to classify/review/check
