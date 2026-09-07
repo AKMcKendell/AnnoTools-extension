@@ -34,7 +34,7 @@ def runOnFxThreadAndWait( Closure fxCode ) {
 // is overridden with its live hierarchy so unsaved objects are reflected. classMatches( className )
 // decides which class names are pre-existing objects. Returns imageName -> (className -> count),
 // ordered by descending total, for affected images only.
-def existingObjectsBreakdown( List images, Closure classMatches, currentEntry, currentImageData ) {
+def existingObjectsBreakdown( List images, Closure classMatches, Map liveDataByName ) {
     if (images.isEmpty()) { return [:] }
 
     def gson = new Gson()
@@ -75,18 +75,19 @@ def existingObjectsBreakdown( List images, Closure classMatches, currentEntry, c
         if (!counts.isEmpty()) { breakdown[ imgName ] = counts }
     }
 
-    // Override the open image with its live hierarchy so unsaved objects are reflected accurately
-    if (currentEntry != null && currentImageData != null && images.any { it.getImageName() == currentEntry.getImageName() }) {
-        def curName = currentEntry.getImageName()
+    // Override images a viewer holds with their live hierarchy so unsaved objects are reflected
+    // accurately — every pane of a split viewer, not just the selected one
+    liveDataByName.each { imgName, liveData ->
+        if (!images.any { it.getImageName() == imgName }) { return }
         def live = runOnFxThreadAndWait {
             def m = new LinkedHashMap()
-            currentImageData.getHierarchy().getAnnotationObjects().each { o ->
+            liveData.getHierarchy().getAnnotationObjects().each { o ->
                 def n = classLabelForObject( o )
                 if (classMatches( n )) { m[ n ] = (m[ n ] ?: 0) + 1 }
             }
             return m
         }
-        if (live.isEmpty()) { breakdown.remove( curName ) } else { breakdown[ curName ] = live }
+        if (live.isEmpty()) { breakdown.remove( imgName ) } else { breakdown[ imgName ] = live }
     }
 
     // Order affected images by descending existing-object total, then image name
@@ -817,6 +818,46 @@ def findTopAncestor( obj ) {
 def project = getProject()
 def currentImageData = getCurrentImageData()
 def currentEntry = currentImageData ? project.getEntry( currentImageData ) : null
+
+// Each pane of a split viewer holds its own live ImageData. Editing a background copy read from disk
+// leaves the other panes drawing the objects they had before the run — and lets a later save from one
+// of them write that stale hierarchy back over this run's changes. So any image open in *any* viewer
+// is edited through the instance that viewer holds, not through a copy.
+def viewersByEntryId = [:]   // entry ID -> viewers currently showing that image
+runOnFxThreadAndWait {
+    QuPathGUI.getInstance().getAllViewers().each { viewer ->
+        def viewerData = viewer.getImageData()
+        if (viewerData == null) { return }
+        def viewerEntry = project.getEntry( viewerData )
+        if (viewerEntry == null) { return }
+        viewersByEntryId.get( viewerEntry.getID(), [] ) << viewer
+    }
+}
+
+// Viewers showing an image right now — a pane the user re-points mid-run stops counting
+def viewersForEntry = { entry ->
+    if (entry == null) { return [] }
+    ( viewersByEntryId[ entry.getID() ] ?: [] ).findAll { viewer ->
+        def viewerData = viewer.getImageData()
+        viewerData != null && project.getEntry( viewerData )?.getID() == entry.getID()
+    }
+}
+
+// The live ImageData a viewer holds for this image, or null when no pane is showing it
+def liveDataForEntry = { entry ->
+    def viewers = viewersForEntry( entry )
+    viewers ? viewers[ 0 ].getImageData() : null
+}
+
+// Annotation class counts taken straight from a live hierarchy
+def liveClassCounts = { imgData ->
+    def counts = [:]
+    imgData.getHierarchy().getAnnotationObjects().each { obj ->
+        def cn = classLabelForObject( obj )
+        counts[ cn ] = (counts[ cn ] ?: 0) + 1
+    }
+    return counts
+}
 def projectDirectory = project.getBaseDirectory()
 
 // Folder and file names of where preferences are stored in directory
@@ -938,18 +979,21 @@ def codePreferences = runOnFxThreadAndWait {
     }
     pool.shutdown()
     
-    // If an image is open, use its LIVE hierarchy for that image's class counts so unsaved
-    // objects are reflected — both in the counts and in whether a class appears at all. Cheap,
-    // since the image is already loaded, and safe on the FX thread we're already running on.
-    if (currentEntry != null && currentImageData != null) {
-        def liveCounts = [:]
-        currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-            def cn = classLabelForObject( obj )
-            liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
-        }
-        imageClassCounts[ currentEntry.getImageName() ] = liveCounts
+    // If an image is open in a viewer, use its LIVE hierarchy for that image's class counts so
+    // unsaved objects are reflected — both in the counts and in whether a class appears at all.
+    // Every pane of a split viewer counts, not just the selected one, since the summary.json read
+    // above only knows what was last saved. Cheap, since those images are already loaded, and safe
+    // on the FX thread we're already running on.
+    boolean anyLiveCounts = false
+    project.getImageList().each { entry ->
+        def liveData = liveDataForEntry( entry )
+        if (liveData == null) { return }
+        imageClassCounts[ entry.getImageName() ] = liveClassCounts( liveData )
+        anyLiveCounts = true
+    }
 
-        // Rebuild totals in place so the override is reflected everywhere downstream
+    // Rebuild totals in place so the overrides are reflected everywhere downstream
+    if (anyLiveCounts) {
         totalsByClass.clear()
         imageClassCounts.each { imgName, counts ->
             counts.each { className, count ->
@@ -1148,18 +1192,17 @@ def keepImage = { counts ->
     boolean hasOut = coLocOutputs.any { (counts[ it ] ?: 0) > 0 }
     (has1 && has2) || hasOut
 }
-def keptNonCurrent = filterImagesBySummary( imagesToRun.findAll { it != currentEntry }, keepImage ).toRun as Set
-boolean keepCurrent = false
-if (currentEntry in imagesToRun) {
-    def liveCounts = [:]
-    currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-        def cn = classLabelForObject( obj )
-        liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
-    }
-    keepCurrent = keepImage( liveCounts )
+// Images a viewer holds are judged from their live hierarchy, so unsaved objects count; the rest
+// come from the summary.json snapshot
+def liveKeep = [:]   // entry ID -> keep?
+imagesToRun.each { img ->
+    def liveData = liveDataForEntry( img )
+    if (liveData != null) { liveKeep[ img.getID() ] = keepImage( liveClassCounts( liveData ) ) }
 }
-def skippedImages = imagesToRun.findAll { img -> (img == currentEntry) ? !keepCurrent : !(img in keptNonCurrent) }
-imagesToRun       = imagesToRun.findAll { img -> (img == currentEntry) ?  keepCurrent :  (img in keptNonCurrent) }
+def keptFromSummary = filterImagesBySummary( imagesToRun.findAll { !liveKeep.containsKey( it.getID() ) }, keepImage ).toRun as Set
+def keepThisImage = { img -> liveKeep.containsKey( img.getID() ) ? liveKeep[ img.getID() ] : (img in keptFromSummary) }
+def skippedImages = imagesToRun.findAll { img -> !keepThisImage( img ) }
+imagesToRun       = imagesToRun.findAll { img ->  keepThisImage( img ) }
 
 if (!skippedImages.isEmpty()) {
     def skippedNames = skippedImages.collect { it.getImageName() }
@@ -1188,7 +1231,13 @@ def colocNames = codePreferences.objectClasses1.collectMany { c1 ->
 } as Set
 def isExistingColocClass = { String n -> n != null && colocNames.contains( n ) }
 
-def existingBreakdown = existingObjectsBreakdown( imagesToRun, isExistingColocClass, currentEntry, currentImageData )
+// Images a viewer holds are read from their live hierarchy so unsaved objects are counted
+def liveDataByName = [:]
+imagesToRun.each { img ->
+    def liveData = liveDataForEntry( img )
+    if (liveData != null) { liveDataByName[ img.getImageName() ] = liveData }
+}
+def existingBreakdown = existingObjectsBreakdown( imagesToRun, isExistingColocClass, liveDataByName )
 String existingObjsAction = "remove"   // no pre-existing objects => proceed as before
 if (!existingBreakdown.isEmpty()) {
     existingObjsAction = showExistingObjectsDialog( existingBreakdown, "colocalization" )
@@ -1221,8 +1270,9 @@ for (image in imagesToRun) {
     // Reporting current image
     updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image, imageNum: processed+1] )
     
-    // If working on current image, modifying respective image data
-    def imageData = image == currentEntry ? currentImageData : image.readImageData()
+    // Editing the data a viewer already holds, so that pane stays in step with the run
+    def openViewers = viewersForEntry( image )
+    def imageData = openViewers ? openViewers[ 0 ].getImageData() : image.readImageData()
     def hierarchy = imageData.getHierarchy()
     def annotations = hierarchy.getAnnotationObjects()
     def annosByClass = annotations.groupBy { classLabelForObject( it ) }
@@ -1233,7 +1283,7 @@ for (image in imagesToRun) {
         // Skip images that already contain colocalization objects; process the rest normally.
         boolean hasExistingColoc = annotations.any { isExistingColocClass( it.getPathClass()?.getName() ) }
         if (hasExistingColoc) {
-            if (image != currentEntry) { imageData.close() }
+            if (!openViewers) { imageData.close() }
             processed++
             updateProgressWindow( progressUI, [imagePer: processed / total] )
             continue imageLoop
@@ -1397,20 +1447,17 @@ for (image in imagesToRun) {
     // Saving data
     image.saveImageData( imageData )
     
-    // Ensure current viewer updates its annotation list when working on the current image
-    if (image == currentEntry) {
+    // Ensure every viewer showing this image updates — including split panes that aren't
+    // selected, which otherwise keep drawing the objects they had before the run
+    if (openViewers) {
         runOnFxThreadAndWait {
-            def viewer = getCurrentViewer()
-            if (viewer != null) {
-                // Re-assign the same ImageData to force a UI refresh
-                imageData.getHierarchy().fireHierarchyChangedEvent( this )
-                viewer.setImageData( imageData )
-            }
+            imageData.getHierarchy().fireHierarchyChangedEvent( this )
+            openViewers.each { it.repaintEntireImage() }
         }
     }
     
-    // Closing background imagedata for non-current image
-    if (image != currentEntry) {
+    // Closing background imagedata — data a viewer holds stays open, it isn't ours to close
+    if (!openViewers) {
         imageData.close()
     }
     

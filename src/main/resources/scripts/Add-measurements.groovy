@@ -817,6 +817,46 @@ def addIntensityMeasurementsTiled( server, anno, double downsample, Collection m
 def project = getProject()
 def currentImageData = getCurrentImageData()
 def currentEntry = currentImageData ? project.getEntry( currentImageData ) : null
+
+// Each pane of a split viewer holds its own live ImageData. Editing a background copy read from disk
+// leaves the other panes drawing the objects they had before the run — and lets a later save from one
+// of them write that stale hierarchy back over this run's changes. So any image open in *any* viewer
+// is edited through the instance that viewer holds, not through a copy.
+def viewersByEntryId = [:]   // entry ID -> viewers currently showing that image
+runOnFxThreadAndWait {
+    QuPathGUI.getInstance().getAllViewers().each { viewer ->
+        def viewerData = viewer.getImageData()
+        if (viewerData == null) { return }
+        def viewerEntry = project.getEntry( viewerData )
+        if (viewerEntry == null) { return }
+        viewersByEntryId.get( viewerEntry.getID(), [] ) << viewer
+    }
+}
+
+// Viewers showing an image right now — a pane the user re-points mid-run stops counting
+def viewersForEntry = { entry ->
+    if (entry == null) { return [] }
+    ( viewersByEntryId[ entry.getID() ] ?: [] ).findAll { viewer ->
+        def viewerData = viewer.getImageData()
+        viewerData != null && project.getEntry( viewerData )?.getID() == entry.getID()
+    }
+}
+
+// The live ImageData a viewer holds for this image, or null when no pane is showing it
+def liveDataForEntry = { entry ->
+    def viewers = viewersForEntry( entry )
+    viewers ? viewers[ 0 ].getImageData() : null
+}
+
+// Annotation class counts taken straight from a live hierarchy
+def liveClassCounts = { imgData ->
+    def counts = [:]
+    imgData.getHierarchy().getAnnotationObjects().each { obj ->
+        def cn = classLabelForObject( obj )
+        counts[ cn ] = (counts[ cn ] ?: 0) + 1
+    }
+    return counts
+}
 def projectDirectory = project.getBaseDirectory()
 
 // Folder and file names of where preferences are stored in directory
@@ -858,8 +898,6 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     // MIDDLE PANEL: Object pathclasses
-    def viewer = getCurrentViewer()
-    
     def gson = new Gson()
     def imageClassCounts = [:]  // imageName -> [className -> count]
     def totalsByClass = [:]     // className -> total across all images
@@ -898,18 +936,21 @@ def codePreferences = runOnFxThreadAndWait {
     }
     pool.shutdown()
     
-    // If an image is open, use its LIVE hierarchy for that image's class counts so unsaved
-    // objects are reflected — both in the counts and in whether a class appears at all. Cheap,
-    // since the image is already loaded, and safe on the FX thread we're already running on.
-    if (currentEntry != null && currentImageData != null) {
-        def liveCounts = [:]
-        currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-            def cn = classLabelForObject( obj )
-            liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
-        }
-        imageClassCounts[ currentEntry.getImageName() ] = liveCounts
+    // If an image is open in a viewer, use its LIVE hierarchy for that image's class counts so
+    // unsaved objects are reflected — both in the counts and in whether a class appears at all.
+    // Every pane of a split viewer counts, not just the selected one, since the summary.json read
+    // above only knows what was last saved. Cheap, since those images are already loaded, and safe
+    // on the FX thread we're already running on.
+    boolean anyLiveCounts = false
+    project.getImageList().each { entry ->
+        def liveData = liveDataForEntry( entry )
+        if (liveData == null) { return }
+        imageClassCounts[ entry.getImageName() ] = liveClassCounts( liveData )
+        anyLiveCounts = true
+    }
 
-        // Rebuild totals in place so the override is reflected everywhere downstream
+    // Rebuild totals in place so the overrides are reflected everywhere downstream
+    if (anyLiveCounts) {
         totalsByClass.clear()
         imageClassCounts.each { imgName, counts ->
             counts.each { className, count ->
@@ -1179,18 +1220,17 @@ def imagesToRun = project.getImageList().findAll { it.getImageName() in codePref
 // Non-current images are judged from the lightweight summary.json snapshot (parallel, fails open);
 // the open image is judged from its LIVE hierarchy so unsaved objects count. Both use one predicate.
 def keepImage = { counts -> codePreferences.pathClasses.any { (counts[ it ] ?: 0) > 0 } }
-def keptNonCurrent = filterImagesBySummary( imagesToRun.findAll { it != currentEntry }, keepImage ).toRun as Set
-boolean keepCurrent = false
-if (currentEntry in imagesToRun) {
-    def liveCounts = [:]
-    currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-        def cn = classLabelForObject( obj )
-        liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
-    }
-    keepCurrent = keepImage( liveCounts )
+// Images a viewer holds are judged from their live hierarchy, so unsaved objects count; the rest
+// come from the summary.json snapshot
+def liveKeep = [:]   // entry ID -> keep?
+imagesToRun.each { img ->
+    def liveData = liveDataForEntry( img )
+    if (liveData != null) { liveKeep[ img.getID() ] = keepImage( liveClassCounts( liveData ) ) }
 }
-def skippedImages = imagesToRun.findAll { img -> (img == currentEntry) ? !keepCurrent : !(img in keptNonCurrent) }
-imagesToRun       = imagesToRun.findAll { img -> (img == currentEntry) ?  keepCurrent :  (img in keptNonCurrent) }
+def keptFromSummary = filterImagesBySummary( imagesToRun.findAll { !liveKeep.containsKey( it.getID() ) }, keepImage ).toRun as Set
+def keepThisImage = { img -> liveKeep.containsKey( img.getID() ) ? liveKeep[ img.getID() ] : (img in keptFromSummary) }
+def skippedImages = imagesToRun.findAll { img -> !keepThisImage( img ) }
+imagesToRun       = imagesToRun.findAll { img ->  keepThisImage( img ) }
 
 if (!skippedImages.isEmpty()) {
     def skippedNames = skippedImages.collect { it.getImageName() }
@@ -1277,8 +1317,9 @@ try {
         // Reporting current image
         updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image, imageNum: processed+1] )
         
-        // If working on current image, modifying respective image data
-        def imageData = image == currentEntry ? currentImageData : image.readImageData()
+        // Editing the data a viewer already holds, so that pane stays in step with the run
+        def openViewers = viewersForEntry( image )
+        def imageData = openViewers ? openViewers[ 0 ].getImageData() : image.readImageData()
         
         def server = imageData.getServer()
         def metadata = server.getMetadata()
@@ -1390,20 +1431,17 @@ try {
         // Saving data
         image.saveImageData( imageData )
         
-        // Ensure current viewer updates its annotation list when working on the current image
-        if (image == currentEntry) {
+        // Ensure every viewer showing this image updates — including split panes that aren't
+        // selected, which otherwise keep drawing the objects they had before the run
+        if (openViewers) {
             runOnFxThreadAndWait {
-                def viewer = getCurrentViewer()
-                if (viewer != null) {
-                    // Re-assign the same ImageData to force a UI refresh
-                    imageData.getHierarchy().fireHierarchyChangedEvent( this )
-                    viewer.setImageData( imageData )
-                }
+                imageData.getHierarchy().fireHierarchyChangedEvent( this )
+                openViewers.each { it.repaintEntireImage() }
             }
         }
         
-        // Closing background imagedata for non-current image
-        if (image != currentEntry) {
+        // Closing background imagedata — data a viewer holds stays open, it isn't ours to close
+        if (!openViewers) {
             imageData.close()
         }
         

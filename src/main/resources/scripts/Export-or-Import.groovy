@@ -726,6 +726,21 @@ def currentImageData = getCurrentImageData()
 def currentEntry = currentImageData ? project.getEntry( currentImageData ) : null
 def projectDirectory = project.getBaseDirectory()
 
+// Each pane of a split viewer holds its own live ImageData. Editing a background copy read from disk
+// leaves the other panes drawing the objects they had before the run — and lets a later save from one
+// of them write that stale hierarchy back over this run's changes. So any image open in *any* viewer
+// is edited through the instance that viewer holds, not through a copy.
+def viewersByEntryId = [:]   // entry ID -> viewers currently showing that image
+runOnFxThreadAndWait {
+    QuPathGUI.getInstance().getAllViewers().each { viewer ->
+        def viewerData = viewer.getImageData()
+        if (viewerData == null) { return }
+        def viewerEntry = project.getEntry( viewerData )
+        if (viewerEntry == null) { return }
+        viewersByEntryId.get( viewerEntry.getID(), [] ) << viewer
+    }
+}
+
 // Folder and file names of where preferences are stored in directory
 def scriptPrefsFolderName = "AnnoTools-Data"
 def scriptPrefsFileName   = "Export-Import-Annos_Preferences" + ".json"
@@ -865,18 +880,28 @@ def codePreferences = runOnFxThreadAndWait {
     }
     pool.shutdown()
     
-    // If an image is open, use its LIVE hierarchy for that image's class counts so unsaved
-    // objects are reflected — both in the counts and in whether a class appears at all. Cheap,
-    // since the image is already loaded, and safe on the FX thread we're already running on.
-    if (currentEntry != null && currentImageData != null) {
+    // If an image is open in a viewer, use its LIVE hierarchy for that image's class counts so
+    // unsaved objects are reflected — both in the counts and in whether a class appears at all.
+    // Every pane of a split viewer counts, not just the selected one, since the summary.json read
+    // above only knows what was last saved. Cheap, since those images are already loaded, and safe
+    // on the FX thread we're already running on.
+    boolean anyLiveCounts = false
+    viewersByEntryId.each { entryId, viewers ->
+        def liveData = viewers.collect { it.getImageData() }.find {
+            it != null && project.getEntry( it )?.getID() == entryId
+        }
+        if (liveData == null) { return }
         def liveCounts = [:]
-        currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
+        liveData.getHierarchy().getAnnotationObjects().each { obj ->
             def cn = classLabelForObject( obj )
             liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
         }
-        imageClassCounts[ currentEntry.getImageName() ] = liveCounts
+        imageClassCounts[ project.getEntry( liveData ).getImageName() ] = liveCounts
+        anyLiveCounts = true
+    }
 
-        // Rebuild totals in place so the override is reflected everywhere downstream
+    // Rebuild totals in place so the overrides are reflected everywhere downstream
+    if (anyLiveCounts) {
         totalsByClass.clear()
         imageClassCounts.each { imgName, counts ->
             counts.each { className, count ->
@@ -1368,10 +1393,17 @@ for (image in imagesToRun) {
     def imageData = null
     def hierarchy = null
     boolean dataChanged = false
+    
+    // Viewers showing this image right now — a pane the user re-pointed mid-run no longer counts
+    def openViewers = ( viewersByEntryId[ image.getID() ] ?: [] ).findAll { viewer ->
+        def viewerData = viewer.getImageData()
+        viewerData != null && project.getEntry( viewerData )?.getID() == image.getID()
+    }
+    
     def loadData = {
         if (imageData == null) {
-            // If working on current image, modifying respective image data
-            imageData = image == currentEntry ? currentImageData : image.readImageData()
+            // Editing the data a viewer already holds, so that pane stays in step with the run
+            imageData = openViewers ? openViewers[ 0 ].getImageData() : image.readImageData()
             hierarchy = imageData.getHierarchy()
         }
     }
@@ -1788,21 +1820,18 @@ for (image in imagesToRun) {
             // Saving data
             image.saveImageData( imageData )
             
-            // Ensure current viewer updates its annotation list when working on the current image
-            if (image == currentEntry) {
+            // Ensure every viewer showing this image updates — including split panes that aren't
+            // selected, which otherwise keep drawing the objects they had before the run
+            if (openViewers) {
                 runOnFxThreadAndWait {
-                    def viewer = getCurrentViewer()
-                    if (viewer != null) {
-                        // Re-assign the same ImageData to force a UI refresh
-                        imageData.getHierarchy().fireHierarchyChangedEvent( this )
-                        viewer.setImageData( imageData )
-                    }
+                    imageData.getHierarchy().fireHierarchyChangedEvent( this )
+                    openViewers.each { it.repaintEntireImage() }
                 }
             }
         }
         
-        // Closing background imagedata for non-current image
-        if (image != currentEntry) {
+        // Closing background imagedata — data a viewer holds stays open, it isn't ours to close
+        if (!openViewers) {
             imageData.close()
         }
     }
