@@ -574,8 +574,10 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     }
     
     // Set button actions
+    // Not every entry has one - the class summary toggles do their work in a selectedProperty
+    // listener instead, so they must fall through here rather than blow up on entry.action()
     uiElements.btnMap.each { entry ->
-        if (!entry.btn) { return }
+        if (!entry.btn || !entry.containsKey( "action" )) { return }
         entry.btn.addEventFilter( ActionEvent.ACTION ) { event ->
             if (entry.active) {  
                 entry.action()
@@ -793,10 +795,12 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
     
     // Update class summary buttons if entering free view mode
     if (session.UI_COMMAND == ActionStrings.TOGGLE_FREE_VIEW && session.freeView) {
-        def currentGroupsByState = session.highlightStatesAndColorsMap.collectEntries { [(it.state): it] }
+        // Key by state.toString() to match classLabelSummaryByClassName, which makeClassesSummaryBtn
+        // fills using "String stateName = group.state" - keying by the raw List never matched, so
+        // every button was torn down and rebuilt and the update pass below was skipped entirely
+        def currentGroupsByState = session.highlightStatesAndColorsMap.collectEntries { [(it.state.toString()): it] }
         Set existingStates = uiElements.classLabelSummaryByClassName.keySet() as Set
         Set currentStates  = currentGroupsByState.keySet()
-        boolean structureChanged = (existingStates != currentStates)
         
         // Remove stale buttons
         (existingStates - currentStates).each { state ->
@@ -1170,13 +1174,6 @@ def containsUserKey( annoToCheck, ViewerSessionVars session ) {
     return md.containsKey( session.userKey )
 }
 
-// Function to filter a list of annotations for presence of userKey (uses above function)
-def filterForUserKey( List annosToCheck, boolean shouldHaveKey, ViewerSessionVars session ) {
-    annosToCheck = annosToCheck.findAll { anno ->
-        shouldHaveKey ? containsUserKey( anno, session ) : !containsUserKey( anno, session )
-    }
-}
-
 // Function to adjust x to middle of available space including the alert
 def adjustX( ViewerSessionVars session, double boundsX, double boundsY, double cX ) {
     def viewerBounds = session.view.localToScreen( session.view.getBoundsInLocal() )
@@ -1463,7 +1460,7 @@ def colorAnnosFromMap( ViewerSessionVars session, List mdKeys ) {
         classifierVals.replaceAll { it == null ? "unclassified" : it }
 
         def classMatch = session.highlightStatesAndColorsMap.find { it.state == classifierVals }
-        anno.setColor( classMatch.color )
+        anno.setColor( classMatch?.color ?: ColorTools.makeRGB( 0, 0, 0 ) )
     }
 }
 
@@ -4244,6 +4241,10 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     // Getting annotations to classify/review/check
     def annotations = session.allClassAnnos.clone()
     
+    // Per-object colour/state memories; clear so the previous image's entries can't leak in
+    session.currentAnnoColorsMap.clear()
+    session.annoStateMap.clear()
+    
     // Getting channel specifics for toggling and turning off others ---
     def availableChannels = session.viewer.getImageDisplay().availableChannels()
     session.controllableChannels = availableChannels.findAll { ch ->
@@ -4315,10 +4316,10 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
             def value = anno.getMetadata().get( session.userKey )
             anno.setColor( session.statesAndColors.find { it.state == value }?.color ?: BLACK )
         }
-    // Setting all annotations not to be reviewed to black
+    // Setting all annotations to black; the reviewer branch below recolors the ones being reviewed.
+    // (Can't diff against "annotations" here - it isn't narrowed to the review set until later.)
     } else {
-        def nonNeededAnnos = session.allClassAnnos.clone() - annotations
-        for (anno : nonNeededAnnos) { anno.setColor( BLACK ) }
+        for (anno : session.allClassAnnos) { anno.setColor( BLACK ) }
     }
     Platform.runLater { session.viewer.repaintEntireImage() }
     
@@ -4418,36 +4419,39 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 .collectEntries { det ->
                     [ (det.getMetadata().get( "annoID" )) : det ]
                 }
-                def annosIDsWithDet = annoDetMap.keySet()
-                def dets = annoDetMap.values()
                 def detsToAdd = []
                 def detsToRemove = []
                 
                 // Changing color of already classified annos
                 for (anno : annotations) {
                     def mdValue = anno.getMetadata().get( session.userKey )
-                    def mapValue = session.annoStateMap[ anno ]
                     def id = anno.getID().toString()
                     
-                    if (mdValue)            { anno.setColor( session.statesAndColors.find { it.state == mdValue }?.color ) }
+                    if (mdValue)            { anno.setColor( session.statesAndColors.find { it.state == mdValue }?.color ?: BLACK ) }
                     else if (anno in group) { anno.setColor( session.statesAndColors[0].colorU ) }
                     else                    { anno.setColor( BLACK ) }
                     
                     // If wanted, classifed annos out of view will be filled (using detections)
-                    if (mdValue && (anno !in group) && (id !in annosIDsWithDet)) {
-                        def annoROI = anno.getROI()
-                        def detObj = PathObjects.createDetectionObject( annoROI )
-                        detObj.getMetadata().put( "annoID", id )
-                        detObj.setColor( session.statesAndColors.find { it.state == mdValue }?.color )
-                        detsToAdd << detObj
-                    } else if ((anno in group) && (id in annosIDsWithDet)) {
-                        def detForRemoval = annoDetMap[ id ]
-                        detsToRemove << detForRemoval
+                    def existingDet = annoDetMap[ id ]
+                    if (mdValue && (anno !in group)) {
+                        int detColor = session.statesAndColors.find { it.state == mdValue }?.color ?: BLACK
+                        // Detections are painted from a cached overlay, so a filler whose classification
+                        // changed (e.g. after "Back") is swapped out rather than recoloured in place -
+                        // recolouring alone fires no hierarchy event and leaves the stale colour on screen.
+                        if (!existingDet || existingDet.getColor() != detColor) {
+                            def detObj = PathObjects.createDetectionObject( anno.getROI() )
+                            detObj.getMetadata().put( "annoID", id )
+                            detObj.setColor( detColor )
+                            detsToAdd << detObj
+                            if (existingDet) { detsToRemove << existingDet }
+                        }
+                    } else if ((anno in group) && existingDet) {
+                        detsToRemove << existingDet
                     }
                 }
                 
-                session.hierarchy.insertPathObjects( detsToAdd )
                 session.hierarchy.removeObjects( detsToRemove, true )
+                session.hierarchy.insertPathObjects( detsToAdd )
                 Platform.runLater { session.viewer.repaintEntireImage() }
                 
                 // Calcualating bin coordinates for viewer centering
@@ -4603,7 +4607,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     changeGrid( viewerSettings, true )
                                     
                                     session.freeViewMode = session.freeViewModes[0]
-                                    session.allClassAnnos.each { it.setColor( session.currentAnnoColorsMap[ it ] ) }
+                                    session.allClassAnnos.each { it.setColor( session.currentAnnoColorsMap[ it ] ?: BLACK ) }
                                     
                                     selectObjects( session.prevSelectedAnnos )
                                     
@@ -4643,14 +4647,15 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 session = session
             )
             
-            filterForUserKey( annotations, session.checkingWork ? true : false, session )
-            
-            // Changing color of already classified annos
-            for (anno in annotations) {
+            // Changing color of already classified annos.
+            // Every anno is touched: anything outside the review criteria (or with no reviewer state
+            // yet) goes black, otherwise it keeps the colour it had before the script ran.
+            def reviewableSet = annotations as Set
+            for (anno in session.allClassAnnos) {
                 def value = anno.getMetadata().get( session.userKey )
-                if (value in session.reviewerStates) {
-                    anno.setColor( session.statesAndColors.find { it.state == value }.color )
-                }
+                def color = (anno in reviewableSet) && (value in session.reviewerStates) ?
+                    session.statesAndColors.find { it.state == value }?.color : null
+                anno.setColor( color ?: BLACK )
             }
             Platform.runLater { session.viewer.repaintEntireImage() }
             
@@ -4663,7 +4668,8 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 session.hoverAnnos = session.allClassAnnos
                 
                 // Skipping to annotations that needs review if others alrady have been
-                if (firstLoop && containsUserKey( annotation, session )) continue
+                // (when checking work the already-reviewed annos are exactly the ones we want)
+                if (!session.checkingWork && firstLoop && containsUserKey( annotation, session )) continue
                 
                 Platform.runLater { session.viewer.repaintEntireImage() }
                 
@@ -4775,7 +4781,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     
                                     restoreViewerState( nonFreeViewerState, session )
                                     session.freeViewMode = session.freeViewModes[0]
-                                    session.allClassAnnos.each { it.setColor( session.currentAnnoColorsMap[ it ] ) }                          
+                                    session.allClassAnnos.each { it.setColor( session.currentAnnoColorsMap[ it ] ?: BLACK ) }
                                     selectObjects( session.prevSelectedAnnos )
                                     changeGrid( viewerSettings, true )
                                     
@@ -4800,7 +4806,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                             def md = annotation.getMetadata()
                             String setClass = session.reviewerClassification
                             md.put( session.userKey, setClass )
-                            annotation.setColor( session.statesAndColors.find { it.state == setClass }?.color )
+                            annotation.setColor( session.statesAndColors.find { it.state == setClass }?.color ?: BLACK )
                             break annoLoop
                     }
                     firstLoop = false
