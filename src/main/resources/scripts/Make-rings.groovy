@@ -1470,6 +1470,14 @@ def stopNowFlag   = progressUI.stopNowFlag
 def stopLaterFlag = progressUI.stopLaterFlag
 int processed = 0
 
+// Loading and saving count as steps of their own. With few objects the geometry work is over in
+// moments and these two are most of the iteration — opening the next image's server especially — so
+// leaving them untracked parked the window on the last ring step at 100% until the next image
+// appeared. The count is the same for every image, so it is worked out once here.
+int netSteps = 1 +                                                                              // loading
+               (codePreferences.objectClasses.size() * ((codePreferences.expansionsMicrons.size() * 2) + 1)) +
+               1                                                                                // saving
+
 // Number of vertices calculated when buffering geometries (standard is 8)
 def bufParams = new BufferParameters( codePreferences.simplifyGeometry ? 4 : 8 )
 
@@ -1486,12 +1494,15 @@ for (image in imagesToRun) {
     imageInFlight = image.getImageName()
 
     // Reporting current image
-    updateProgressWindow( progressUI, [imageName: image, imageNum: processed+1] )
+    updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image, imageNum: processed+1,
+                                       stepNum: 1, stepName: "Loading image", stepPer: 0] )
     
     // Getting image-specific information
     // Editing the data a viewer already holds, so that pane stays in step with the run
+    long loadStart = System.nanoTime()
     def openViewers = viewersForEntry( image )
     def imageData = openViewers ? openViewers[ 0 ].getImageData() : image.readImageData()
+    long loadMs = (long)( ( System.nanoTime() - loadStart ) / 1_000_000L )
     def cal = imageData.getServer().getPixelCalibration()
     double pixelSize = cal.getAveragedPixelSizeMicrons()
     
@@ -1510,9 +1521,8 @@ for (image in imagesToRun) {
         }
     }
 
-    int netSteps = (codePreferences.objectClasses.size() * ((codePreferences.expansionsMicrons.size() * 2) + 1))
-    updateProgressWindow( progressUI, [stepMax: netSteps] )
-    int step = 1
+    int step = 2
+    long ringAddMs = 0
     
     def pool = Executors.newFixedThreadPool( Runtime.getRuntime().availableProcessors() )
     progressUI.poolRef.set( pool )
@@ -1634,7 +1644,7 @@ for (image in imagesToRun) {
                 
                 // Reporting current step
                 step ++
-                updateProgressWindow( progressUI, [stepName: "Building ${expClass} inner mask", stepPer: 0] )
+                updateProgressWindow( progressUI, [stepNum: step, stepName: "Building ${expClass} inner mask", stepPer: 0] )
                 
                 def innerGeomsAtLevel = expansionsMapList.collect { it.cleanedAllGeoms[ level ] }
 
@@ -1778,6 +1788,7 @@ for (image in imagesToRun) {
                 }
                 
                 // Serial hierarchy adds
+                long ringAddStart = System.nanoTime()
                 runOnFxThreadAndWait {
                     ringResults.eachWithIndex { ringGeom, idx ->
                         if (ringGeom == null) { return }
@@ -1793,7 +1804,13 @@ for (image in imagesToRun) {
                         ringObj.setLocked( true )
                     }
                 }
+                ringAddMs += (long)( ( System.nanoTime() - ringAddStart ) / 1_000_000L )
             }
+            
+            // The next central class starts on a fresh step number. Without this the class after the
+            // first reused the previous class's last number, and a multi-class run stopped counting
+            // short of the total it was showing.
+            step++
         }
     } finally {
         pool.shutdown()
@@ -1803,6 +1820,8 @@ for (image in imagesToRun) {
     
     
     // Saving data
+    updateProgressWindow( progressUI, [stepNum: netSteps, stepName: "Saving image", stepPer: 0] )
+    long saveStart = System.nanoTime()
     image.saveImageData( imageData )
     
     // Ensure every viewer showing this image updates — including split panes that aren't
@@ -1818,6 +1837,13 @@ for (image in imagesToRun) {
     if (!openViewers) {
         imageData.close()
     }
+    
+    long saveMs = (long)( ( System.nanoTime() - saveStart ) / 1_000_000L )
+    updateProgressWindow( progressUI, [stepName: "Saving image", stepPer: 100] )
+    
+    // Every phase, so a run that appears to hang can be pinned on one of them and on an image.
+    logger.info( "[AnnoTools] Make rings: '${imageInFlight}' load ${loadMs} ms, " +
+                 "ring adds ${ringAddMs} ms, save ${saveMs} ms" )
     
     
     // - Reporting progress -

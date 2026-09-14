@@ -627,8 +627,12 @@ def classLabelForObject( obj ) {
 // histogram median (exact for integer pixel types up to 16-bit, sub-quantization accuracy for
 // floating-point types). `downsample` is 1.0 for full resolution; the caller passes a larger value only
 // as a speed fallback for enormous masks.
+// `onTileDone` (optional) is called after every tile with that tile's share of this annotation's work,
+// as a fraction of 1.0 across both passes. Without it a single large mask reports nothing until it is
+// completely finished, which is what made the progress number look stuck for a minute at a time.
 def addIntensityMeasurementsTiled( server, anno, double downsample, Collection measurements,
-                                   List channelNames, int tileSize, AtomicBoolean stopFlag ) {
+                                   List channelNames, int tileSize, AtomicBoolean stopFlag,
+                                   Closure onTileDone = null ) {
     def roi = anno.getROI()
     if (roi == null) { return }
 
@@ -690,13 +694,23 @@ def addIntensityMeasurementsTiled( server, anno, double downsample, Collection m
     int[]    maskBuf = new int[ cap ]
     double[] valBuf  = new double[ cap ]
 
+    // Share of this annotation's work carried by one tile. The float-median case walks the tile grid
+    // twice, so each tile there is worth half as much.
+    long nTilesX = (long) Math.ceil( Math.max( 0, x1 - x0 ) / (double) tileSize )
+    long nTilesY = (long) Math.ceil( Math.max( 0, y1 - y0 ) / (double) tileSize )
+    long nTiles  = Math.max( 1L, nTilesX * nTilesY )
+    double tileWeight = 1.0d / ( nTiles * ( (wantMedian && !intHist) ? 2.0d : 1.0d ) )
+
     // --- Pass 1: mean / std / min / max (+ integer-histogram median in the same pass) ---
     for (int ty = y0; ty < y1; ty += tileSize) {
         for (int tx = x0; tx < x1; tx += tileSize) {
             if (stopFlag?.get()) { return }
             int tw = Math.min( tileSize, x1 - tx )
             int th = Math.min( tileSize, y1 - ty )
-            if (!maskShape.intersects( (double) tx, (double) ty, (double) tw, (double) th )) { continue }
+            if (!maskShape.intersects( (double) tx, (double) ty, (double) tw, (double) th )) {
+                onTileDone?.call( tileWeight )
+                continue
+            }
 
             def request = RegionRequest.createInstance( path, downsample, tx, ty, tw, th, z, t )
             def img = server.readRegion( request )
@@ -735,6 +749,7 @@ def addIntensityMeasurementsTiled( server, anno, double downsample, Collection m
                 minV[ c ]  = mn
                 maxV[ c ]  = mx
             }
+            onTileDone?.call( tileWeight )
         }
     }
 
@@ -754,7 +769,10 @@ def addIntensityMeasurementsTiled( server, anno, double downsample, Collection m
                 if (stopFlag?.get()) { return }
                 int tw = Math.min( tileSize, x1 - tx )
                 int th = Math.min( tileSize, y1 - ty )
-                if (!maskShape.intersects( (double) tx, (double) ty, (double) tw, (double) th )) { continue }
+                if (!maskShape.intersects( (double) tx, (double) ty, (double) tw, (double) th )) {
+                    onTileDone?.call( tileWeight )
+                    continue
+                }
 
                 def request = RegionRequest.createInstance( path, downsample, tx, ty, tw, th, z, t )
                 def img = server.readRegion( request )
@@ -776,6 +794,7 @@ def addIntensityMeasurementsTiled( server, anno, double downsample, Collection m
                         h[ bin ]++
                     }
                 }
+                onTileDone?.call( tileWeight )
             }
         }
     }
@@ -1257,8 +1276,14 @@ def progressUI = createProgressWindow( "Processing", total, imagesToRun.collect 
 def stopNowFlag   = progressUI.stopNowFlag
 def stopLaterFlag = progressUI.stopLaterFlag
 int processed = 0
-int netSteps = (codePreferences.addIntensityMeasurements ? 1 : 0) +
-               (codePreferences.addMorphologyMeasurements ? 1 : 0)
+// Loading and saving count as steps of their own. On a big multi-channel image they are the slowest
+// part of the iteration — opening the server and deserializing the hierarchy, then writing the now
+// much larger .qpdata back — and leaving them untracked left the window parked on the last
+// measurement step at 100% for up to a minute with nothing to explain it.
+int netSteps = 1 +                                                     // loading
+               (codePreferences.addIntensityMeasurements ? 1 : 0) +
+               (codePreferences.addMorphologyMeasurements ? 1 : 0) +
+               1                                                       // saving
 
 // Fixed, machine-independent thresholds for the intensity step (hoisted so both the heap-aware
 // concurrency sizing below and the per-image dispatch can see them). Keeping these constant keeps the
@@ -1315,11 +1340,14 @@ try {
         imageInFlight = image.getImageName()
 
         // Reporting current image
-        updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image, imageNum: processed+1] )
+        updateProgressWindow( progressUI, [stepMax: netSteps, imageName: image, imageNum: processed+1,
+                                           stepNum: 1, stepName: "Loading image", stepPer: 0] )
         
         // Editing the data a viewer already holds, so that pane stays in step with the run
+        long loadStart = System.nanoTime()
         def openViewers = viewersForEntry( image )
         def imageData = openViewers ? openViewers[ 0 ].getImageData() : image.readImageData()
+        long loadMs = (long)( ( System.nanoTime() - loadStart ) / 1_000_000L )
         
         def server = imageData.getServer()
         def metadata = server.getMetadata()
@@ -1330,11 +1358,14 @@ try {
             classLabelForObject( it ) in codePreferences.pathClasses
         }
         
-        int step = 1
+        int step = 2
+        long intensityMs = 0
+        long morphologyMs = 0
         
         if (codePreferences.addIntensityMeasurements) {
             
-            updateProgressWindow( progressUI, [stepNum: step, stepName: "Adding intensity measurements"] )
+            updateProgressWindow( progressUI, [stepNum: step, stepName: "Adding intensity measurements", stepPer: 0] )
+            long intensityStart = System.nanoTime()
             
             // Create server with only the desired channels to reduce processing time (otherwise will do all channels)
             def modifiedChannelServer = new TransformedServerBuilder( server )
@@ -1355,9 +1386,32 @@ try {
             //    same statistics without holding the whole region — or every pixel value, as the native
             //    path does — in memory. This is what fixes the Java-heap-space crash. If a mask is so
             //    enormous that even tiled full-res would be too slow, it coarsens the read (downsample).
-            def doneCount = new AtomicInteger( 0 )
-            int numAnnos = annotations.size()
-            int lastPct = -1
+            //
+            // Progress is weighted by WORK, not by object count. Counting finished annotations meant
+            // one big tiled mask held the number still for as long as it took to measure — with the
+            // large objects usually dispatched first, that read as a minute-long freeze right after
+            // the image name changed. Bounding-box samples is the same quantity the native/tiled
+            // choice below is made on, so it is already a fair proxy for cost.
+            def sampleLoadOf = { anno ->
+                def r = anno.getROI()
+                double a = r ? (r.getBoundsWidth() * r.getBoundsHeight()) : 0d
+                Math.max( 1L, (long) a * nSelectedChannels )
+            }
+            long totalLoad = Math.max( 1L, (long) annotations.sum( 0L ) { sampleLoadOf( it ) } )
+            def doneLoad = new AtomicLong( 0 )
+            def lastPct  = new AtomicInteger( -1 )
+
+            // Only posts to the FX thread when the whole-number percentage actually moves, so a mask
+            // with thousands of tiles still costs at most 100 updates.
+            def reportIntensity = { long units ->
+                if (units <= 0) { return }
+                long d = doneLoad.addAndGet( units )
+                int pDone = (int) Math.min( 100L, (long)( d * 100L / totalLoad ) )
+                int prev = lastPct.get()
+                if (pDone > prev && lastPct.compareAndSet( prev, pDone )) {
+                    updateProgressWindow( progressUI, [stepPer: pDone] )
+                }
+            }
 
             // Parallel processing the measurements
             def futures = annotations.collect { anno ->
@@ -1366,7 +1420,7 @@ try {
                     pool.submit({
                         def roi = anno.getROI()
                         double bboxArea = roi ? (roi.getBoundsWidth() * roi.getBoundsHeight()) : 0d
-                        long sampleLoad = (long) bboxArea * nSelectedChannels
+                        long sampleLoad = sampleLoadOf( anno )
                         if (sampleLoad <= nativeSampleBudget) {
                             // Small enough to measure whole, at full resolution, the native way
                             ObjectMeasurements.addIntensityMeasurements(
@@ -1376,10 +1430,15 @@ try {
                                 codePreferences.intensityMeasurements,
                                 []
                             )
+                            reportIntensity( sampleLoad )
                         } else {
                             // Too big to hold in memory — tile it. Full res unless it's so large that
                             // even tiling would be too slow, in which case coarsen the read just enough.
                             double tiledDownsample = Math.max( 1.0d, Math.sqrt( bboxArea / tiledFullResBudget ) )
+                            // Tile fractions are rounded down to whole units, so track what was
+                            // actually reported and top up at the end — otherwise the step could
+                            // never quite reach 100%.
+                            def reportedHere = new AtomicLong( 0 )
                             addIntensityMeasurementsTiled(
                                 modifiedChannelServer,
                                 anno,
@@ -1387,13 +1446,14 @@ try {
                                 codePreferences.intensityMeasurements,
                                 channelNames,
                                 tileSize,
-                                stopNowFlag
+                                stopNowFlag,
+                                { double frac ->
+                                    long units = (long)( sampleLoad * frac )
+                                    reportedHere.addAndGet( units )
+                                    reportIntensity( units )
+                                }
                             )
-                        }
-                        int pDone = ( doneCount.incrementAndGet() / numAnnos * 100 ) as int
-                        if (pDone != lastPct) {
-                            updateProgressWindow( progressUI, [stepPer: pDone] )
-                            lastPct = pDone
+                            reportIntensity( sampleLoad - reportedHere.get() )
                         }
                     } as Callable)
                 } catch (RejectedExecutionException ignored) {
@@ -1413,6 +1473,7 @@ try {
                 if (!stopNowFlag.get()) { throw e }
             }
             
+            intensityMs = (long)( ( System.nanoTime() - intensityStart ) / 1_000_000L )
             step++
         }
         
@@ -1421,14 +1482,20 @@ try {
             
             updateProgressWindow( progressUI, [stepNum: step, stepName: "Adding morphology measurements", stepPer: 0] )
             
+            long morphologyStart = System.nanoTime()
             def pixelCalibration = server.getPixelCalibration()
             ObjectMeasurements.addShapeMeasurements( annotations, pixelCalibration, codePreferences.morphologyMeasurements )
+            morphologyMs = (long)( ( System.nanoTime() - morphologyStart ) / 1_000_000L )
             
             updateProgressWindow( progressUI, [stepName: "Adding morphology measurements", stepPer: 100] )
+            
+            step++
         }
         
         
         // Saving data
+        updateProgressWindow( progressUI, [stepNum: step, stepName: "Saving image", stepPer: 0] )
+        long saveStart = System.nanoTime()
         image.saveImageData( imageData )
         
         // Ensure every viewer showing this image updates — including split panes that aren't
@@ -1444,6 +1511,13 @@ try {
         if (!openViewers) {
             imageData.close()
         }
+        
+        long saveMs = (long)( ( System.nanoTime() - saveStart ) / 1_000_000L )
+        updateProgressWindow( progressUI, [stepName: "Saving image", stepPer: 100] )
+        
+        // Every step, so a run that appears to hang can be pinned on a phase and an image.
+        logger.info( "[AnnoTools] Add measurements: '${imageInFlight}' load ${loadMs} ms, " +
+                     "intensity ${intensityMs} ms, morphology ${morphologyMs} ms, save ${saveMs} ms" )
         
         
         // - Reporting progress -
