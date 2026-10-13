@@ -1315,7 +1315,10 @@ for (image in imagesToRun) {
                 def oldObjects = annotations.findAll {
                     it.getPathClass()?.getName() == newClass
                 }
-                hierarchy.removeObjects( oldObjects, false )
+                // removeObjects fires a hierarchy event (and drops removed objects from the selection)
+                // that QuPath's panes react to, so on data a viewer holds it must run on the FX thread
+                if (openViewers) { runOnFxThreadAndWait { hierarchy.removeObjects( oldObjects, false ) } }
+                else             { hierarchy.removeObjects( oldObjects, false ) }
             }
             
             //Setting the color of the new class

@@ -966,7 +966,9 @@ imagesToRun.findAll { !viewersForEntry( it ).isEmpty() }.each { image ->
         def objectsToRemove = hierarchy.getAnnotationObjects().findAll {
             classLabelForObject( it ) in codePreferences.objectClasses
         }
-        hierarchy.removeObjects( objectsToRemove, false )
+        // removeObjects fires a hierarchy event (and drops removed objects from the selection)
+        // that QuPath's panes react to, so on live data it must run on the FX thread
+        runOnFxThreadAndWait { hierarchy.removeObjects( objectsToRemove, false ) }
         image.saveImageData( liveData )
         runOnFxThreadAndWait {
             liveData.getHierarchy().fireHierarchyChangedEvent( this )

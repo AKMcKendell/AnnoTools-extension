@@ -1556,7 +1556,10 @@ for (image in imagesToRun) {
                     def pathClassName = it.getPathClass()?.getName()
                     pathClassName && ringNamePattern.matcher( pathClassName ).matches() && !(pathClassName in centralClasses)
                 }
-                hierarchy.removeObjects( objectsToRemove, false )
+                // removeObjects fires a hierarchy event (and drops removed objects from the selection)
+                // that QuPath's panes react to, so on data a viewer holds it must run on the FX thread
+                if (openViewers) { runOnFxThreadAndWait { hierarchy.removeObjects( objectsToRemove, false ) } }
+                else             { hierarchy.removeObjects( objectsToRemove, false ) }
             }
             
             // Making sure new class(es) are in project classes.

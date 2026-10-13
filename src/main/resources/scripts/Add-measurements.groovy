@@ -606,6 +606,18 @@ def naturalCompare( String s1, String s2 ) {
 }
 
 
+// Function: The base channel name, with any "(C1)"-style index suffix stripped. Channel names are
+// stored per image, and some images carry that suffix while others don't ("DAPI (C1)" vs "DAPI"), so
+// the raw names never intersect across the project and those channels went missing from the dialog.
+// Every cross-image comparison of channel names goes through this. (Same helper as Manual-classification.)
+def baseChannelName( name ) {
+    // Untyped parameter and an internal coercion: a typed String parameter blows up with
+    // "argument type mismatch" when a closure passes it null (e.g. a channel with no name).
+    String chName = name as String
+    chName?.replaceAll( '\\s*\\(C\\d+\\)\\s*$', '' )?.trim() ?: chName
+}
+
+
 // Function: The class label used to identify an object by class. Mirrors QuPath's project
 // summary (DefaultProject.HierarchySummary.pathClassToString), which labels null-class
 // (unclassified) objects "Unclassified". That's the label the class list offers, so null-class
@@ -1091,15 +1103,18 @@ def codePreferences = runOnFxThreadAndWait {
         if (Files.exists( summaryFile )) {
             def raw = new String( Files.readAllBytes( summaryFile ) )
             def server = serverGson.fromJson( raw, Object )
-            def channels = server?.metadata?.channels?.collect { it.name } ?: []
+            // Compared as base names, so an image storing "DAPI (C1)" still matches one storing "DAPI"
+            def channels = server?.metadata?.channels?.collect { baseChannelName( it.name as String ) } ?: []
             commonChannels = commonChannels == null ? channels : commonChannels.intersect( channels )
         }
     }
     commonChannels = commonChannels ?: []
     List channelsMap = commonChannels.collect { [name: it] }
     def intensityChannelsBox = makeCheckboxBox( "Channels", null, channelsMap, 180, 250 )
-    intensityChannelsBox.header.getChildren().addAll( intensityChannelsBox.title, intensityChannelsBox.spacer, intensityChannelsBox.clear ) 
-    intensityChannelsBox.CBs.each { it.setSelected( it.getText() in prePrefsMap.intensityChannels ) }
+    intensityChannelsBox.header.getChildren().addAll( intensityChannelsBox.selectAll )
+    // Base names on both sides, so selections saved before this (e.g. "DAPI (C1)") still restore
+    def prePrefsChannels = ( prePrefsMap.intensityChannels ?: [] ).collect { baseChannelName( it as String ) }
+    intensityChannelsBox.CBs.each { it.setSelected( it.getText() in prePrefsChannels ) }
     
     List intensityMeasurementsMap = ObjectMeasurements.Measurements.values().collect { [name: it.toString(), data: it] }
     def intensityMeasurementsBox = makeCheckboxBox( "Measurements",  "intensity measurements", intensityMeasurementsMap, 180, 200 )
@@ -1362,18 +1377,56 @@ try {
         long intensityMs = 0
         long morphologyMs = 0
         
-        if (codePreferences.addIntensityMeasurements) {
+        // The dialog (and the saved preferences) hold BASE channel names, so map each selected one back
+        // to this image's actual channel name before extracting — extractChannels matches names exactly,
+        // and would not find "DAPI" in an image whose channel is stored as "DAPI (C1)".
+        def channelNameByBase = [:]
+        channels.each { ch -> channelNameByBase.putIfAbsent( baseChannelName( ch.getName() ), ch.getName() ) }
+        List imageIntensityChannels = ( codePreferences.intensityChannels ?: [] )
+            .collect { channelNameByBase[ baseChannelName( it as String ) ] }
+            .findAll { it != null }
+        
+        // An image that has none of the selected channels is reported and skipped, rather than being
+        // let through to fail the whole run inside extractChannels.
+        boolean addIntensityHere = codePreferences.addIntensityMeasurements
+        if (addIntensityHere && imageIntensityChannels.isEmpty()) {
+            logger.warn( "[AnnoTools] Add measurements: '${imageInFlight}' has none of the selected channels " +
+                         "(${codePreferences.intensityChannels.join( ', ' )}); skipping intensity measurements" )
+            addIntensityHere = false
+            step++
+        }
+        
+        if (addIntensityHere) {
             
             updateProgressWindow( progressUI, [stepNum: step, stepName: "Adding intensity measurements", stepPer: 0] )
             long intensityStart = System.nanoTime()
             
             // Create server with only the desired channels to reduce processing time (otherwise will do all channels)
             def modifiedChannelServer = new TransformedServerBuilder( server )
-                .extractChannels( *codePreferences.intensityChannels )
+                .extractChannels( *imageIntensityChannels )
                 .build()
 
+            // Unify the measurement column names across the project. QuPath names its columns from the
+            // server's own channel metadata ("<channel>: Mean", ...), so an image storing "DAPI (C1)"
+            // would write "DAPI (C1): Mean" while its neighbour writes "DAPI: Mean" — the same stain
+            // landing in two different columns once the project is exported. Renaming the EXTRACTED
+            // server's channels to the base names (the ones the dialog offered) makes every image write
+            // the same column. Only this per-image wrapper is renamed; the project's own server keeps
+            // its real channel names. Colours are carried over, and setMetadata only requires matching
+            // pixel type and czt dimensions, which a rename leaves untouched.
+            def extractedMetadata = modifiedChannelServer.getMetadata()
+            def baseNamedChannels = extractedMetadata.getChannels().collect { ch ->
+                ImageChannel.getInstance( baseChannelName( ch.getName() ), ch.getColor() )
+            }
+            if (baseNamedChannels != extractedMetadata.getChannels()) {
+                modifiedChannelServer.setMetadata(
+                    new ImageServerMetadata.Builder( extractedMetadata ).channels( baseNamedChannels ).build()
+                )
+            }
+
             // Channel names in the extracted server's band order — used to build measurement column
-            // names ("<channel>: Mean", ...) that exactly match QuPath's native output.
+            // names ("<channel>: Mean", ...) that exactly match QuPath's native output. Read AFTER the
+            // rename above, so the tiled path writes the same unified columns as the native one.
             List channelNames = modifiedChannelServer.getMetadata().getChannels().collect { it.getName() }
             int nSelectedChannels = Math.max( 1, channelNames.size() )
 
@@ -1568,6 +1621,8 @@ import qupath.lib.analysis.features.ObjectMeasurements
 import qupath.lib.analysis.features.ObjectMeasurements.ShapeFeatures
 
 import qupath.lib.images.servers.TransformedServerBuilder
+import qupath.lib.images.servers.ImageChannel
+import qupath.lib.images.servers.ImageServerMetadata
 import qupath.lib.regions.RegionRequest
 import qupath.lib.awt.common.BufferedImageTools
 import qupath.lib.roi.GeometryTools

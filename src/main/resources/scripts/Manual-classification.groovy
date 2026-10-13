@@ -214,8 +214,11 @@ def runOnFxThreadAndWait( Closure fxCode ) {
 }
 
 // Function to get base channel name with no numbers (e.g. "(C1)")
-def baseChannelName(String name) {
-    name?.replaceAll('\\s*\\(C\\d+\\)\\s*$', '')?.trim() ?: name
+def baseChannelName( name ) {
+    // Untyped parameter and an internal coercion: a typed String parameter blows up with
+    // "argument type mismatch" when a closure passes it null (e.g. a channel with no name).
+    String chName = name as String
+    chName?.replaceAll( '\\s*\\(C\\d+\\)\\s*$', '' )?.trim() ?: chName
 }
 
 // Function to set or change a tooltip hint for one or multiple objects

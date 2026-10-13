@@ -1783,7 +1783,10 @@ for (image in imagesToRun) {
                 } 
                 
                 if (removeObjs) {
-                    hierarchy.removeObjects( existingObjsSameClasses, false )
+                    // removeObjects fires a hierarchy event (and drops removed objects from the selection)
+                    // that QuPath's panes react to, so on data a viewer holds it must run on the FX thread
+                    if (openViewers) { runOnFxThreadAndWait { hierarchy.removeObjects( existingObjsSameClasses, false ) } }
+                    else             { hierarchy.removeObjects( existingObjsSameClasses, false ) }
                     workingObjects.removeAll( existingObjsSameClasses )
                     dataChanged = true
                 }
