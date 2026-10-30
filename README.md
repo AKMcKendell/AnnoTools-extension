@@ -91,30 +91,28 @@ It works through the project's images that have annotations of the chosen class,
 - **Annotation class**: the annotations to classify.
 - **Classifying name**: what's being judged, such as `CAA` (cerebral amyloid angiopathy, Aβ in blood vessels). Each call is saved under a metadata key built from the mode, the person and this name, such as `AT-manual_classifier_User1_CAA`.
 - **Grid size (µm)**: classifier mode works through each image one grid square at a time.
-- **Channels**: up to five channels to switch on and off while classifying.
+- **Channels**: up to five channels to control that will help while classifying.
 - **Classes/Colors**: two to five classes, each with a color (`false`, `true` and `maybe` by default, or type your own). Annotations start in the first class, shown in a separate "unconfirmed" color until you save them. This is also where you choose the two or three classes a reviewer can give.
 - **Reviewer annos**: which annotations a reviewer sees, out of those every classifier has finished. You can pick ones the classifiers disagree on, ones any of them put in a given class, or ones all of them did. By default it's disagreements, plus anything anyone marked `maybe`.
 - The setup can be exported to a `.json` file and imported elsewhere, so everyone on a study uses the same settings. This can be paired with [Export or Import](#export-or-import) to share the annotations with the added user classifications.  
 
 **Controls** (press **I** at any time to show or hide them on screen)
 
-| Key or mouse | Action |
-| --- | --- |
-| *Classifier mode* | |
-| Left click an annotation | Change its class (cycles through them) |
-| Right click an annotation | Zoom in on it, or back out |
-| **N** or mouse forward button | Save this grid square and go to the next |
-| **B** or mouse back button | Go back to the previous grid square |
-| **R** | Clear your classes in this grid square |
-| *Reviewer mode* | |
-| **6**, **7**, **8** | Give the annotation that class and go to the next |
-| **B** or mouse back button | Go back to the previous annotation |
-| *Both modes* | |
-| **1**–**5** | Switch a channel on or off |
-| Scroll | Change the brightness of the channel marked "scroll" |
-| **A** or middle click | Show or hide annotations |
-| Hold **Shift** | Enter or leave free view (below) |
-| **C** or **Esc** | Cancel |
+| Mode | Input | Action |
+| --- | --- | --- |
+| *Classifier* | Left click an annotation | Change its class (cycles through them) |
+| *Classifier* | Right click an annotation | Zoom in on it, or back out |
+| *Classifier* | **N** or mouse forward button | Save this grid square and go to the next |
+| *Classifier* | **R** | Clear your classes in this grid square |
+| | | |
+| *Reviewer* | **6**, **7**, **8** | Assign a class and go to the next annotation |
+| | | |
+| *Both* | **1**–**5** | Toggle a channel |
+| *Both* | Scroll | Change the brightness of the channel marked "scroll" |
+| *Both* | **A** or middle click | Show or hide annotations |
+| *Both* | Hold **Shift** | Enter or leave free view (below) |
+| *Both* | **B** or mouse back button | Go back to the previous group/annotation |
+| *Both* | **C** or **Esc** | Cancel |
 
 Free view lets you look around the image, which is otherwise constrained to the group being classified: drag to pan, right click an annotation to zoom in on it, press **G** to show or hide the grid, and tap **Shift** to switch scrolling between zoom and brightness. The summary buttons show how many annotations are in each class across the image; click one to highlight those annotations.
 
