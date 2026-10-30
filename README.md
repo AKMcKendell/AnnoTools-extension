@@ -8,7 +8,7 @@ Requires QuPath 0.7.
 
 | Tool | What it does |
 | --- | --- |
-| [Export or Import](#export-or-import) | Moves annotations in and out of GeoJSON files, keeping their hierarchy |
+| [Export or Import](#export-or-import) | Moves annotations in and out of project, keeping their hierarchy/data |
 | [Make rings](#make-rings) | Builds concentric rings around annotations at distances you set |
 | [Find colocalization](#find-colocalization) | Makes new annotations where annotations of two classes overlap |
 | [Manual classification](#manual-classification) | Lets people classify annotations by eye, then review where they disagree |
@@ -37,7 +37,7 @@ AnnoTools works on annotations. Detections are left alone, except that Remove an
 
 These apply to every tool except Manual classification, which works differently (see [its section](#manual-classification)).
 
-- **Choosing images and classes.** Tick them in the lists. Click a box, then shift-click another, and every box between them is set to match the one you clicked first. The box at the top of a list selects or clears all of it, and **Current Image** picks the image open in the viewer. Each class shows how many annotations it has in the selected images and in the whole project, such as `Tumor [12 / 40]`. Annotations without a class are listed as `Unclassified`.
+- **Choosing images and classes.** Tick them in the lists. Click a box, then shift-click another, and every box between them is set to match the one you clicked first. The box at the top of a list selects or clears all of it, and **Current Image** picks the image open in the viewer. Each class shows how many annotations it has in the selected images and in the whole project, such as `Vessel [12 / 40]`. Annotations without a class are listed as `Unclassified`.
 - **Spotting problems before you run.** A selected image the tool would skip, such as one with no annotations of the chosen classes, is outlined in red; hover over it to see why. If the run button is greyed out, hover over it to see what's missing, and the lists holding it up are outlined in red.
 - **Remembered choices.** Each tool remembers your last choices for each project, in an `AnnoTools-Data` folder inside the project folder.
 - **Open images.** Tools save each image they change. If an image is open in a viewer, including in a split view, the tool works on what's on screen and the viewer shows the result. Any unsaved edits you'd made to that image are saved along with the tool's changes.
@@ -60,13 +60,13 @@ Moves annotations between images or projects using GeoJSON files in a folder you
 
 ### Make rings
 
-Builds concentric rings around each annotation of the chosen classes, at up to five whole-number distances in µm, such as `6,16,31`.
+Builds concentric rings around each annotation of the chosen classes, at up to five distinct whole-number distances in µm, such as `6,16,31`.
 
-- Each ring is the band between its distance and the one before it; the first ring starts at the annotation's edge. Rings are named after the class and their outer distance: `Tumor_6`, `Tumor_16`, `Tumor_31`.
-- Rings never overlap the annotations they're built around, or any closer ring, including those around neighbouring annotations. Rings of neighbouring annotations at the same distance can overlap each other.
-- **Nest new rings?** puts each ring under its central annotation (the default), under the outermost object that annotation sits in, or not nested at all.
+- Each ring is the band between its distance and the one before it; the first ring starts at the annotation's edge. Rings are named after the class of the central object (`Vessel`) and their outer distance from the central object: `Vessel_6`, `Vessel_16`, `Vessel_31`.
+- Rings never overlap the annotations they're built around, or any closer ring, including those around neighboring annotations. Rings of neighboring annotations at the same distance can overlap each other.
+- **Nest new rings?** puts each ring under its central annotation (the default), under the top object within the central object's hierarchy, or not nested at all.
 - **Only expand outward** (on by default) fills any holes in the annotation first, so rings don't grow into them.
-- **Constrain to parent** (on by default) trims rings to the object the annotation sits in.
+- **Constrain to parent** (on by default) trims rings so they do not extend beyond the parent of the central object.
 - **Simplify geometry** (off by default) simplifies very detailed shapes before expanding them. It's faster, but the rings are less exact. The slider sets how detailed a shape can be (2,000 to 10,000 vertices) before it's simplified.
 - The new rings, and the annotations they're built around, are locked.
 
@@ -74,28 +74,27 @@ Builds concentric rings around each annotation of the chosen classes, at up to f
 
 Makes a new annotation wherever an annotation from **Classes 1** overlaps one from **Classes 2**.
 
-- Every pairing of the two lists is made. For example, `Tumor` in Classes 1 with `Stroma` and `Necrosis` in Classes 2 gives new `Tumor-Stroma` and `Tumor-Necrosis` annotations.
-- Each new class gets a colour halfway between its two source classes, and the new annotations are locked.
-- **Nest new objects?** puts each new annotation under its Classes 1 annotation (the default), under the outermost object that annotation sits in, or not nested at all.
+- Every pairing of the two lists is made. For example, `Vessel` in **Classes 1** with `Astrocyte` and `Aβ` (Amyloid-β) in **Classes 2** gives new `Vessel-Astrocyte` and `Vessel-Aβ` annotations.
+- **Nest new objects?** puts each new annotation under its **Classes 1** annotation (the default), under the outermost object that annotation sits in, or not nested at all.
 - Selected images that don't have both class groups are skipped.
 
 ### Manual classification
 
-Lets one or more people classify annotations by eye, then lets a reviewer settle the ones they disagree on. Each person's calls are saved separately in the annotations' metadata, so classifiers work independently and never overwrite each other.
+Lets one or more users classify annotations by eye, then lets a reviewer settle the ones they disagree on. Each person's calls are saved separately in the annotations' metadata, so classifiers work independently and never overwrite each other.
 
-It works through the project's images that have annotations of the chosen class, in random order, starting with the open image if it still needs doing. Images you've finished are skipped, so you can stop and pick up later; **Check work** goes back through the finished ones instead, in project order. Before it starts, it lists any images it can't use, such as ones with no annotations of that class, and lets you carry on with the rest. At the end of each image it asks whether to save and move on.
+It works through the project's images that have annotations of the chosen class, in random order, starting with the open image if it still needs completion. Images you've finished are skipped, so you can stop and pick up later; **Check work** goes back through the finished ones instead, in project order. Before it starts, it lists any images it can't use, such as ones with no annotations of that class, and lets you carry on with the rest. At the end of each image it asks whether to save and move on or review/change the classifications you made.
 
 **Setting up**
 
 - **Classifier Mode** or **Reviewer Mode**.
-- **Classifier** or **Reviewer**: choose your name from the list. Add a new name with **+** (letters and numbers, up to 15 characters), or use the search button to fill the list with names already used in the project.
+- **Classifier** or **Reviewer**: choose your name from the list. Add a new name with **+** (letters and numbers, up to 15 characters), or use the search button to fill the list with names already used among the existing objects in the project.
 - **Annotation class**: the annotations to classify.
-- **Classifying name**: what's being judged, such as `CAA`. Each call is saved under a metadata key built from the mode, the person and this name, such as `AT-manual_classifier_Sam_CAA`.
+- **Classifying name**: what's being judged, such as `CAA` (cerebral amyloid angiopathy, Aβ in blood vessels). Each call is saved under a metadata key built from the mode, the person and this name, such as `AT-manual_classifier_User1_CAA`.
 - **Grid size (µm)**: classifier mode works through each image one grid square at a time.
 - **Channels**: up to five channels to switch on and off while classifying.
-- **Classes/Colors**: two to five classes, each with a colour (`false`, `true` and `maybe` by default, or type your own). Annotations start in the first class, shown in a separate "unconfirmed" colour until you save them. This is also where you choose the two or three classes a reviewer can give.
+- **Classes/Colors**: two to five classes, each with a color (`false`, `true` and `maybe` by default, or type your own). Annotations start in the first class, shown in a separate "unconfirmed" color until you save them. This is also where you choose the two or three classes a reviewer can give.
 - **Reviewer annos**: which annotations a reviewer sees, out of those every classifier has finished. You can pick ones the classifiers disagree on, ones any of them put in a given class, or ones all of them did. By default it's disagreements, plus anything anyone marked `maybe`.
-- The setup can be exported to a `.json` file and imported elsewhere, so everyone on a study uses the same settings.
+- The setup can be exported to a `.json` file and imported elsewhere, so everyone on a study uses the same settings. This can be paired with #export-or-import to share the annotations with the added user classifications.  
 
 **Controls** (press **I** at any time to show or hide them on screen)
 
@@ -117,13 +116,13 @@ It works through the project's images that have annotations of the chosen class,
 | Hold **Shift** | Enter or leave free view (below) |
 | **C** or **Esc** | Cancel |
 
-Free view lets you look around the image: drag to pan, right click an annotation to zoom in on it, press **G** to show or hide the grid, and tap **Shift** to switch scrolling between zoom and brightness. The summary buttons show how many annotations are in each class across the image; click one to pick those annotations out.
+Free view lets you look around the image, which is otherwise constrained to the group being classified: drag to pan, right click an annotation to zoom in on it, press **G** to show or hide the grid, and tap **Shift** to switch scrolling between zoom and brightness. The summary buttons show how many annotations are in each class across the image; click one to highlight those annotations.
 
 ### Add measurements
 
 Adds intensity and shape measurements to every annotation of the chosen classes.
 
-- **Intensity measurements**: choose channels (the ones every image in the project shares) and statistics (mean, median, minimum, maximum, standard deviation and variance). Annotations are measured at full resolution with QuPath's own intensity measurements. Very large ones are measured in tiles instead, which computes the same statistics without running out of memory; only an annotation whose bounding box tops about a billion pixels is measured at reduced resolution. Columns are named the way QuPath names them (`DAPI: Mean`), using each channel's base name, so a stain lands in the same column in every image.
+- **Intensity measurements**: choose channels (the ones every image in the project shares) and statistics (mean, median, minimum, maximum, standard deviation and variance). Annotations are measured at full resolution with QuPath's own intensity measurements. Very large ones are measured in tiles instead, which computes the same statistics without running out of memory; only an annotation whose bounding box tops about a billion pixels is measured at reduced resolution. Columns are named the way QuPath names them (`DAPI: Mean`), using each channel's base name, so they are aligned on export using either #Save-data or QuPath's built-in summary tables.
 - **Morphology measurements**: QuPath's shape features, such as area, length, circularity, solidity, and maximum and minimum diameter.
 
 ### Remove measurements
