@@ -94,7 +94,7 @@ It works through the project's images that have annotations of the chosen class,
 - **Channels**: up to five channels to switch on and off while classifying.
 - **Classes/Colors**: two to five classes, each with a color (`false`, `true` and `maybe` by default, or type your own). Annotations start in the first class, shown in a separate "unconfirmed" color until you save them. This is also where you choose the two or three classes a reviewer can give.
 - **Reviewer annos**: which annotations a reviewer sees, out of those every classifier has finished. You can pick ones the classifiers disagree on, ones any of them put in a given class, or ones all of them did. By default it's disagreements, plus anything anyone marked `maybe`.
-- The setup can be exported to a `.json` file and imported elsewhere, so everyone on a study uses the same settings. This can be paired with #export-or-import to share the annotations with the added user classifications.  
+- The setup can be exported to a `.json` file and imported elsewhere, so everyone on a study uses the same settings. This can be paired with [Export or Import](#export-or-import) to share the annotations with the added user classifications.  
 
 **Controls** (press **I** at any time to show or hide them on screen)
 
@@ -122,7 +122,7 @@ Free view lets you look around the image, which is otherwise constrained to the 
 
 Adds intensity and shape measurements to every annotation of the chosen classes.
 
-- **Intensity measurements**: choose channels (the ones every image in the project shares) and statistics (mean, median, minimum, maximum, standard deviation and variance). Annotations are measured at full resolution with QuPath's own intensity measurements. Very large ones are measured in tiles instead, which computes the same statistics without running out of memory; only an annotation whose bounding box tops about a billion pixels is measured at reduced resolution. Columns are named the way QuPath names them (`DAPI: Mean`), using each channel's base name, so they are aligned on export using either #Save-data or QuPath's built-in summary tables.
+- **Intensity measurements**: choose channels (the ones every image in the project shares) and statistics (mean, median, minimum, maximum, standard deviation and variance). Annotations are measured at full resolution with QuPath's own intensity measurements. Very large ones are measured in tiles instead, which computes the same statistics without running out of memory; only an annotation whose bounding box tops about a billion pixels is measured at reduced resolution. Columns are named the way QuPath names them (`DAPI: Mean`), using each channel's base name, so they are aligned on export using either [Save data](#save-data) or QuPath's built-in summary tables.
 - **Morphology measurements**: QuPath's shape features, such as area, length, circularity, solidity, and maximum and minimum diameter.
 
 ### Remove measurements
@@ -143,7 +143,7 @@ Writes a CSV file with one row per annotation of the chosen classes, across the 
 - After those come a `Measurements_<name>` column for each measurement you choose, and a `Metadata_<key>` column for each metadata entry, such as Manual classification results.
 - Columns that are empty in every row are left out, and any other missing value is a blank cell.
 
-As in Remove measurements, the lists come from the last scan of the project, with **Refresh project data** to update it. If the CSV is open in another program, such as Excel, you're asked to close it and try again. Stopping the run writes no file.
+As in [Remove measurements](#remove-measurements), the lists come from the last scan of the project, with **Refresh project data** to update it. If the CSV is open in another program, such as Excel, you're asked to close it and try again. Stopping the run writes no file.
 
 ## Building from source
 
