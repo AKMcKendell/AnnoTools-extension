@@ -1,205 +1,159 @@
-# QuPath extension template
+# AnnoTools
 
-This repo contains a template and instructions to help create a new extension for [QuPath](https://qupath.github.io).
+AnnoTools is a [QuPath](https://qupath.github.io) extension for working with annotations across a whole project. Its eight tools each run over as many images as you choose, so you can move annotations between projects, build rings around them, find where classes overlap, classify them by eye, add or remove measurements, delete them by class and export their data to a spreadsheet.
 
-It already contains two minimal extensions - one using Java, one using Groovy - so the first task is to make sure that they work.
-Then, it's a matter of customizing the code to make it more useful.
+Requires QuPath 0.7.
 
-> **Update!** 
-> For QuPath v0.6.0 this repo switched to use Kotlin DSL for Gradle build files - 
-> and also to use the [QuPath Gradle Plugin](https://github.com/qupath/qupath-gradle-plugin).
-> 
-> The outcome is that the build files are _much_ simpler.
+## The tools
 
+| Tool | What it does |
+| --- | --- |
+| [Export or Import](#export-or-import) | Moves annotations in and out of GeoJSON files, keeping their hierarchy |
+| [Make rings](#make-rings) | Builds concentric rings around annotations at distances you set |
+| [Find colocalization](#find-colocalization) | Makes new annotations where annotations of two classes overlap |
+| [Manual classification](#manual-classification) | Lets people classify annotations by eye, then review where they disagree |
+| [Add measurements](#add-measurements) | Adds intensity and shape measurements to annotations |
+| [Remove measurements](#remove-measurements) | Deletes chosen measurements and metadata from annotations |
+| [Remove annotations](#remove-annotations) | Deletes annotations of chosen classes, with everything inside them |
+| [Save data](#save-data) | Exports annotation details, measurements and metadata to a CSV file |
 
-## Build the extension
+## Installation
 
-Building the extension with Gradle should be pretty easy - you don't even need to install Gradle separately, because the 
-[Gradle Wrapper](https://docs.gradle.org/current/userguide/gradle_wrapper.html) will take care of that.
+1. Download `AnnoTools-<version>.jar` from the [latest release](https://github.com/AKMcKendell/AnnoTools-extension/releases/latest). You don't need the `-sources` or `-javadoc` jars.
+2. Drag the jar onto the QuPath window. QuPath copies it into the `extensions` folder of your QuPath user directory, and asks you to set up that directory first if you don't have one.
+3. Restart QuPath.
 
-Open a command prompt, navigate to where the code lives, and use
+To update, replace the old jar in the `extensions` folder with the new one, then restart QuPath. You can open the folder from **Extensions › Manage extensions**.
+
+## Getting started
+
+1. Open a project. The tools work across a project's images, so they won't start without one.
+2. Pick a tool from the **AnnoTools** button on the toolbar (the cubes icon) or from **Extensions › AnnoTools**. In the toolbar menu, hover over a tool to see what it does.
+3. Choose your images, classes and options, then press the button at the bottom of the dialog to run it.
+
+AnnoTools works on annotations. Detections are left alone, except that Remove annotations also deletes anything nested inside the annotations it removes.
+
+## Features shared by the tools
+
+These apply to every tool except Manual classification, which works differently (see [its section](#manual-classification)).
+
+- **Choosing images and classes.** Tick them in the lists. Click a box, then shift-click another, and every box between them is set to match the one you clicked first. The box at the top of a list selects or clears all of it, and **Current Image** picks the image open in the viewer. Each class shows how many annotations it has in the selected images and in the whole project, such as `Tumor [12 / 40]`. Annotations without a class are listed as `Unclassified`.
+- **Spotting problems before you run.** A selected image the tool would skip, such as one with no annotations of the chosen classes, is outlined in red; hover over it to see why. If the run button is greyed out, hover over it to see what's missing, and the lists holding it up are outlined in red.
+- **Remembered choices.** Each tool remembers your last choices for each project, in an `AnnoTools-Data` folder inside the project folder.
+- **Open images.** Tools save each image they change. If an image is open in a viewer, including in a split view, the tool works on what's on screen and the viewer shows the result. Any unsaved edits you'd made to that image are saved along with the tool's changes.
+- **Results from earlier runs.** If Make rings or Find colocalization would add annotations to images that already have some from an earlier run, or an import would add classes an image already has, the tool lists those images. It then asks whether to keep the existing annotations, remove them first, or skip those images.
+- **Deleting is permanent.** Remove annotations, Remove measurements and the remove option above can't be undone, so back up your project first if you're unsure.
+- **Progress and stopping.** A progress window shows the image, step and elapsed time. **Stop** ends the run after the image it's working on. Add measurements, Find colocalization and Make rings can also **Stop now**, which stops straight away without saving the image it was working on. If that image is open, its partial changes stay on screen, unsaved.
+- **Errors.** If a run hits an error, it stops and a notification names the image it was on. The full details are in QuPath's log (**View › Show log**).
+
+## The tools in detail
+
+### Export or Import
+
+Moves annotations between images or projects using GeoJSON files in a folder you choose, one file per image, named after it (`<image name>.geojson`). Pick a mode at the top of the dialog:
+
+- **Export** writes each selected image's annotations of the chosen classes to the folder. If a file already exists, you can overwrite it or skip that image. If an image has nothing to export, you can skip it or write an empty file.
+- **Import** adds every object in each selected image's file to that image. If a file can't be found, you can skip the image or browse for the file.
+- **Nest** rebuilds the hierarchy of annotations already in the images, using the parent details saved when they were exported. No files are read or written.
+
+**Include Parents** keeps the hierarchy intact across the move. On export it saves each annotation's parent in its metadata (`Parent_ID` and `Parent_Name`), and on import it nests annotations back under those parents. It starts ticked every time. The **Folder check** line tells you how many of the selected images already have a file in the folder (when exporting) or are missing one (when importing). Imported annotations are locked.
+
+### Make rings
+
+Builds concentric rings around each annotation of the chosen classes, at up to five whole-number distances in µm, such as `6,16,31`.
+
+- Each ring is the band between its distance and the one before it; the first ring starts at the annotation's edge. Rings are named after the class and their outer distance: `Tumor_6`, `Tumor_16`, `Tumor_31`.
+- Rings never overlap the annotations they're built around, or any closer ring, including those around neighbouring annotations. Rings of neighbouring annotations at the same distance can overlap each other.
+- **Nest new rings?** puts each ring under its central annotation (the default), under the outermost object that annotation sits in, or not nested at all.
+- **Only expand outward** (on by default) fills any holes in the annotation first, so rings don't grow into them.
+- **Constrain to parent** (on by default) trims rings to the object the annotation sits in.
+- **Simplify geometry** (off by default) simplifies very detailed shapes before expanding them. It's faster, but the rings are less exact. The slider sets how detailed a shape can be (2,000 to 10,000 vertices) before it's simplified.
+- The new rings, and the annotations they're built around, are locked.
+
+### Find colocalization
+
+Makes a new annotation wherever an annotation from **Classes 1** overlaps one from **Classes 2**.
+
+- Every pairing of the two lists is made. For example, `Tumor` in Classes 1 with `Stroma` and `Necrosis` in Classes 2 gives new `Tumor-Stroma` and `Tumor-Necrosis` annotations.
+- Each new class gets a colour halfway between its two source classes, and the new annotations are locked.
+- **Nest new objects?** puts each new annotation under its Classes 1 annotation (the default), under the outermost object that annotation sits in, or not nested at all.
+- Selected images that don't have both class groups are skipped.
+
+### Manual classification
+
+Lets one or more people classify annotations by eye, then lets a reviewer settle the ones they disagree on. Each person's calls are saved separately in the annotations' metadata, so classifiers work independently and never overwrite each other.
+
+It works through the project's images that have annotations of the chosen class, in random order, starting with the open image if it still needs doing. Images you've finished are skipped, so you can stop and pick up later; **Check work** goes back through the finished ones instead, in project order. Before it starts, it lists any images it can't use, such as ones with no annotations of that class, and lets you carry on with the rest. At the end of each image it asks whether to save and move on.
+
+**Setting up**
+
+- **Classifier Mode** or **Reviewer Mode**.
+- **Classifier** or **Reviewer**: choose your name from the list. Add a new name with **+** (letters and numbers, up to 15 characters), or use the search button to fill the list with names already used in the project.
+- **Annotation class**: the annotations to classify.
+- **Classifying name**: what's being judged, such as `CAA`. Each call is saved under a metadata key built from the mode, the person and this name, such as `AT-manual_classifier_Sam_CAA`.
+- **Grid size (µm)**: classifier mode works through each image one grid square at a time.
+- **Channels**: up to five channels to switch on and off while classifying.
+- **Classes/Colors**: two to five classes, each with a colour (`false`, `true` and `maybe` by default, or type your own). Annotations start in the first class, shown in a separate "unconfirmed" colour until you save them. This is also where you choose the two or three classes a reviewer can give.
+- **Reviewer annos**: which annotations a reviewer sees, out of those every classifier has finished. You can pick ones the classifiers disagree on, ones any of them put in a given class, or ones all of them did. By default it's disagreements, plus anything anyone marked `maybe`.
+- The setup can be exported to a `.json` file and imported elsewhere, so everyone on a study uses the same settings.
+
+**Controls** (press **I** at any time to show or hide them on screen)
+
+| Key or mouse | Action |
+| --- | --- |
+| *Classifier mode* | |
+| Left click an annotation | Change its class (cycles through them) |
+| Right click an annotation | Zoom in on it, or back out |
+| **N** or mouse forward button | Save this grid square and go to the next |
+| **B** or mouse back button | Go back to the previous grid square |
+| **R** | Clear your classes in this grid square |
+| *Reviewer mode* | |
+| **6**, **7**, **8** | Give the annotation that class and go to the next |
+| **B** or mouse back button | Go back to the previous annotation |
+| *Both modes* | |
+| **1**–**5** | Switch a channel on or off |
+| Scroll | Change the brightness of the channel marked "scroll" |
+| **A** or middle click | Show or hide annotations |
+| Hold **Shift** | Enter or leave free view (below) |
+| **C** or **Esc** | Cancel |
+
+Free view lets you look around the image: drag to pan, right click an annotation to zoom in on it, press **G** to show or hide the grid, and tap **Shift** to switch scrolling between zoom and brightness. The summary buttons show how many annotations are in each class across the image; click one to pick those annotations out.
+
+### Add measurements
+
+Adds intensity and shape measurements to every annotation of the chosen classes.
+
+- **Intensity measurements**: choose channels (the ones every image in the project shares) and statistics (mean, median, minimum, maximum, standard deviation and variance). Annotations are measured at full resolution with QuPath's own intensity measurements. Very large ones are measured in tiles instead, which computes the same statistics without running out of memory; only an annotation whose bounding box tops about a billion pixels is measured at reduced resolution. Columns are named the way QuPath names them (`DAPI: Mean`), using each channel's base name, so a stain lands in the same column in every image.
+- **Morphology measurements**: QuPath's shape features, such as area, length, circularity, solidity, and maximum and minimum diameter.
+
+### Remove measurements
+
+Deletes the chosen measurements and metadata entries from annotations of the chosen classes, in the chosen images. The lists only show what's on annotations of the selected classes.
+
+To keep the dialog quick, the lists come from the last scan of the project, and the dialog shows when that was. Press **Refresh project data** to scan again after adding measurements or metadata, for example with Add measurements. The scan reads saved data, so save open images first. You're asked to confirm before anything is deleted.
+
+### Remove annotations
+
+Deletes every annotation of the chosen classes from the chosen images, along with everything nested inside them. You're asked to confirm first.
+
+### Save data
+
+Writes a CSV file with one row per annotation of the chosen classes, across the chosen images.
+
+- Every row has `Image`, `Anno_Name`, `Anno_Class`, `Anno_ID`, `Anno_ID_Path` (the IDs from the outermost parent down to this annotation), `Anno_Area_um` (area in µm²), `Anno_Hierarchy_Level`, `Parent_Name`, `Parent_Class` and `Parent_ID`.
+- After those come a `Measurements_<name>` column for each measurement you choose, and a `Metadata_<key>` column for each metadata entry, such as Manual classification results.
+- Columns that are empty in every row are left out, and any other missing value is a blank cell.
+
+As in Remove measurements, the lists come from the last scan of the project, with **Refresh project data** to update it. If the CSV is open in another program, such as Excel, you're asked to close it and try again. Stopping the run writes no file.
+
+## Building from source
+
 ```bash
-gradlew build
+./gradlew build
 ```
 
-The built extension should be found inside `build/libs`.
-You can drag this onto QuPath to install it.
-You'll be prompted to create a user directory if you don't already have one.
+The extension jar is written to `build/libs/AnnoTools-<version>.jar` (on Windows, run `gradlew.bat build`).
 
-The minimal extension here doesn't do much, but it should at least install a new command under the 'Extensions' menu in 
-QuPath.
+## Help and feedback
 
-> In case your extension contains external dependencies beyond what QuPath already includes, you can create a 
-> [single jar file](https://imperceptiblethoughts.com/shadow/introduction/#benefits-of-shadow) that bundles these along 
-> with your extension by using
-> ```bash
-> gradlew shadowJar
-> ```
-> If you don't do that, you'll need to drag *all* the extra dependences onto QuPath to install them as well.
-
-
-## Configure the extension
-
-Edit `settings.gradle.kts` to specify which version of QuPath your extension should be compatible with, e.g.
-
-```kotlin
-qupath {
-    version = "0.6.0"
-}
-```
-
-Edit `build.gradle.kts` to specify the details of your extension
-
-```kotlin
-qupathExtension {
-  name = "qupath-extension-template"
-  group = "io.github.qupath"
-  version = "0.1.0-SNAPSHOT"
-  description = "A simple QuPath extension"
-  automaticModule = "io.github.qupath.extension.template"
-}
-```
-
-
-## Run QuPath + the extension
-
-During development, your probably want to run QuPath easily with your extension installed for debugging.
-
-### 0. Make sure you have Java installed
-You'll need to install Java first.
-
-At the time of writing, we use a Java 25 JDK downloaded from https://adoptium.net/
-
-> Java 25 is a 'Long Term Support' release - which is why we use it instead of the very latest version.
-
-### 1. Get QuPath's source code
-You can find instructions at https://qupath.readthedocs.io/en/stable/docs/reference/building.html
-
-### 2. Create an `include-extra` file
-Create a file called `include-extra` in the root directory of the QuPath source code (*not* the extension code!).
-
-Set the contents of this file to:
-```
-[includeBuild]
-/path/to/your/extension
-
-[dependencies]
-extension-group:extension-name
-```
-replacing the default lines where needed.
-
-For example, to build the extension with the names given above you'd use
-```
-[includeBuild]
-../qupath-extension-template
-
-[dependencies]
-io.github.qupath:qupath-extension-template
-```
-
-### 3. Run QuPath
-Run QuPath from the command line using
-```
-gradlew run
-```
-If all goes well, QuPath should launch and you can check the *Extensions* mention to confirm the extension is installed.
-
-
-## Set up in an IDE (optional)
-
-During development, things are likely to be much easier if you work within an IDE.
-
-QuPath itself is developed using IntelliJ, and you can import the extension template there.
-
-The setup process is as above, and you'll need a a [Run configuration](https://www.jetbrains.com/help/idea/run-debug-configuration.html) 
-to call `gradlew run`.
-
-
-## Customize the extension
-
-Now you're ready for the creative part.
-
-You can develop the extension using either Java or Groovy - the template includes examples of both.
-
-### Create the extension Java or Groovy file(s)
-
-For the extension to work, you need to create at least one file that extends `qupath.lib.gui.extensions.QuPathExtension`.
-
-There are two examples in the template, in two languages:
-* **Java:** `qupath.ext.template.DemoExtension.java`.
-* **Groovy:** `qupath.ext.template.DemoGroovyExtension.java`.
-
-You can pick the one that corresponds to the language you want to use, and delete the other.
-
-Then take your chosen file and rename it, edit it, move it to another package... basically, make it your own.
-
-> Please **don't neglect this step!** 
-> If you do, there's a chance of multiple extensions being created with the same class names... and causing confusion later.
-
-### Update the `META-INF/services` file
-
-For QuPath to *find* the extension later, the full class name needs to be available in `resources/META-INFO/services/qupath.lib.gui.extensions.QuPathExtensions`.
-
-So remember to edit that file to include the class name that you actually used for your extension.
-
-### Specify your license
-
-Add a license file to your GitHub repo so that others know what they can and can't do with your extension.
-
-This should be compatible with QuPath's license -- see https://github.com/qupath/qupath
-
-## Repository configuration
-
-### Easy install
-
-If you follow some conventions in naming your extension and making releases, then other QuPath users will find it easy to automatically
-install and update your extension!
-
-First, we suggest you name your extension `qupath-extension-[something]`, and keep it in its own repository (named the same as the extension),
-separate from other projects.
-
-Next, when you want to publish a new version of your extension, use the `github_release.yml` workflow included in this repository.
-
-To do so, you'd need to navigate to `Actions -> Make draft release -> Run workflow -> Run workflow` as shown in the following screenshot:
-
-![Screenshot from 2024-03-14 18-44-42](https://github.com/alanocallaghan/qupath-extension-template/assets/10779688/4712a209-eda7-4f80-8bed-bbab20e4f50a)
-
-This will automatically build the extension, and create a draft release containing the extension jar (and its associated sources and javadoc).
-You can then navigate to `Releases` and fill out information about the release --- the version, any significant changes, etc.
-Once published, users will be able to automatically install the extension as described here:
-https://qupath.readthedocs.io/en/0.5/docs/intro/extensions.html#installing-extensions
-
-### Catalogs
-
-QuPath's extension manager can easily install an extension if it is referenced in a **catalog**.
-A catalog is a JSON file hosted on a GitHub repository containing information about extensions, making it possible to easily manage them from QuPath.
-
-To create a catalog, follow the [extension catalog model documentation](https://qupath.github.io/extension-catalog-model/).
-You will need to create a JSON file containing specific information about your extension and host it on a dedicated GitHub repository.
-Once the catalog is created, any user will be able to easily install your catalog by:
-
-* Opening QuPath's extension manager by clicking on `Extensions` -> `Manage extensions` in QuPath.
-* Adding the URL to your catalog by clicking on `Manage extension catalogs` -> `Add` in the extension manager.
-* Clicking on the `+` symbol next to your extension in the extension manager.
-
-QuPath will then make it easy to manage your extension and automatically inform users when an update is available.
-
-### Replace this readme
-
-Don't forget to replace the contents of this readme with your own!
-
-
-## Getting help
-
-For questions about QuPath and/or creating new extensions, please use the forum at https://forum.image.sc/tag/qupath
-
-------
-
-## License
-
-This is just a template, you're free to use it however you like.
-You can treat the contents of *this repository only* as being under [the Unlicense](https://unlicense.org) (except for the Gradle wrapper, which has its own license included).
-
-If you use it to create a new QuPath extension, I'd strongly encourage you to select a suitable open-source license for the extension.
-
-Note that *QuPath itself* is available under the GPL, so you do have to abide by those terms: see https://github.com/qupath/qupath for more.
+Report a problem or suggest an improvement on the [issues page](https://github.com/AKMcKendell/AnnoTools-extension/issues).
