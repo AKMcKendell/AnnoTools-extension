@@ -18,7 +18,6 @@ class ViewerSessionVars {
     String       userName
     String       userKey
     String       classifyingName
-    List         recentClassifyingNames
     List<String> classifierKeys
     String       toolKeyPrefix
     String       annoClass
@@ -34,7 +33,6 @@ class ViewerSessionVars {
     def          nonZoomedViewerState
     boolean      instructions
     boolean      zoomed
-    def          showing
     Map          annoStateMap
     def          statesAndColors
     def          channelSpecifics
@@ -49,10 +47,8 @@ class ViewerSessionVars {
     long         lastMessageTime
     String       toggleChannel
     List         toggleChannels
-    String       annosToCheck
     List<String> reviewerStates
     String       reviewerClassification
-    Map          codePreferences
     def          prefsFile
     List         imagesToProcess
     def          currentEntry
@@ -143,17 +139,15 @@ def uiElements = new elements()
 // Class for original viewer settings
 class settings {
     AnimationTimer   hoverTimer
-    AWTEventListener clickListener
     EventHandler     scrollBlocker
     String           scrollFilterKey
-    double           lastMouseX
-    double           lastMouseY
     boolean          hoverCheck
     boolean          wasGridOn
     double           oGridX
     double           oGridY
     boolean          wasOverviewOn
     double           oldAnnoThickness
+    Map              oldOverlay
     def              overlayOptions
 }
 
@@ -194,11 +188,11 @@ def naturalCompare( String s1, String s2 ) {
 
 
 // Function: The class label used to identify an object by class. Mirrors QuPath's project
-// summary (DefaultProject.HierarchySummary.pathClassToString), which labels null-class
-// (unclassified) objects "Unclassified". That's the label the class list offers, so null-class
-// objects must map back to it here — otherwise "Unclassified" is selectable but never matches.
+// summary (DefaultProject.HierarchySummary.pathClassToString), which the class lists come from: the
+// full name, so a subclass is "Tumor: Positive" rather than getName()'s "Positive", and "Unclassified"
+// for an object with no class. A label that differs would be selectable but never match.
 def classLabelForObject( obj ) {
-    return obj.getPathClass()?.getName() ?: "Unclassified"
+    return obj.getPathClass()?.toString() ?: "Unclassified"
 }
 
 // FX-safe helper function
@@ -206,8 +200,11 @@ def runOnFxThreadAndWait( Closure fxCode ) {
     def latch = new CountDownLatch( 1 )
     def result = [value: null]
     Platform.runLater {
-        try { result.value = fxCode.call() }
-        finally { latch.countDown() }
+        try {
+            result.value = fxCode.call()
+        } finally {
+            latch.countDown()
+        }
     }
     latch.await()
     return result.value
@@ -1312,12 +1309,18 @@ def removeHoverFilter( ViewerSessionVars session, settings viewerSettings ) {
 def restoreToPrescript( ViewerSessionVars session, settings viewerSettings ) {
     removeScrollBlocker( session, viewerSettings )
     removeHoverFilter( session, viewerSettings )
-    def addedDets = session.hierarchy.getDetectionObjects()
-    session.hierarchy.removeObjects( addedDets, true ) 
+    // Only the fillers this tool added (tagged with their annotation's ID), never the image's own detections
+    def addedDets = session.hierarchy.getDetectionObjects().findAll { it.getMetadata()?.get( "annoID" ) }
+    session.hierarchy.removeObjects( addedDets, true )
     session.allClassAnnos.each { it.setColor( null ) }
-    
-    Platform.runLater { 
-        viewerSettings.overlayOptions.setShowAnnotations( true )
+
+    Platform.runLater {
+        def old = viewerSettings.oldOverlay
+        viewerSettings.overlayOptions.setShowAnnotations( old.showAnnotations )
+        viewerSettings.overlayOptions.setFillAnnotations( old.fillAnnotations )
+        viewerSettings.overlayOptions.setShowDetections( old.showDetections )
+        viewerSettings.overlayOptions.setFillDetections( old.fillDetections )
+        viewerSettings.overlayOptions.setOpacity( old.opacity )
         PathPrefs.annotationStrokeThicknessProperty().set( viewerSettings.oldAnnoThickness )
         changeGrid( viewerSettings, viewerSettings.wasGridOn, viewerSettings.oGridX, viewerSettings.oGridY )
         ViewerPlusDisplayOptions.getSharedInstance().setShowOverview( viewerSettings.wasOverviewOn )
@@ -1548,6 +1551,216 @@ def addIcon( node, iconCode, int size ) {
     node.setGraphic( icon )
 }
 
+// Function: Outline an input in red for as long as it is a reason the "OK" button is disabled
+def flagWhenBlocking( node, blocking, String blockedStyle = null ) {
+    def outlineRedStyle = """
+        -fx-border-color: red;
+        -fx-border-radius: 3;
+    """
+    def flaggedStyle = blockedStyle ?: outlineRedStyle // e.g. an underline in place of an outline
+    def clearedStyle = node.getStyle()                 // however the input looks when it isn't blocking
+
+    // A node with no border of its own gets an invisible copy of the flag's border, so the flag
+    // coming and going doesn't change the node's size and nudge the layout around it
+    if (!clearedStyle?.contains( "-fx-border-color" )) {
+        clearedStyle = (clearedStyle ?: "") + flaggedStyle.replace( "red", "transparent" )
+    }
+
+    // Hold the binding on the node — a derived binding (e.g. someBinding.not()) is only weakly
+    // referenced by its dependencies, so otherwise it can be collected part way through the dialog
+    node.getProperties().put( "flagWhenBlocking", blocking )
+
+    def applyStyle = { boolean isBlocking -> node.setStyle( isBlocking ? flaggedStyle : clearedStyle ) }
+    blocking.addListener { obs, oldVal, newVal -> applyStyle( newVal ) }
+    applyStyle( blocking.getValue() )
+}
+
+// Function: While the mouse is over a disabled control, show why it's disabled. JavaFX never shows a
+// disabled control's own tooltip (it isn't even picked under the mouse), so this follows the mouse from
+// the window instead. reasons() gives the text: a String, or a map of each reason to whether it applies
+// right now. Nothing shows while no reason applies
+def explainWhenDisabled( Node node, Closure reasons ) {
+    def tip = new Tooltip()
+    def delay = new PauseTransition( tip.getShowDelay() ) // waits as long as an ordinary tooltip
+    double mouseX = 0, mouseY = 0
+    delay.setOnFinished {
+        def window = node.getScene()?.getWindow()
+        if (window?.isShowing()) { tip.show( window, mouseX + 10, mouseY + 7 ) } // where JavaFX puts its own
+    }
+    def hideTip = { delay.stop(); tip.hide() }
+
+    def onMove = { MouseEvent e ->
+        // The window picks the nearest enabled ancestor under the mouse: walk up to it through visible
+        // nodes, and check the node itself is under the mouse (not a part scrolled out of view)
+        def picked = e.getPickResult().getIntersectedNode()
+        def n = node
+        while (n != null && n != picked && n.isVisible()) { n = n.getParent() }
+        boolean over = node.isDisabled() && picked != null && n == picked &&
+                       node.contains( node.sceneToLocal( e.getSceneX(), e.getSceneY() ) )
+
+        def why = over ? reasons() : null
+        List lines = why instanceof Map ? why.findAll { it.value }.collect { it.key as String } : (why ? [why as String] : [])
+        if (!lines) { hideTip(); return }
+        tip.setText( lines.size() > 1 ? lines.collect { "• " + it }.join( "\n" ) : lines[ 0 ] )
+        mouseX = e.getScreenX()
+        mouseY = e.getScreenY()
+        if (!tip.isShowing()) { delay.playFromStart() }
+    } as javafx.event.EventHandler
+    def onExit = { MouseEvent e -> hideTip() } as javafx.event.EventHandler
+
+    // Follow the node into whichever window shows it
+    def attach = { oldScene, newScene ->
+        hideTip()
+        oldScene?.removeEventFilter( MouseEvent.MOUSE_MOVED, onMove )
+        oldScene?.removeEventHandler( MouseEvent.MOUSE_EXITED, onExit )
+        newScene?.addEventFilter( MouseEvent.MOUSE_MOVED, onMove )
+        newScene?.addEventHandler( MouseEvent.MOUSE_EXITED, onExit )
+    }
+    node.sceneProperty().addListener { obs, oldScene, newScene -> attach( oldScene, newScene ) }
+    attach( null, node.getScene() )
+    node.disabledProperty().addListener { obs, oldVal, isDisabled -> if (!isDisabled) { hideTip() } }
+}
+
+// Function: Keep each checkbox's box pinned at the left edge while its text scrolls horizontally. The
+// text is drawn by a clipped Label set as the checkbox's graphic: the checkbox keeps its own text (so
+// anything reading getText() is unaffected), it just doesn't draw it. Scrolling slides the whole
+// checkbox right by the scroll offset and its Label back left by the same amount, so the words move
+// with the scroll while the box stays put, and the clip hides the words once they reach the box
+def pinCheckboxesWhileScrolling( ScrollPane scrollPane, List checkboxes ) {
+    List labels = checkboxes.collect { cb ->
+        def label = new Label()
+        label.textProperty().bind( cb.textProperty() )
+        // A graphic doesn't get the gap a checkbox normally leaves before its text, so add it back
+        label.layoutXProperty().bind( Bindings.createDoubleBinding( { cb.getLabelPadding().getLeft() }, cb.labelPaddingProperty() ) )
+        def holder = new Pane( label )
+        def clip = new javafx.scene.shape.Rectangle()
+        clip.xProperty().bind( label.layoutXProperty() ) // scrolled words vanish at the usual gap, not right against the box
+        clip.widthProperty().bind( holder.widthProperty().subtract( label.layoutXProperty() ) )
+        clip.heightProperty().bind( holder.heightProperty() )
+        holder.setClip( clip )
+        cb.setGraphic( holder )
+        cb.setContentDisplay( ContentDisplay.GRAPHIC_ONLY )
+        return label
+    }
+
+    // The scroll pane scrolls by shifting a wrapper around the content to a pixel-snapped position.
+    // Follow that exact position rather than recomputing it from the scroll value — any rounding
+    // difference between the two makes the boxes jiggle as you scroll
+    def content = scrollPane.getContent()
+    def update = {
+        double offset = -(content.getLayoutX() + (content.getParent()?.getLayoutX() ?: 0))
+        checkboxes.eachWithIndex { cb, i ->
+            cb.setTranslateX( offset )
+            labels[ i ].setTranslateX( -offset )
+        }
+    }
+    content.layoutXProperty().addListener { obs, oldVal, newVal -> update() }
+    content.parentProperty().addListener { obs, oldParent, newParent ->
+        newParent?.layoutXProperty()?.addListener { o, oldVal, newVal -> update() }
+        update()
+    }
+}
+
+// Function: Horizontal padding + border of a region
+def insetsW( Region region ) {
+    def ins = region.getInsets()
+    return ins.getLeft() + ins.getRight()
+}
+
+// Function: Size each checkbox box to its widest item, widening the dialog to fit — but never past the
+// edge of the screen; if everything can't fit, the widest boxes give up width first (down to their
+// minimum, or 100px on a screen too small even for that) and their lists scroll horizontally.
+// Re-fits whenever an item's text changes. Takes a closure returning the current box maps so rebuilt
+// boxes are picked up; returns a closure that requests a re-fit (call it after rebuilding boxes)
+def fitBoxesToScreen( Dialog dialog, Closure currentBoxes ) {
+    boolean pending = false
+    Double decoration = null // window frame width; measured once, as the scene lags behind window resizes
+    def refit
+    def requestRefit = {
+        if (pending) { return }
+        pending = true
+        Platform.runLater { pending = false; refit() } // coalesce bursts of text changes into one pass
+    }
+
+    refit = {
+        def window = dialog.getDialogPane().getScene()?.getWindow()
+        if (window == null || !window.isShowing()) { return }
+        List boxes = currentBoxes().findAll { it != null }
+
+        boxes.each { b ->
+            // The header's count floor (see makeCheckboxBox) lands a pulse after showing and can widen it
+            if (!b.selectAll.getProperties().containsKey( "fitBoxesListener" )) {
+                b.selectAll.getProperties().put( "fitBoxesListener", true )
+                b.selectAll.minWidthProperty().addListener { obs, oldVal, newVal -> requestRefit() }
+            }
+            // Boxes that show a count title in their header (rather than the select-all) widen with it
+            if (b.header.getChildren().contains( b.title ) && !b.title.getProperties().containsKey( "fitBoxesListener" )) {
+                b.title.getProperties().put( "fitBoxesListener", true )
+                b.title.textProperty().addListener { obs, oldVal, newVal -> requestRefit() }
+            }
+            b.CBs.each { cb ->
+                if (!cb.getProperties().containsKey( "fitBoxesListener" )) {
+                    cb.getProperties().put( "fitBoxesListener", true )
+                    cb.textProperty().addListener { obs, oldVal, newVal -> requestRefit() }
+                }
+            }
+        }
+
+        // No max width, so a box can still stretch into spare room (e.g. when it's the BorderPane centre)
+        def setBoxWidth = { b, double w ->
+            b.box.setMinWidth( w )
+            b.box.setPrefWidth( w )
+            b.box.setMaxWidth( Double.MAX_VALUE )
+        }
+
+        List naturals = boxes.collect { it.naturalWidth() as double }
+        boxes.eachWithIndex { b, i -> setBoxWidth( b, naturals[ i ] ) }
+
+        def pane = dialog.getDialogPane()
+        pane.applyCss()
+        if (decoration == null) { decoration = Math.max( 0, window.getWidth() - window.getScene().getWidth() ) }
+        double needed = pane.prefWidth( -1 ) + decoration
+
+        def screen = Screen.getScreensForRectangle( window.getX(), window.getY(), window.getWidth(), window.getHeight() )
+                .find() ?: Screen.getPrimary()
+        def bounds = screen.getVisualBounds()
+        double available = bounds.getWidth() - 20
+
+        if (needed > available) {
+            // Find the cap level where capping every box at max(level, its minimum) absorbs the excess.
+            // Repeated, since boxes stacked in a column only free up the width of the widest of them
+            List floors = (0..<boxes.size()).collect { i -> Math.min( boxes[ i ].minWidth as double, naturals[ i ] as double ) }
+            def widthsAt = { List fl, double level -> (0..<naturals.size()).collect { i -> Math.min( naturals[ i ] as double, Math.max( level, fl[ i ] as double ) ) } }
+            double target = naturals.sum()
+            for (int pass = 0; pass < 6 && needed > available + 0.5; pass++) {
+                target -= (needed - available)
+                if (floors.sum() > target) { floors = floors.collect { Math.min( it as double, 100d ) } } // tiny screen
+                double lo = 0, hi = naturals.max()
+                30.times {
+                    double mid = (lo + hi) / 2
+                    if (widthsAt( floors, mid ).sum() > target) { hi = mid } else { lo = mid }
+                }
+                List capped = widthsAt( floors, lo )
+                boxes.eachWithIndex { b, i -> setBoxWidth( b, Math.floor( capped[ i ] as double ) ) }
+                pane.applyCss()
+                needed = pane.prefWidth( -1 ) + decoration
+            }
+            needed = Math.min( needed, available )
+        }
+
+        // Grow (or shrink) around the window's current centre, then keep it on screen
+        double oldW = window.getWidth()
+        if (Math.abs( needed - oldW ) < 1) { return }
+        double x = window.getX() - (needed - oldW) / 2
+        window.setWidth( needed )
+        x = Math.min( x, bounds.getMaxX() - needed )
+        window.setX( Math.max( x, bounds.getMinX() ) )
+    }
+
+    dialog.setOnShown { requestRefit() }
+    return requestRefit
+}
+
 // Function to get user preferences for run
 def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
     def currentImageData = getCurrentImageData()
@@ -1555,14 +1768,11 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
     def projectImages = getProject().getImageList()
     
     // Multi-used styles
-    def outlineRedStyle = """
-        -fx-border-color: red;
-        -fx-border-radius: 3;
-    """
     def underlineRedStyle = """
         -fx-border-color: red;
         -fx-border-width: 0 0 1 0;
     """
+    def underlineClearStyle = underlineRedStyle.replace( "red", "transparent" ) // same space, so flagging never shifts the layout
     def newCellStyle = """
         -fx-border-color: #5a8a5a; 
         -fx-border-width: 2;
@@ -1587,7 +1797,6 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
     
     // Make/get prefs folder as needed
     def projectDirectory = project.getBaseDirectory()
-    def projectFolderNames = projectDirectory.listFiles().collect { it.getName() }
     def scriptPrefsFolderName = "AnnoTools-Data"
     def scriptPrefsFileName = "Manually-Classify_Preferences" + ".json"
     def prefsFolder = new File( projectDirectory, scriptPrefsFolderName )
@@ -1631,7 +1840,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         setTT( importPrefsBtn, "Import preferences from .json file" )
         
         def root = new BorderPane()
-        root.setPrefSize( 400, 350 )
+        root.setPrefHeight( 350 ) // width follows the content, so the channel box can widen the window
         
         // Define shared column constraints
         def colGrow = new ColumnConstraints()
@@ -1743,7 +1952,6 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         users.setMaxWidth( Double.MAX_VALUE )
         HBox.setHgrow( users, Priority.ALWAYS )
         setTT( [userLabel, users], classifierModeBtn.isSelected() ? "Select a classifier" : "Select a reviewer" )
-        users.setStyle( outlineRedStyle ) // Start with red border (cleared if selection)
         lockDimensions( users )
         
         def userInputField = new TextField()
@@ -1769,11 +1977,12 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         
         def userRow = new HBox( 5, users, addUserBtn, removeUserBtn, populateUsersBtn )
         lockDimensions( userRow )
-        
-        // Red border if no value
-        users.valueProperty().addListener { obs, oldVal, newVal ->
-            users.setStyle( newVal ? null : outlineRedStyle )
-        }
+
+        // Say why on hover, while disabled
+        explainWhenDisabled( users ) { "No ${classifierModeBtn.isSelected() ? 'classifiers' : 'reviewers'} yet: add one with +, or search the project for them" }
+        explainWhenDisabled( addUserBtn ) { "Type the new name, then press Enter" }
+        explainWhenDisabled( removeUserBtn ) { "Choose the user to remove from the list" }
+        explainWhenDisabled( populateUsersBtn ) { "Already searched the project's annotations" }
 
         // The button is a ListCell wired to the popup's ListView, so its "empty" refresh (on layout, or when
         // the skin reprocesses an items change) resets the text to null, wiping the prompt the skin had just
@@ -1963,9 +2172,10 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         }
         
         boolean removedUser = false
-        
+        List foundUsers = [] // what the project search found, as [user: name, mode: mode]
+
         // Listener for which user is clicked when removing
-        def removeUserListener      
+        def removeUserListener
         removeUserListener = { obs, oldVal, newVal ->
             if (oldVal != newVal) {
                 if (session.classifierMode) {
@@ -1973,9 +2183,14 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 } else {
                     reviewerOptions.remove( newVal )
                 }
-                
+
                 newUsers.remove( newVal )
-                
+
+                // The list no longer holds everything the search found, so it can be run again
+                if (foundUsers.any { it.user == newVal && (it.mode == ActionStrings.CLASSIFIER_MODE) == session.classifierMode }) {
+                    populateUsersBtn.setDisable( false )
+                }
+
                 userFieldNotice.setStyle( redFadeMessageStyle )
                 userFieldNotice.setText( "*Removed ${newVal}*" )           
                 showFadeOutMessage( userFieldNotice )
@@ -2051,6 +2266,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 pool.shutdown()
                 
                 Platform.runLater {
+                    foundUsers = uniqueUsers
                     def prevUser = users.getValue() // Capture before mutating items: unique() below clears the list, which wipes the ComboBox selection
                     def newNamesSet = uniqueUsers.toSet()
                     List newClassifiers = []
@@ -2109,7 +2325,6 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def annoClassField = new ComboBox()
         annoClassField.setMaxWidth( Double.MAX_VALUE )
         setTT( [annoClassLabel, annoClassField], "Class of annotations to be classified. \nPopulated from classes of existing objects in project." )
-        annoClassField.setStyle( outlineRedStyle ) // Start with red border
         lockDimensions( annoClassField )
         
         def projectPathClasses = project.getPathClasses().findAll { it?.getName() }    
@@ -2158,7 +2373,9 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             }
         }
         
-        def currentImageName = currentImageData?.getServer()?.getMetadata()?.getName()
+        // The project's name for the open image, which the summary counts above are keyed by (its file's
+        // own name can differ, e.g. once renamed in the project, and would count its objects twice)
+        def currentImageName = currentImageData ? project.getEntry( currentImageData )?.getImageName() : null
 
         // If an image is open, use its LIVE hierarchy for that image's class counts so unsaved
         // objects are reflected (both counts and class existence). Cheap since it is already loaded.
@@ -2180,21 +2397,13 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             .collect { pc, count -> [name: pc, num: count, imageNum: currentImageCounts[pc] ?: 0] }
             .sort { a, b -> (b.num <=> a.num) ?: naturalCompare( a.name, b.name ) }
         
-        // Set dropdown selection to show counts
+        // Set dropdown selection to show counts (in the open image / in the project)
         annoClassField.setCellFactory {
             new ListCell() {      
                 @Override
                 protected void updateItem( item, boolean empty ) {
                     super.updateItem( item, empty )
-                    if (empty || item == null) {
-                        setText( null )
-                    } else {
-                        def label = currentImageCounts != null
-                            ? "${item.name}  [${item.imageNum} / ${item.num}]"
-                            : "${item.name}  [${item.num}]"
-                        
-                        setText( label )
-                    }
+                    setText( empty || item == null ? null : "${item.name}  [${item.imageNum} / ${item.num}]" )
                 }
             }
         }
@@ -2202,10 +2411,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         // Set selection to show same counts as dropdown
         annoClassField.setConverter( new StringConverter() {
             String toString( def item ) {
-                if (item == null) { return "" }
-                def label = currentImageCounts != null
-                    ? "${item.name}  [${item.imageNum} / ${item.num}]"
-                    : "${item.name}  [${item.num}]"
+                return item == null ? "" : "${item.name}  [${item.imageNum} / ${item.num}]"
             }
             
             def fromString( String string ) {
@@ -2218,14 +2424,9 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         if (pathClassEntries.isEmpty()) {
             annoClassField.setPromptText( "None available" )
             annoClassField.setDisable( true )
-            annoClassField.setStyle( outlineRedStyle )
+            explainWhenDisabled( annoClassField ) { "No annotations in this project yet" }
         }
 
-        // Red border if empty
-        annoClassField.valueProperty().addListener { obs, oldVal, newVal ->
-            annoClassField.setStyle( newVal ? null : outlineRedStyle )
-        }
-        
         
         def classifyingNameOptions
         
@@ -2254,6 +2455,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         addIcon( populateClassifyingNamesBtn, FontAwesome.Glyph.SEARCH, 12 )
         
         def classifyingNameRow = new HBox( 5, classifyingNameSelection, populateClassifyingNamesBtn )
+        explainWhenDisabled( populateClassifyingNamesBtn ) { "Already searched the project's annotations" }
         lockDimensions( classifyingNameRow )
         
         // Enforcing criteria and firing messages
@@ -2277,13 +2479,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 showFadeOutMessage( classifyingNameNotice )
                 return
             }
-            
-            // Red border if missing
-            classifyingNameSelection.setStyle( !newVal ? outlineRedStyle : null )
         }
-        
-        // Start with red border (cleared if added to)
-        classifyingNameSelection.setStyle( outlineRedStyle )
         lockDimensions( classifyingNameSelection )
         
         // Running through project and populating classifying name options and sending notice (parallel)
@@ -2499,16 +2695,18 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         // Create bounding box for channels and relevant options
         def fullChannelsBox = new VBox( 5 )
         fullChannelsBox.setPadding( new Insets( 0, 5, 5, 5 ) )
-        fullChannelsBox.setStyle( outlineRedStyle ) // Start with red border
-        
-        // Create bounding box for channel checkboxes
+        fullChannelsBox.setStyle( chanBoxStyle )
+
+        // Create bounding box for channel checkboxes, scrolling both ways when it can't all fit
         def channelCBsBox =  new VBox( 5 )
         channelCBsBox.setPadding( new Insets( 5 ) )
-        
-        // Add tooltip to the channel checkboxes bounding box
+        def channelsScroll = new ScrollPane( channelCBsBox )
+        VBox.setVgrow( channelsScroll, Priority.ALWAYS )
+
+        // Add tooltip to the channel list
         def chBoxToolTipBaseText = "Select channels that will help classify objects."
         def chBoxToolTipText = chBoxToolTipBaseText
-        setTT( channelCBsBox, chBoxToolTipText )
+        setTT( channelsScroll, chBoxToolTipText )
         
         int maxChannels = 5
         
@@ -2526,11 +2724,9 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def topChannelRow = new HBox( 5 )
         topChannelRow.setPadding( new Insets( 8 ) )
         topChannelRow.getChildren().addAll( channelsLabel, fullChannelsBoxSpacer, clearChannelsBtn )
-        // Reserve the count label's width for the widest possible count, so toggling between counts whose
-        // digits differ in width (e.g. [1] <-> [0]) neither clips the label nor resizes the row and jiggles
-        // the box. Floor its minWidth to the widest count string, measured once the label is laid out so the
-        // real font is applied. A floor (not min=pref=max) means an early/mis-measure can only pad it wider,
-        // never clip; and since the floor >= every count's width, the label stays a constant width.
+        // Floor the label's width at its widest count, so the count changing (digits differ in width, e.g.
+        // [1] vs [0]) never clips it or resizes the box. Measured once laid out, when the real font is
+        // applied. Only a floor, never a fixed width, so a mis-measure can pad the label but never clip it
         boolean channelsLabelFloorSet = false
         channelsLabel.widthProperty().addListener { obs, oldW, newW ->
             if (!channelsLabelFloorSet && newW.doubleValue() > 0) {
@@ -2547,7 +2743,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 }
             }
         }
-        // Keep the row height stable; its width now follows the fixed-width label, so no width lock is needed.
+        // Keep the row height stable
         Platform.runLater {
             double rowHeight = topChannelRow.getHeight()
             topChannelRow.setMinHeight( rowHeight )
@@ -2568,30 +2764,44 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                     selectedNames.each { chBoxToolTipText += "\n- " + it }
                 }
                 
-                setTT( channelCBsBox, chBoxToolTipText )
-                
+                setTT( channelsScroll, chBoxToolTipText )
+
                 if (selectedCount > maxChannels) {
                     // Too many – revert this one
                     cb.setSelected( false )
                 }
-                
-                // Red border none selected
-                fullChannelsBox.setStyle( selectedCount ? chanBoxStyle : outlineRedStyle )
             }
             channelCBsBox.getChildren().add( cb )
             cb.setFocusTraversable( false )
         }
-        
+        pinCheckboxesWhileScrolling( channelsScroll, channelCheckboxes )
+
         // Clear all checked channels when clear button is pressed
         clearChannelsBtn.setOnAction {
             channelCheckboxes.each { it.setSelected( false ) }
         }
-        
+
         // Adding all the pieces together
-        def channelsScroll = new ScrollPane( channelCBsBox )
-        channelsScroll.setFitToWidth( true )
         fullChannelsBox.getChildren().addAll( topChannelRow, channelsScroll )
         root.right = fullChannelsBox
+
+        // The box's width, as fitBoxesToScreen expects it: wide enough for the widest channel plus the
+        // scroll bar. The count label plays the select-all's part, as its width floor lands after showing
+        def channelsBoxMap = [
+            box         : fullChannelsBox,
+            header      : topChannelRow,
+            selectAll   : channelsLabel,
+            CBs         : channelCheckboxes,
+            minWidth    : 150,
+            naturalWidth: {
+                double widest = channelCheckboxes.collect { it.applyCss(); it.prefWidth( -1 ) }.max() ?: 0
+                def vBar = channelsScroll.lookupAll( ".scroll-bar" ).find { it instanceof ScrollBar && it.orientation == Orientation.VERTICAL }
+                double barW = (vBar != null && vBar.prefWidth( -1 ) > 0) ? vBar.prefWidth( -1 ) : 15 // always leave room for the bar
+                double listW = widest + insetsW( channelCBsBox ) + insetsW( channelsScroll ) + barW
+                return Math.ceil( Math.max( listW, topChannelRow.prefWidth( -1 ) ) + insetsW( fullChannelsBox ) )
+            }
+        ]
+        fitBoxesToScreen( preferencesDialog ) { [channelsBoxMap] }
         
         preferencesDialog.getDialogPane().content = root
         
@@ -2703,7 +2913,6 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             colorPickerU.setPrefWidth( 140 )
             
             
-            int numRevCBsOn = reviewerCheckboxes.count { it.isSelected() }
             def reviewerClassHeader = new Label( "Reviewer classes (${minReviewerStates}-${maxReviewerStates}):" )
             reviewerClassHeader.setPadding( new Insets( 5, 0, 0, 0 ) )
             reviewerClassHeader.setPrefWidth( 140 )
@@ -2843,23 +3052,32 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 tempUnconfirmedColor = colorPickerU.getValue()
             }
             
-            // Closure: Disabling "OK" button if any criteria are violated
-            def updateOkButton = {
+            // Closure: Each reason the "OK" button can be disabled, with whether it applies right now
+            String wrongNumRevClassesReason = "Tick ${minReviewerStates}-${maxReviewerStates} reviewer classes"
+            def okButtonBlockers = {
                 def rowN = stateBoxes.size()
                 def stateBoxValues = stateBoxes.collect { it.getValue() }
                 def colorPickerValues = colorPickers.collect { it.getValue() }
-                def anyEmptyValues = (stateBoxValues + colorPickerValues).any { !it }
                 int numRevClasses = reviewerCheckboxes.count { it.isSelected() }
-                boolean wrongNumRevClasses = (numRevClasses < minReviewerStates || numRevClasses > maxReviewerStates)
-                
-                // Also highlighting label if wrong number
-                reviewerClassHeader.setStyle( wrongNumRevClasses ? underlineRedStyle : null )
-                
-                okButton.setDisable( rowN < minClassifierStates || rowN > maxClassifierStates ||
-                                     wrongNumRevClasses ||anyEmptyValues ||
-                                     stateBoxValues.size() != stateBoxValues.unique().size() ||
-                                     colorPickerValues.size() != colorPickerValues.unique().size() )
+                [
+                    ("Use ${minClassifierStates}-${maxClassifierStates} states" as String): rowN < minClassifierStates || rowN > maxClassifierStates,
+                    (wrongNumRevClassesReason)                    : numRevClasses < minReviewerStates || numRevClasses > maxReviewerStates,
+                    "Give every state a name and a colour"        : (stateBoxValues + colorPickerValues).any { !it },
+                    "Give every state a different name"           : stateBoxValues.findAll { it }.with { it.size() != it.unique( false ).size() },
+                    "Give every state a different colour"         : colorPickerValues.findAll { it }.with { it.size() != it.unique( false ).size() }
+                ]
             }
+
+            // Closure: Disabling "OK" button if any criteria are violated
+            def updateOkButton = {
+                def blockers = okButtonBlockers()
+
+                // Also highlighting label if wrong number
+                reviewerClassHeader.setStyle( blockers[ wrongNumRevClassesReason ] ? underlineRedStyle : underlineClearStyle )
+
+                okButton.setDisable( blockers.any { it.value } )
+            }
+            explainWhenDisabled( okButton, okButtonBlockers ) // says why on hover, while disabled
             
             // Closure: Attach a state box listener that blocks invalid inputs and updates respective lists/maps
             def attachStateListeners = { item ->
@@ -3120,6 +3338,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 addBtn.setOnAction { addRow( tempStateOrder.size() ) }
                 addBtn.setDisable( tempStateOrder.size() >= maxClassifierStates )
                 setTT( addBtn, "Add another state (max ${maxClassifierStates})" )
+                explainWhenDisabled( addBtn ) { "Already at the most states (${maxClassifierStates})" }
                 stateLabelBox.getChildren().add( addBtn )
                 
                 // Resize list + label column
@@ -3172,6 +3391,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                         minusBtn.setOnAction { removeRow( idx ) }
                         minusBtn.setDisable( tempStateOrder.size() <= minClassifierStates )
                         setTT( minusBtn, "Remove state (min ${minClassifierStates})" )
+                        explainWhenDisabled( minusBtn ) { "Already at the fewest states (${minClassifierStates})" }
                         
                         def unconfirmedCell = (idx == 0) ? colorPickerU : new Region()
                         if (idx != 0) {
@@ -3370,6 +3590,10 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             
             def newSwitch = makeSwitch( true )
             switches << newSwitch
+
+            // Say why on hover, while disabled
+            [fS, sS].each { explainWhenDisabled( it ) { "Switch this row on to use it" } }
+            explainWhenDisabled( newSwitch.node ) { "Switch on the row above first" }
         }
         
         specifyReviewAnnosBtn.setOnAction {
@@ -3391,14 +3615,14 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             
             def frequencySelectorLabel = new Label( "Frequency:" )
             frequencySelectorLabel.setPadding( new Insets( 5 ) )  
-            frequencySelectors.each { it.getItems().addAll( session.frequencies.values() ) }
+            frequencySelectors.each { it.getItems().setAll( session.frequencies.values() ) } // setAll: the selectors outlive the dialog, so reopening it must not add the options again
             frequencySelectors.each { it.setValue( it.getUserData() ) }
             String freqSelectorTTtext = "Select the frequency of an annotation being classified a specific state."
             setTT( [frequencySelectorLabel] + frequencySelectors, freqSelectorTTtext )
             
             def stateSelectorLabel = new Label( "State:" )
             stateSelectorLabel.setPadding( new Insets( 5 ) ) 
-            stateSelectors.each { it.getItems().addAll( states ) }
+            stateSelectors.each { it.getItems().setAll( states ) }
             stateSelectors.each { it.setEditable( true ) }
             stateSelectors.each { it.setPromptText( "Type or select" ) }
             stateSelectors.each { it.setValue( it.getUserData() ) }
@@ -3510,12 +3734,12 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 }
             }
             
-            // Making sure there are no empty state names
-            stateSelectors.each {
-                okButton.disableProperty().bind(
-                    it.getEditor().textProperty().isEmpty()
-                )
-            }
+            // Making sure there are no empty state names in the rows in use
+            okButton.disableProperty().bind(
+                stateSelectors.collect { it.getEditor().textProperty().isEmpty().and( it.visibleProperty() ).and( it.disabledProperty().not() ) }
+                    .inject { a, b -> a.or( b ) }
+            )
+            explainWhenDisabled( okButton ) { "Choose a state for every row that's switched on" }
             
             // When the restore defaults button is pressed
             restoreReviewerAnnoDefaultsBtn.setOnAction {     
@@ -3679,7 +3903,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             def savedUnconfirmed = pMap.statesAndColors?[0]?.colorU
             lockedUnconfirmedColor = savedUnconfirmed instanceof Number ? intToFx( savedUnconfirmed as int ) : defaultUnconfirmedColor
             
-            if (!savedStates || !savedUnconfirmed instanceof Number ) {
+            if (!savedStates || savedUnconfirmed !instanceof Number) {
                 nonUpdatedPrefs << "Classification states/order/colors"
             }
             
@@ -3721,7 +3945,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             
             def annoClass               = annoClassField.getValue().name
             def classifyingName         = classifyingNameSelection.getValue()?.trim()
-            List recentClassifyingNames = classifyingNameOptions = ([classifyingName] + classifyingNameOptions).unique().take( 5 )
+            List recentClassifyingNames = ([classifyingName] + classifyingNameOptions).unique().take( 5 ) // a copy: Export reads this too, and the dropdown keeps all its names
             def gridSizeText            = gridSizeField.getText().trim()
             def gridSize                = Integer.parseInt( gridSizeText )
             boolean instructions        = prePrefsMap.instructions != null ? prePrefsMap.instructions : true
@@ -3733,7 +3957,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             for (i in 0..numRevRows-1) {         
                 if (switches[ i ].node.getUserData()) {
                     reviewStateFreqs << session.frequencies.find { it.getValue() == frequencySelectors[ i ].getUserData() }.getKey()
-                    reviewStates << stateSelectors[ i ].getUserData() ?: states[ 0 ]
+                    reviewStates << (stateSelectors[ i ].getUserData() ?: states[ 0 ])
                 }
             }
             
@@ -3746,7 +3970,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 "selectedChannels"       : selectedChannels,
                 "annoClass"              : annoClass,
                 "classifyingName"        : classifyingName,
-                "recentClassifyingNames" : classifyingNameOptions,
+                "recentClassifyingNames" : recentClassifyingNames,
                 "gridSize"               : gridSize,
                 "statesAndColors"        : stateColorMap,
                 "reviewStateFreqs"       : reviewStateFreqs,
@@ -3821,7 +4045,22 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             .or( anySelectedChannel.not() )
             .or( annoClassField.valueProperty().isNull() )
         )
-        
+
+        // Red outline on each input while it is a reason the "OK" button is disabled
+        flagWhenBlocking( users, users.valueProperty().isNull() )
+        flagWhenBlocking( annoClassField, annoClassField.valueProperty().isNull() )
+        flagWhenBlocking( classifyingNameSelection, classifyingNameSelection.getEditor().textProperty().isEmpty() )
+        flagWhenBlocking( fullChannelsBox, anySelectedChannel.not() )
+
+        // Say why on hover, while disabled
+        explainWhenDisabled( okBtn ) { [
+            ("Select a ${classifierModeBtn.isSelected() ? 'classifier' : 'reviewer'}" as String): users.getValue() == null,
+            "Select an annotation class"  : annoClassField.getValue() == null,
+            "Enter a classifying name"    : !classifyingNameSelection.getEditor().getText(),
+            "Enter a grid size"           : !gridSizeField.getText(),
+            "Select at least one channel" : !anySelectedChannel.get()
+        ] }
+
         // Making sure to bring the selection back to the ok button after re-enable first time
         long scriptStart = System.currentTimeMillis()
         boolean firstPass = true
@@ -3884,7 +4123,6 @@ while (true) {
     session.freeView          = false
     session.freeViewMode      = session.freeViewModes[0]
     session.reviewerStates    = session.statesAndColors.findAll { it.revState }.state
-    session.showing           = null
     session.prevSelectedAnnos = []
     session.lastMessage       = ""
     session.lastMessageTime   = 0
@@ -3986,13 +4224,8 @@ while (true) {
             boolean anyUserKey = imageAnnos.any { containsUserKey( it, session ) }
             
             boolean anyAnnosToCheck = session.reviewerMode ?
-                findAnnosByMdClassification(
-                    imageAnnos,
-                    all     = session.reviewerCriteria.all,
-                    any     = session.reviewerCriteria.any,
-                    diff    = session.reviewerCriteria.different,
-                    session = session
-                ) : true
+                findAnnosByMdClassification( imageAnnos, session.reviewerCriteria.all, session.reviewerCriteria.any,
+                                             session.reviewerCriteria.different, session ) : true
                 
             return new ImageCheckResult(
                 image: image, imageName: image.getImageName(), hasNoAnnos: false,
@@ -4079,7 +4312,7 @@ while (true) {
     addWarningCheck( [session.classifierMode, !session.checkingWork, userIncompleteImages.isEmpty()],
         "User has classified all viable images.",
         "User Completion", generalCriteria )
-    addWarningCheck( [session.reviewerMode, session.classifierMode, !session.checkingWork, userIncompleteImages.isEmpty()],
+    addWarningCheck( [session.reviewerMode, !session.checkingWork, userIncompleteImages.isEmpty()],
         "User has reviewed all viable images.",
         "User Completion", reviewerCriteriaList )
     
@@ -4190,10 +4423,8 @@ while (true) {
 
 
 // Setting current image first if needs classification
-if (session.currentEntry) {
-    if (session.currentEntry in session.imagesToProcess) {
-        session.imagesToProcess.remove( session.currentEntry )
-    }
+if (session.currentEntry in session.imagesToProcess) {
+    session.imagesToProcess.remove( session.currentEntry )
     session.imagesToProcess.addFirst( session.currentEntry )
 }
 
@@ -4207,18 +4438,10 @@ viewerSettings.oGridX = PathPrefs.gridSpacingX.get()
 viewerSettings.oGridY = PathPrefs.gridSpacingY.get()
 viewerSettings.wasOverviewOn = ViewerPlusDisplayOptions.getSharedInstance().getShowOverview()
 viewerSettings.oldAnnoThickness = PathPrefs.annotationStrokeThicknessProperty().get()
-
-// Changing viewer settings for run
-Platform.runLater {
-    ViewerPlusDisplayOptions.getSharedInstance().setShowOverview( false )
-    PathPrefs.annotationStrokeThicknessProperty().set( 1 )
-    changeGrid( viewerSettings, true, session.gridSize, session.gridSize )
-    viewerSettings.overlayOptions.setShowDetections( true )
-    viewerSettings.overlayOptions.setFillDetections( true )
-    viewerSettings.overlayOptions.setShowAnnotations( true )
-    viewerSettings.overlayOptions.setFillAnnotations( false )
-    viewerSettings.overlayOptions.setOpacity( 1 )
-}
+def oo = viewerSettings.overlayOptions
+viewerSettings.oldOverlay = [showAnnotations: oo.getShowAnnotations(), fillAnnotations: oo.getFillAnnotations(),
+                             showDetections : oo.getShowDetections(),  fillDetections : oo.getFillDetections(),
+                             opacity        : oo.getOpacity()]
 
 
 // =====================
@@ -4231,7 +4454,19 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     
     def currentImage = session.imagesToProcess[ imageIndex ]
     def imageData = getNextImage( currentImage )
-    
+
+    // Changing viewer settings for run (each image, as finishing the last one restored the user's own)
+    Platform.runLater {
+        ViewerPlusDisplayOptions.getSharedInstance().setShowOverview( false )
+        PathPrefs.annotationStrokeThicknessProperty().set( 1 )
+        changeGrid( viewerSettings, true, session.gridSize, session.gridSize )
+        viewerSettings.overlayOptions.setShowDetections( true )
+        viewerSettings.overlayOptions.setFillDetections( true )
+        viewerSettings.overlayOptions.setShowAnnotations( true )
+        viewerSettings.overlayOptions.setFillAnnotations( false )
+        viewerSettings.overlayOptions.setOpacity( 1 )
+    }
+
     // Collect (new) image important data
     session.server = imageData.getServer()
     session.hierarchy = imageData.getHierarchy()
@@ -4333,11 +4568,6 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     addHoverFilter( session, viewerSettings )
     
     // Establishing/storing important variables
-    @Field int numTrues
-    @Field int numMixed
-    numTrues = findAnnosByMdClassification( session.allClassAnnos, all = ["true"], any = [], diff = false, session ).size()
-    numMixed = findAnnosByMdClassification( session.allClassAnnos, all = [], any = ["maybe"], diff = true, session ).size()
-    def obj
     session.zoomed = false
     session.channelToChange = session.channelSpecifics.find { it.state }?.channel // Defaulting to first channel that's on
     def nonFreeViewerState
@@ -4349,7 +4579,6 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     
     
     def sortedBins = []
-    def annosToCheck = []
     
     int setBinIndex = 0
     int setAnnoIndex = 0
@@ -4591,7 +4820,6 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     
                                     double sWidth = session.server.getWidth()
                                     double sHeight = session.server.getHeight()
-                                    session.server.getMetadata().getMagnification()
                                     changeViewer( sWidth/2, sHeight/2, sWidth/1.4, sHeight/1.4, false, session )
                                     
                                     removeScrollBlocker( session, viewerSettings )
@@ -4642,13 +4870,8 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
         // --- FOR REVIEWER MODE: ANNOTATIONS INDIVIDUALLY ---
         } else if (session.reviewerMode) {
             
-            annotations = findAnnosByMdClassification(
-                session.allClassAnnos,
-                all     = session.reviewerCriteria.all,
-                any     = session.reviewerCriteria.any,
-                diff    = session.reviewerCriteria.different,
-                session = session
-            )
+            annotations = findAnnosByMdClassification( session.allClassAnnos, session.reviewerCriteria.all,
+                                                       session.reviewerCriteria.any, session.reviewerCriteria.different, session )
             
             // Changing color of already classified annos.
             // Every anno is touched: anything outside the review criteria (or with no reviewer state
@@ -4772,7 +4995,6 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     
                                     double sWidth = session.server.getWidth()
                                     double sHeight = session.server.getHeight()
-                                    session.server.getMetadata().getMagnification()
                                     changeViewer( sWidth/2, sHeight/2, sWidth/1.4, sHeight/1.4, false, session )
                                     
                                     viewerSettings.overlayOptions.setShowAnnotations( true )
@@ -4901,10 +5123,7 @@ runOnFxThreadAndWait {
 // --- Importing packages ---
 import groovy.transform.Field
 
-import java.awt.AWTEvent
-import java.awt.event.AWTEventListener
 import java.awt.MouseInfo
-import java.awt.geom.Point2D
 import java.awt.Color as AwtColor
 import java.nio.file.Files
 import java.util.Collections

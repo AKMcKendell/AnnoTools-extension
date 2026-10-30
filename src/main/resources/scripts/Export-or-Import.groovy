@@ -6,18 +6,22 @@
 
 
 // --- FUNCTIONS ---
-// Function: Helper to run on FX thread
+// Function: Helper to run on FX thread. An error there is thrown again here, so the caller stops (rather
+// than carrying on as if the code had run)
 def runOnFxThreadAndWait( Closure fxCode ) {
     def latch = new CountDownLatch( 1 )
-    def result = [value: null]
+    def result = [value: null, error: null]
     Platform.runLater {
         try {
             result.value = fxCode.call()
+        } catch (Throwable t) {
+            result.error = t
         } finally {
             latch.countDown()
         }
     }
     latch.await()
+    if (result.error != null) { throw result.error }
     return result.value
 }
 
@@ -39,6 +43,22 @@ def setTT( objs, String tooltip ) {
     }
 }
 
+// Function: Widest a window may be — the width of the screen it's on (or, before it's shown, its
+// owner's screen), less a small margin
+def maxWindowWidth( Window window ) {
+    def ref = window?.isShowing() ? window : (window instanceof Stage ? window.getOwner() : null)
+    def screen = ref ? Screen.getScreensForRectangle( ref.getX(), ref.getY(), ref.getWidth(), ref.getHeight() ).find() : null
+    return (screen ?: Screen.getPrimary()).getVisualBounds().getWidth() - 20
+}
+
+// Function: Move a window back inside its screen if it hangs off the left or right edge
+def keepOnScreen( Window window ) {
+    def screen = Screen.getScreensForRectangle( window.getX(), window.getY(), window.getWidth(), window.getHeight() ).find() ?: Screen.getPrimary()
+    def bounds = screen.getVisualBounds()
+    double x = Math.min( window.getX(), bounds.getMaxX() - window.getWidth() )
+    window.setX( Math.max( x, bounds.getMinX() ) )
+}
+
 // Function: Create window showing script progress
 def createProgressWindow( String title, int totalImages, List imageNames = [] ) {
     return runOnFxThreadAndWait {
@@ -47,7 +67,7 @@ def createProgressWindow( String title, int totalImages, List imageNames = [] ) 
         stage.setResizable( false )
         stage.setTitle( title )
         
-        def imageNum = new SimpleStringProperty( "0" )
+        def imageNum = new SimpleStringProperty( "1" )
         def imageName = new SimpleStringProperty( "Starting..." )
         def imageLabel = new Label()
         imageLabel.textProperty().bind(
@@ -83,7 +103,7 @@ def createProgressWindow( String title, int totalImages, List imageNames = [] ) 
         def updateMinWidth = {
             double preferred = rows.collect { it.getWidth() }.max() + vbox.getPadding().getLeft() + vbox.getPadding().getRight()
             if ( preferred > stage.getWidth() ) {
-                stage.setWidth( preferred )
+                stage.setWidth( Math.min( preferred, maxWindowWidth( stage ) ) )
             }
         }
         
@@ -98,7 +118,7 @@ def createProgressWindow( String title, int totalImages, List imageNames = [] ) 
                 double maxRowPref = rows.collect { it.prefWidth(-1) }.max()
                 double needed = Math.max( maxRowPref + vbox.getPadding().getLeft() + vbox.getPadding().getRight(), 350 )
                 if (needed > stage.getWidth()) {
-                    stage.setWidth( needed )
+                    stage.setWidth( Math.min( needed, maxWindowWidth( stage ) ) )
                 }
             }
         }
@@ -115,6 +135,18 @@ def createProgressWindow( String title, int totalImages, List imageNames = [] ) 
         }
         stage.initModality( Modality.WINDOW_MODAL )
         stage.show()
+
+        // Never wider than the screen: any text line too long to fit (e.g. a long image name) is
+        // shortened in the middle instead, keeping its start and end
+        double maxContentWidth = maxWindowWidth( stage ) - vbox.getPadding().getLeft() - vbox.getPadding().getRight()
+        rows.each { row ->
+            row.getChildren().findAll { it instanceof Label }.each { label ->
+                label.setMaxWidth( maxContentWidth )
+                label.setTextOverrun( OverrunStyle.CENTER_ELLIPSIS )
+            }
+        }
+        // The window grows rightwards from where it opened, so pull it back if that runs it off screen
+        stage.widthProperty().addListener { obs, oldVal, newVal -> keepOnScreen( stage ) }
 
         // Pre-size once to fit the longest image name (plus every other row), never
         // below the minimum width, so the window opens at its final size rather than
@@ -133,8 +165,8 @@ def createProgressWindow( String title, int totalImages, List imageNames = [] ) 
         double frameWidth = scene.getWidth() > 0 ? Math.max( stage.getWidth() - scene.getWidth(), 0 ) : 0
         double contentWidth = rows.collect { it.prefWidth( -1 ) }.max() + vbox.getPadding().getLeft() + vbox.getPadding().getRight()
         double baselineWidth = Math.max( contentWidth + frameWidth, stage.getMinWidth() )
-        if (baselineWidth > stage.getMinWidth()) { stage.setMinWidth( baselineWidth ) }
-        if (baselineWidth > stage.getWidth())    { stage.setWidth( baselineWidth ) }
+        if (baselineWidth > stage.getMinWidth()) { stage.setMinWidth( Math.min( baselineWidth, maxWindowWidth( stage ) ) ) }
+        if (baselineWidth > stage.getWidth())    { stage.setWidth( Math.min( baselineWidth, maxWindowWidth( stage ) ) ) }
         imageName.set( initialImageName )
         imageNum.set( initialImageNum )
         updateStageWidth()
@@ -160,7 +192,7 @@ def createProgressWindow( String title, int totalImages, List imageNames = [] ) 
         timeline.setCycleCount( Animation.INDEFINITE )
         timeline.play()
         
-        // Stop both timelines when the stage is actually closed
+        // Stop the timer when the stage is actually closed
         stage.setOnHidden { timeline.stop() }
         
         // Signal to stop script
@@ -339,8 +371,9 @@ def extractGeojsonClassNames( File f ) {
     return names
 }
 
-// Helper for extractGeojsonClassNames: walk a "features" array, pulling out
-// properties.classification.name for each feature and skipping everything else.
+// Helper for extractGeojsonClassNames: walk a "features" array, pulling out each feature's
+// properties.classification name and skipping everything else. QuPath writes a plain class as
+// "name": "Tumor" but a subclass as "names": ["Tumor", "Positive"], read back as "Tumor: Positive".
 def readFeatureArrayClasses( JsonReader reader, Set names ) {
     reader.beginArray()
     while (reader.hasNext()) {
@@ -354,8 +387,17 @@ def readFeatureArrayClasses( JsonReader reader, Set names ) {
                     if (reader.nextName() == "classification" && reader.peek() == JsonToken.BEGIN_OBJECT) {
                         reader.beginObject()
                         while (reader.hasNext()) {
-                            if (reader.nextName() == "name" && reader.peek() == JsonToken.STRING) {
+                            String key = reader.nextName()
+                            if (key == "name" && reader.peek() == JsonToken.STRING) {
                                 className = reader.nextString()
+                            } else if (key == "names" && reader.peek() == JsonToken.BEGIN_ARRAY) {
+                                def parts = []
+                                reader.beginArray()
+                                while (reader.hasNext()) {
+                                    if (reader.peek() == JsonToken.STRING) { parts << reader.nextString() } else { reader.skipValue() }
+                                }
+                                reader.endArray()
+                                className = parts.join( ": " )
                             } else {
                                 reader.skipValue()
                             }
@@ -438,19 +480,19 @@ def lockDimensions( Node nodes ) {
 def makeSelectAllCB( List groupCBs ) {
     def selectAllCB = new CheckBox()
     
-    // Select / deselect all action
+    // Select / deselect all action. Only the boxes on show: a hidden one keeps its state
     selectAllCB.setOnAction {
         selectAllCB.setIndeterminate( false )
-        groupCBs.each { it.setSelected( selectAllCB.isSelected() ) }
+        groupCBs.findAll { it.isVisible() }.each { it.setSelected( selectAllCB.isSelected() ) }
     }
     
     // Update relevant labels/instructions when boxes are clicked
     groupCBs.each { cb ->
         cb.selectedProperty().addListener { obs, oldVal, newVal ->
-            int numCBs = groupCBs.size()
-            int numSelected = groupCBs.count { it.isSelected() }
+            def shownCBs = groupCBs.findAll { it.isVisible() }
+            int numSelected = shownCBs.count { it.isSelected() }
             
-            if (numSelected !in [0, numCBs]) {
+            if (numSelected !in [0, shownCBs.size()]) {
                 selectAllCB.setIndeterminate( true )
             
             } else {
@@ -478,6 +520,12 @@ def flagWhenBlocking( node, blocking, String blockedStyle = null ) {
     def flaggedStyle = blockedStyle ?: outlineRedStyle // e.g. an underline in place of an outline
     def clearedStyle = node.getStyle()                 // however the input looks when it isn't blocking
 
+    // A node with no border of its own gets an invisible copy of the flag's border, so the flag
+    // coming and going doesn't change the node's size and nudge the layout around it
+    if (!clearedStyle?.contains( "-fx-border-color" )) {
+        clearedStyle = (clearedStyle ?: "") + flaggedStyle.replace( "red", "transparent" )
+    }
+
     // Hold the binding on the node — a derived binding (e.g. someBinding.not()) is only weakly
     // referenced by its dependencies, so otherwise it can be collected part way through the dialog
     node.getProperties().put( "flagWhenBlocking", blocking )
@@ -485,6 +533,68 @@ def flagWhenBlocking( node, blocking, String blockedStyle = null ) {
     def applyStyle = { boolean isBlocking -> node.setStyle( isBlocking ? flaggedStyle : clearedStyle ) }
     blocking.addListener { obs, oldVal, newVal -> applyStyle( newVal ) }
     applyStyle( blocking.getValue() )
+}
+
+// Function: While the mouse is over a disabled control, show why it's disabled. JavaFX never shows a
+// disabled control's own tooltip (it isn't even picked under the mouse), so this follows the mouse from
+// the window instead. reasons() gives the text: a String, or a map of each reason to whether it applies
+// right now. Nothing shows while no reason applies
+def explainWhenDisabled( Node node, Closure reasons ) {
+    def tip = new Tooltip()
+    def delay = new PauseTransition( tip.getShowDelay() ) // waits as long as an ordinary tooltip
+    double mouseX = 0, mouseY = 0
+    delay.setOnFinished {
+        def window = node.getScene()?.getWindow()
+        if (window?.isShowing()) { tip.show( window, mouseX + 10, mouseY + 7 ) } // where JavaFX puts its own
+    }
+    def hideTip = { delay.stop(); tip.hide() }
+
+    def onMove = { MouseEvent e ->
+        // The window picks the nearest enabled ancestor under the mouse: walk up to it through visible
+        // nodes, and check the node itself is under the mouse (not a part scrolled out of view)
+        def picked = e.getPickResult().getIntersectedNode()
+        def n = node
+        while (n != null && n != picked && n.isVisible()) { n = n.getParent() }
+        boolean over = node.isDisabled() && picked != null && n == picked &&
+                       node.contains( node.sceneToLocal( e.getSceneX(), e.getSceneY() ) )
+
+        def why = over ? reasons() : null
+        List lines = why instanceof Map ? why.findAll { it.value }.collect { it.key as String } : (why ? [why as String] : [])
+        if (!lines) { hideTip(); return }
+        tip.setText( lines.size() > 1 ? lines.collect { "• " + it }.join( "\n" ) : lines[ 0 ] )
+        mouseX = e.getScreenX()
+        mouseY = e.getScreenY()
+        if (!tip.isShowing()) { delay.playFromStart() }
+    } as javafx.event.EventHandler
+    def onExit = { MouseEvent e -> hideTip() } as javafx.event.EventHandler
+
+    // Follow the node into whichever window shows it
+    def attach = { oldScene, newScene ->
+        hideTip()
+        oldScene?.removeEventFilter( MouseEvent.MOUSE_MOVED, onMove )
+        oldScene?.removeEventHandler( MouseEvent.MOUSE_EXITED, onExit )
+        newScene?.addEventFilter( MouseEvent.MOUSE_MOVED, onMove )
+        newScene?.addEventHandler( MouseEvent.MOUSE_EXITED, onExit )
+    }
+    node.sceneProperty().addListener { obs, oldScene, newScene -> attach( oldScene, newScene ) }
+    attach( null, node.getScene() )
+    node.disabledProperty().addListener { obs, oldVal, isDisabled -> if (!isDisabled) { hideTip() } }
+}
+
+// Function: Outline in red the tick box of each selected image with a problem, with the problems as its
+// tooltip. problemsWith( name ) lists an image's problems (none if it has none). The ring is drawn over the
+// box's own edge and just outside it, so it takes no room and nothing moves as it comes and goes. The
+// current image's box keeps its black border
+def outlineImageProblems( List imageCBs, String currentImageName, Closure problemsWith ) {
+    String currentStyle = "-fx-border-color: black; -fx-border-width: 2; -fx-border-radius: 1;"
+    imageCBs.each { cb ->
+        List problems = cb.isSelected() ? (problemsWith( cb.getText() ) ?: []) : []
+        boolean isCurrent = cb.getText() == currentImageName
+        String ring = "-fx-background-color: red, -fx-inner-border, -fx-body-color;" +
+                      "-fx-background-insets: ${isCurrent ? -2 : -1}, 1, 2; -fx-background-radius: 4, 2, 1;"
+        cb.lookup( ".box" )?.setStyle( (isCurrent ? currentStyle : "") + (problems ? ring : "") )
+        problems ? setTT( cb, problems.join( "\n" ) ) : cb.setTooltip( null )
+    }
 }
 
 
@@ -535,45 +645,7 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     
     def scrollPane = new ScrollPane( checkboxContainer )
     VBox.setVgrow( scrollPane, Priority.ALWAYS )
-    
-    
-    // Making scrollpane slide back to left if horizontally scrollable
-    Platform.runLater {
-        def hBar = scrollPane.lookupAll( ".scroll-bar" )
-            .find { it instanceof ScrollBar && it.orientation == Orientation.HORIZONTAL }
-            
-        if (hBar.isVisible()) {
-            def snapBack = new PauseTransition( Duration.millis( 300 ) )
-            snapBack.setOnFinished {
-                new Timeline(
-                    new KeyFrame(
-                        Duration.millis( 200 ),
-                        new KeyValue( scrollPane.hvalueProperty(), 0, Interpolator.EASE_BOTH )
-                    )
-                ).play()
-            }
-            
-            scrollPane.addEventFilter( ScrollEvent.SCROLL ) { e ->
-                if (Math.abs( e.deltaX ) > 0 || e.isShiftDown()) {
-                    def delta = (e.deltaX != 0 ? e.deltaX : e.deltaY)
-                    def sensitivity = 250.0
-                    def newValue = scrollPane.hvalue - (delta / sensitivity)
-                    scrollPane.hvalue = Math.max( 0, Math.min( 1, newValue ) )
-                    e.consume()
-                }
-            }
-            
-            scrollPane.addEventFilter( ScrollEvent.SCROLL_FINISHED ) { e ->
-                snapBack.playFromStart()
-                e.consume()
-            }
-            
-            hBar.addEventFilter( MouseEvent.MOUSE_RELEASED ) {
-                snapBack.playFromStart()
-            }
-        }
-    }
-    
+    pinCheckboxesWhileScrolling( scrollPane, checkboxes )
     
     def titleLabel = new Label()
     titleLabel.setPadding( new Insets( 5, 0, 0, 0 ) )
@@ -582,13 +654,9 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     titleLabel.setText( "${title.capitalize()} [0]" )
     selectAllCB.setText( "${title.capitalize()} [0]" )
 
-    // Reserve at least the widest-count width so the count changing (e.g. [9] -> [10]) never nudges the
-    // header — but only as a *floor* (minWidth), never a fixed or max width. Capping the width to a
-    // measurement is exactly what clipped the title: the first box is laid out before the app's font is
-    // applied, so its measured width comes out too small, and a hard cap then truncates the label for
-    // good (later boxes, rebuilt after the window is styled, measured fine — hence "[0]" clipped but a
-    // rebuilt "[1]" didn't). With only a floor the checkbox always takes at least its own preferred width
-    // for the current text, so the title can never be clipped no matter when we happen to measure.
+    // Floor the header at its widest count, so the count changing (e.g. [9] -> [10]) never nudges it.
+    // Only a floor (minWidth), never a fixed width: the first box can be measured before the app's font
+    // is applied, and a fixed width would then clip the title for good
     boolean selectAllFloorSet = false
     selectAllCB.widthProperty().addListener { obs, oldW, newW ->
         if (!selectAllFloorSet && newW.doubleValue() > 0) {
@@ -607,36 +675,37 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
         }
     }
 
-    // Add listeners to checkboxes (for changing instructions/labels)
+    // Add listeners to checkboxes (for changing instructions/labels). Hidden boxes don't count as selected
+    String TTword = keyWord ?: title
     def refreshLabels = {
-            
-            String TTword = keyWord ?: title
-            
-            def selectedNow = checkboxes.findAll { it.isSelected() }.collect { it.getText() }
-            titleLabel.setText( "${title.capitalize()} [${selectedNow.size()}]" )
-            
-            selectAllCB.setText( "${title.capitalize()} [${selectedNow.size()}]" )
-            setTT( selectAllCB, selectAllCB.isSelected() ? "Deselect all ${TTword.uncapitalize()}" : "Select all ${TTword.uncapitalize()}" )
-            
-            String tooltipText = "Select ${TTword.uncapitalize()}"
-            
-            if (selectedNow.size() > 0) {
-                tooltipText = "${(keyWord ?: title).capitalize()} selected:"
-                selectedNow.eachWithIndex { item, i ->
-                    tooltipText += "\n ${i+1}. ${item}"
-                }
+        def selectedNow = checkboxes.findAll { it.isSelected() && it.isVisible() }.collect { it.getText() }
+        titleLabel.setText( "${title.capitalize()} [${selectedNow.size()}]" )
+        
+        selectAllCB.setText( "${title.capitalize()} [${selectedNow.size()}]" )
+        setTT( selectAllCB, selectAllCB.isSelected() ? "Deselect all ${TTword.uncapitalize()}" : "Select all ${TTword.uncapitalize()}" )
+        
+        String tooltipText = "Select ${TTword.uncapitalize()}"
+        
+        if (selectedNow.size() > 0) {
+            tooltipText = "${TTword.capitalize()} selected:"
+            selectedNow.eachWithIndex { item, i ->
+                tooltipText += "\n ${i+1}. ${item}"
             }
-            
-            setTT( [titleLabel, scrollPane], tooltipText )
         }
+        
+        setTT( [titleLabel, scrollPane], tooltipText )
+    }
     checkboxes.each { cb ->
         cb.selectedProperty().addListener { obs, oldVal, newVal -> refreshLabels() }
         cb.textProperty().addListener { obs, oldVal, newVal -> refreshLabels() }
         
-        // Double fire to spark listeners
-        cb.setSelected( !cb.isSelected() )
-        cb.setSelected( !cb.isSelected() )
+        // Hidden boxes don't count as selected, so showing/hiding one re-fires its selection listeners
+        cb.visibleProperty().addListener { obs, oldVal, newVal ->
+            cb.setSelected( !cb.isSelected() )
+            cb.setSelected( !cb.isSelected() )
+        }
     }
+    refreshLabels()
     
     // Allowing shift + click to select/deselect multiple
     CheckBox lastClicked = null   
@@ -649,13 +718,13 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
                 int start = Math.min( lastIdx, idx )
                 int end   = Math.max( lastIdx, idx )
     
-                // Use the state of the checkbox just clicked
+                // JavaFX doesn't tick a box on a shift-click, so the range copies the box clicked before it
                 boolean value = lastClicked.isSelected()
     
                 (start..end).each { i ->
-                    cb = checkboxes[i]
-                    if (!cb.isDisabled() && cb.isVisible() ) {
-                        cb.setSelected( value )
+                    def other = checkboxes[ i ] // never reassign cb: this handler would keep it, and anchor later clicks on the wrong box
+                    if (!other.isDisabled() && other.isVisible()) {
+                        other.setSelected( value )
                     }
                 }
             }
@@ -682,15 +751,193 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     topRow.setStyle( "-fx-border-color: #000000; -fx-border-width: 0 0 1 0" )    
     scrollPane.setStyle( "-fx-background-color: transparent" )
     
+    // Width needed to show the widest item without clipping, never less than the requested width.
+    // Measures every checkbox, hidden ones included, so filtering the list never changes the width
+    def naturalWidth = {
+        double widest = noneAvailableLabel.prefWidth( -1 )
+        checkboxes.each { cb ->
+            cb.applyCss()
+            double w = cb.prefWidth( -1 )
+            // A checkbox whose text changes (e.g. a count that follows the selected images) can name the
+            // widest text it may ever show, as a closure taking its font, so the box doesn't resize with it
+            def widestText = cb.getProperties().get( "widestText" )
+            if (widestText != null) {
+                w += textWidth( widestText( cb.getFont() ), cb.getFont() ) - textWidth( cb.getText(), cb.getFont() )
+            }
+            widest = Math.max( widest, w )
+        }
+        def vBar = scrollPane.lookupAll( ".scroll-bar" ).find { it instanceof ScrollBar && it.orientation == Orientation.VERTICAL }
+        double barW = (vBar != null && vBar.prefWidth( -1 ) > 0) ? vBar.prefWidth( -1 ) : 15 // always leave room for the bar
+        double listW = widest + insetsW( checkboxContainer ) + insetsW( scrollPane ) + barW
+        double contentW = Math.max( listW, topRow.prefWidth( -1 ) ) + insetsW( checkboxBox )
+        return Math.ceil( Math.max( prefWidth, contentW ) )
+    }
+
     return [
-        box      : checkboxBox,
-        header   : topRow,
-        selectAll: selectAllCB,
-        title    : titleLabel,
-        spacer   : topRowSpacer,
-        clear    : clearBtn,
-        CBs      : checkboxes
+        box         : checkboxBox,
+        header      : topRow,
+        selectAll   : selectAllCB,
+        title       : titleLabel,
+        spacer      : topRowSpacer,
+        clear       : clearBtn,
+        CBs         : checkboxes,
+        naturalWidth: naturalWidth,
+        minWidth    : prefWidth > 0 ? prefWidth : 150 // narrowest the box may shrink to when the screen is too small
     ]
+}
+
+// Function: Keep each checkbox's box pinned at the left edge while its text scrolls horizontally. The
+// text is drawn by a clipped Label set as the checkbox's graphic: the checkbox keeps its own text (so
+// anything reading getText() is unaffected), it just doesn't draw it. Scrolling slides the whole
+// checkbox right by the scroll offset and its Label back left by the same amount, so the words move
+// with the scroll while the box stays put, and the clip hides the words once they reach the box
+def pinCheckboxesWhileScrolling( ScrollPane scrollPane, List checkboxes ) {
+    List labels = checkboxes.collect { cb ->
+        def label = new Label()
+        label.textProperty().bind( cb.textProperty() )
+        // A graphic doesn't get the gap a checkbox normally leaves before its text, so add it back
+        label.layoutXProperty().bind( Bindings.createDoubleBinding( { cb.getLabelPadding().getLeft() }, cb.labelPaddingProperty() ) )
+        def holder = new Pane( label )
+        def clip = new javafx.scene.shape.Rectangle()
+        clip.xProperty().bind( label.layoutXProperty() ) // scrolled words vanish at the usual gap, not right against the box
+        clip.widthProperty().bind( holder.widthProperty().subtract( label.layoutXProperty() ) )
+        clip.heightProperty().bind( holder.heightProperty() )
+        holder.setClip( clip )
+        cb.setGraphic( holder )
+        cb.setContentDisplay( ContentDisplay.GRAPHIC_ONLY )
+        return label
+    }
+
+    // The scroll pane scrolls by shifting a wrapper around the content to a pixel-snapped position.
+    // Follow that exact position rather than recomputing it from the scroll value — any rounding
+    // difference between the two makes the boxes jiggle as you scroll
+    def content = scrollPane.getContent()
+    def update = {
+        double offset = -(content.getLayoutX() + (content.getParent()?.getLayoutX() ?: 0))
+        checkboxes.eachWithIndex { cb, i ->
+            cb.setTranslateX( offset )
+            labels[ i ].setTranslateX( -offset )
+        }
+    }
+    content.layoutXProperty().addListener { obs, oldVal, newVal -> update() }
+    content.parentProperty().addListener { obs, oldParent, newParent ->
+        newParent?.layoutXProperty()?.addListener { o, oldVal, newVal -> update() }
+        update()
+    }
+}
+
+// Function: Rendered width of a string in a given font
+def textWidth( text, font ) {
+    def t = new javafx.scene.text.Text( text as String )
+    t.setFont( font )
+    return t.getLayoutBounds().getWidth()
+}
+
+// Function: The widest-rendering number with as many digits as max (digit glyphs differ in width, so
+// e.g. "1" is narrower than "0") — for reserving room for a count that can grow up to max
+def widestNumber( max, font ) {
+    String widestDigit = ('0'..'9').max { textWidth( it, font ) }
+    return widestDigit * "${max}".length()
+}
+
+// Function: Horizontal padding + border of a region
+def insetsW( Region region ) {
+    def ins = region.getInsets()
+    return ins.getLeft() + ins.getRight()
+}
+
+// Function: Size each checkbox box to its widest item, widening the dialog to fit — but never past the
+// edge of the screen; if everything can't fit, the widest boxes give up width first (down to their
+// minimum, or 100px on a screen too small even for that) and their lists scroll horizontally.
+// Re-fits whenever an item's text changes. Takes a closure returning the current box maps so rebuilt
+// boxes are picked up; returns a closure that requests a re-fit (call it after rebuilding boxes)
+def fitBoxesToScreen( Dialog dialog, Closure currentBoxes ) {
+    boolean pending = false
+    Double decoration = null // window frame width; measured once, as the scene lags behind window resizes
+    def refit
+    def requestRefit = {
+        if (pending) { return }
+        pending = true
+        Platform.runLater { pending = false; refit() } // coalesce bursts of text changes into one pass
+    }
+
+    refit = {
+        def window = dialog.getDialogPane().getScene()?.getWindow()
+        if (window == null || !window.isShowing()) { return }
+        List boxes = currentBoxes().findAll { it != null }
+
+        boxes.each { b ->
+            // The header's count floor (see makeCheckboxBox) lands a pulse after showing and can widen it
+            if (!b.selectAll.getProperties().containsKey( "fitBoxesListener" )) {
+                b.selectAll.getProperties().put( "fitBoxesListener", true )
+                b.selectAll.minWidthProperty().addListener { obs, oldVal, newVal -> requestRefit() }
+            }
+            // Boxes that show a count title in their header (rather than the select-all) widen with it
+            if (b.header.getChildren().contains( b.title ) && !b.title.getProperties().containsKey( "fitBoxesListener" )) {
+                b.title.getProperties().put( "fitBoxesListener", true )
+                b.title.textProperty().addListener { obs, oldVal, newVal -> requestRefit() }
+            }
+            b.CBs.each { cb ->
+                if (!cb.getProperties().containsKey( "fitBoxesListener" )) {
+                    cb.getProperties().put( "fitBoxesListener", true )
+                    cb.textProperty().addListener { obs, oldVal, newVal -> requestRefit() }
+                }
+            }
+        }
+
+        // No max width, so a box can still stretch into spare room (e.g. when it's the BorderPane centre)
+        def setBoxWidth = { b, double w ->
+            b.box.setMinWidth( w )
+            b.box.setPrefWidth( w )
+            b.box.setMaxWidth( Double.MAX_VALUE )
+        }
+
+        List naturals = boxes.collect { it.naturalWidth() as double }
+        boxes.eachWithIndex { b, i -> setBoxWidth( b, naturals[ i ] ) }
+
+        def pane = dialog.getDialogPane()
+        pane.applyCss()
+        if (decoration == null) { decoration = Math.max( 0, window.getWidth() - window.getScene().getWidth() ) }
+        double needed = pane.prefWidth( -1 ) + decoration
+
+        def screen = Screen.getScreensForRectangle( window.getX(), window.getY(), window.getWidth(), window.getHeight() )
+                .find() ?: Screen.getPrimary()
+        def bounds = screen.getVisualBounds()
+        double available = bounds.getWidth() - 20
+
+        if (needed > available) {
+            // Find the cap level where capping every box at max(level, its minimum) absorbs the excess.
+            // Repeated, since boxes stacked in a column only free up the width of the widest of them
+            List floors = (0..<boxes.size()).collect { i -> Math.min( boxes[ i ].minWidth as double, naturals[ i ] as double ) }
+            def widthsAt = { List fl, double level -> (0..<naturals.size()).collect { i -> Math.min( naturals[ i ] as double, Math.max( level, fl[ i ] as double ) ) } }
+            double target = naturals.sum()
+            for (int pass = 0; pass < 6 && needed > available + 0.5; pass++) {
+                target -= (needed - available)
+                if (floors.sum() > target) { floors = floors.collect { Math.min( it as double, 100d ) } } // tiny screen
+                double lo = 0, hi = naturals.max()
+                30.times {
+                    double mid = (lo + hi) / 2
+                    if (widthsAt( floors, mid ).sum() > target) { hi = mid } else { lo = mid }
+                }
+                List capped = widthsAt( floors, lo )
+                boxes.eachWithIndex { b, i -> setBoxWidth( b, Math.floor( capped[ i ] as double ) ) }
+                pane.applyCss()
+                needed = pane.prefWidth( -1 ) + decoration
+            }
+            needed = Math.min( needed, available )
+        }
+
+        // Grow (or shrink) around the window's current centre, then keep it on screen
+        double oldW = window.getWidth()
+        if (Math.abs( needed - oldW ) < 1) { return }
+        double x = window.getX() - (needed - oldW) / 2
+        window.setWidth( needed )
+        x = Math.min( x, bounds.getMaxX() - needed )
+        window.setX( Math.max( x, bounds.getMinX() ) )
+    }
+
+    dialog.setOnShown { requestRefit() }
+    return requestRefit
 }
 
 
@@ -712,11 +959,11 @@ def naturalCompare( String s1, String s2 ) {
 
 
 // Function: The class label used to identify an object by class. Mirrors QuPath's project
-// summary (DefaultProject.HierarchySummary.pathClassToString), which labels null-class
-// (unclassified) objects "Unclassified". That's the label the class list offers, so null-class
-// objects must map back to it here — otherwise "Unclassified" is selectable but never matches.
+// summary (DefaultProject.HierarchySummary.pathClassToString), which the class lists come from: the
+// full name, so a subclass is "Tumor: Positive" rather than getName()'s "Positive", and "Unclassified"
+// for an object with no class. A label that differs would be selectable but never match.
 def classLabelForObject( obj ) {
-    return obj.getPathClass()?.getName() ?: "Unclassified"
+    return obj.getPathClass()?.toString() ?: "Unclassified"
 }
 
 
@@ -738,6 +985,42 @@ runOnFxThreadAndWait {
         def viewerEntry = project.getEntry( viewerData )
         if (viewerEntry == null) { return }
         viewersByEntryId.get( viewerEntry.getID(), [] ) << viewer
+    }
+}
+
+// Viewers showing an image right now — a pane the user re-points mid-run stops counting
+def viewersForEntry = { entry ->
+    if (entry == null) { return [] }
+    ( viewersByEntryId[ entry.getID() ] ?: [] ).findAll { viewer ->
+        def viewerData = viewer.getImageData()
+        viewerData != null && project.getEntry( viewerData )?.getID() == entry.getID()
+    }
+}
+
+// The live ImageData a viewer holds for this image, or null when no pane is showing it
+def liveDataForEntry = { entry ->
+    def viewers = viewersForEntry( entry )
+    viewers ? viewers[ 0 ].getImageData() : null
+}
+
+// Annotation class counts taken straight from a live hierarchy
+def liveClassCounts = { imgData ->
+    def counts = [:]
+    imgData.getHierarchy().getAnnotationObjects().each { obj ->
+        def cn = classLabelForObject( obj )
+        counts[ cn ] = (counts[ cn ] ?: 0) + 1
+    }
+    return counts
+}
+
+// Every viewer showing an image redraws what it now holds — including split panes that aren't selected,
+// which otherwise keep drawing the objects they had before the run. Done before saving: redrawing marks
+// the data as having unsaved changes, which the save then clears
+def redrawViewers = { imageData, List openViewers ->
+    if (!openViewers) { return }
+    runOnFxThreadAndWait {
+        imageData.getHierarchy().fireHierarchyChangedEvent( this )
+        openViewers.each { it.repaintEntireImage() }
     }
 }
 
@@ -772,26 +1055,25 @@ def codePreferences = runOnFxThreadAndWait {
     root.setPrefHeight( 350 )
     
     // Defining mode buttons early because other functions rely on their status
-    def exportButton = new ToggleButton( " Export" )
-    addIcon( exportButton, FontAwesome.Glyph.UPLOAD, 14 )
-    def importButton = new ToggleButton( " Import" )
-    addIcon( importButton, FontAwesome.Glyph.DOWNLOAD, 14 )
-    
-    // Stop mode buttons from being untoggled (must click other)
-    [exportButton, importButton].each { btn ->
-        btn.setFocusTraversable( false )
-        btn.addEventFilter( MouseEvent.MOUSE_PRESSED ) {
-            if (btn.isSelected()) {
-                it.consume()
-            }
-        }
-    }
-    
-    // Creating group for mode buttons
     def modeButtons = new ToggleGroup()
-    exportButton.setToggleGroup( modeButtons )
-    importButton.setToggleGroup( modeButtons )
-    
+    def makeModeButton = { String text, glyph ->
+        def btn = new ToggleButton( text )
+        addIcon( btn, glyph, 14 )
+        btn.setUserData( glyph ) // the "OK" button shows the selected mode's name and icon
+        btn.setToggleGroup( modeButtons )
+        btn.setFocusTraversable( false )
+        // Can't be untoggled by clicking it again (click another mode instead)
+        btn.addEventFilter( MouseEvent.MOUSE_PRESSED ) { if (btn.isSelected()) { it.consume() } }
+        return btn
+    }
+    def exportButton = makeModeButton( " Export", FontAwesome.Glyph.UPLOAD )
+    def importButton = makeModeButton( " Import", FontAwesome.Glyph.DOWNLOAD )
+    def nestButton   = makeModeButton( " Nest", FontAwesome.Glyph.SIGN_IN )
+    setTT( exportButton, "Export objects of the selected classes to GeoJSON files in the folder" )
+    setTT( importButton, "Import objects from GeoJSON files in the folder" )
+    setTT( nestButton, "Fix hierarchy of existing objects (no importing/exporting)" )
+    def modes = ["export": exportButton, "import": importButton, "nest": nestButton]
+
     // Setting style for mode buttons
     def commonStyle =
     "-fx-font-size: 13px;" +
@@ -809,36 +1091,24 @@ def codePreferences = runOnFxThreadAndWait {
         "-fx-opacity: 0.6;"
     
     def updateModeButtonStyles = {
-        exportButton.setStyle(
-            exportButton.isSelected() ? selectedStyle : unselectedStyle
-        )
-        importButton.setStyle(
-            importButton.isSelected() ? selectedStyle : unselectedStyle
-        )
+        modeButtons.getToggles().each { it.setStyle( it.isSelected() ? selectedStyle : unselectedStyle ) }
     }
-    
+
     modeButtons.selectedToggleProperty().addListener { obs, oldVal, newVal ->
         updateModeButtonStyles()
     }
-    
+
     updateModeButtonStyles()
-    
+
     // Restore previous mode or default to Export
-    prePrefsMap.mode == "import" ? modeButtons.selectToggle( importButton ) : modeButtons.selectToggle( exportButton )
-    
-    
-    // BOTTOM: Ok, cancel, and resolve hierarchy buttons
-    def resolveHierarchyBtnType = new ButtonType( " Nest existing objects", ButtonBar.ButtonData.LEFT )
-    
-    dialog.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.CANCEL, resolveHierarchyBtnType )
+    modeButtons.selectToggle( modes[ prePrefsMap.mode ] ?: exportButton )
+
+
+    // BOTTOM: OK and cancel buttons
+    dialog.getDialogPane().buttonTypes.setAll( ButtonType.OK, ButtonType.CANCEL )
     def okBtn = dialog.getDialogPane().lookupButton( ButtonType.OK )
-    def resolveHierarchyBtn = dialog.getDialogPane().lookupButton( resolveHierarchyBtnType )
-    addIcon( resolveHierarchyBtn, FontAwesome.Glyph.SIGN_IN, 14 )
     ButtonBar.setButtonUniformSize( okBtn, false )
-    
-    setTT( resolveHierarchyBtn, "Fix hierarchy of existing objects (no importing/exporting)" )
-    ButtonBar.setButtonUniformSize( resolveHierarchyBtn, false )
-    
+
     
     
     // RIGHT PANEL: PathClass selection list
@@ -886,17 +1156,10 @@ def codePreferences = runOnFxThreadAndWait {
     // above only knows what was last saved. Cheap, since those images are already loaded, and safe
     // on the FX thread we're already running on.
     boolean anyLiveCounts = false
-    viewersByEntryId.each { entryId, viewers ->
-        def liveData = viewers.collect { it.getImageData() }.find {
-            it != null && project.getEntry( it )?.getID() == entryId
-        }
+    project.getImageList().each { entry ->
+        def liveData = liveDataForEntry( entry )
         if (liveData == null) { return }
-        def liveCounts = [:]
-        liveData.getHierarchy().getAnnotationObjects().each { obj ->
-            def cn = classLabelForObject( obj )
-            liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
-        }
-        imageClassCounts[ project.getEntry( liveData ).getImageName() ] = liveCounts
+        imageClassCounts[ entry.getImageName() ] = liveClassCounts( liveData )
         anyLiveCounts = true
     }
 
@@ -909,6 +1172,9 @@ def codePreferences = runOnFxThreadAndWait {
             }
         }
     }
+
+    // Number of objects in an image (live for images open in a viewer, as above)
+    def objectCount = { String imgName -> (imageClassCounts[ imgName ]?.values()?.sum() ?: 0) as int }
 
     // Only classes with existing annotations in project, sorted by abundance
     List pathClassCBsMap = totalsByClass
@@ -936,18 +1202,7 @@ def codePreferences = runOnFxThreadAndWait {
         currentImageCB.selectedProperty().bindBidirectional(
             currentCB.selectedProperty()
         )
-        
-        // Setting bright border on checkbox for current image
-        Platform.runLater { 
-            [currentCB, currentImageCB].each {
-                it.lookup( ".box" )?.setStyle("""
-                    -fx-border-color: black;
-                    -fx-border-width: 2;
-                    -fx-border-radius: 1;
-                """)
-            }
-        }
-        
+
         // If current image was only one selected, will update to new image
         if (prePrefsMap.currentImage == true && prePrefsMap.selectedImages.size() == 1) {
             imagesBox.CBs.each { it.setSelected( false ) }
@@ -955,6 +1210,7 @@ def codePreferences = runOnFxThreadAndWait {
         }
     } else {
         currentImageCB.setDisable( true )
+        explainWhenDisabled( currentImageCB ) { "No image is open in the viewer" }
     }
     
     // Setting and updating tooltip for current image checkbox
@@ -980,6 +1236,8 @@ def codePreferences = runOnFxThreadAndWait {
             def sel   = selectedTotals[ className ] ?: 0
             def total = totalsByClass[ className ]  ?: 0
             cb.setText( total > 0 ? "${className} [${sel} / ${total}]" : className )
+            // Reserve room for the widest the count can read, so selecting images doesn't resize the box
+            cb.getProperties().put( "widestText", { font -> total > 0 ? "${className} [${widestNumber( total, font )} / ${total}]" : className } )
         }
     }
     
@@ -992,15 +1250,9 @@ def codePreferences = runOnFxThreadAndWait {
     
     // TOP: Folder chooser + Export/Import mode + Include Parents
     def folderRow = new HBox( 10 )
+    folderRow.setAlignment( Pos.CENTER_LEFT ) // centre the labels on the taller "Browse" button
     def folderTitleLabel = new Label( " Folder:" )
     addIcon( folderTitleLabel, FontAwesome.Glyph.FOLDER, 14 )
-    
-    // Closure: Get width of text in popup
-    def getTextWidth = { String text_width, Font font_width ->
-        def temp = new Text( text_width )
-        temp.setFont( font_width )
-        return temp.getLayoutBounds().getWidth()
-    }
     
     // Closure: Make the selected folder path viewable
     def formatFolderPathView = { String path_format, double maxWidth, Font font_format ->
@@ -1010,7 +1262,7 @@ def codePreferences = runOnFxThreadAndWait {
         for (folder in reversePathSplit.drop( 1 )) {
             def extendedViewPath = folder + "  ▶  " + viewPath
             
-            if (getTextWidth( extendedViewPath, font_format ) > (maxWidth * 0.85)) {
+            if (textWidth( extendedViewPath, font_format ) > (maxWidth * 0.85)) {
                 return "...  ▶  " + viewPath
             }
             viewPath = extendedViewPath
@@ -1021,7 +1273,15 @@ def codePreferences = runOnFxThreadAndWait {
     def folderPathLabel = new Label()
     folderPathLabel.setMaxWidth( Double.MAX_VALUE )
     HBox.setHgrow( folderPathLabel, Priority.ALWAYS )
-    
+    // The remembered folder, unless it has since been deleted or moved
+    def selectedFolderPath = new File( prePrefsMap.selectedFolder ?: "" ).isDirectory() ? prePrefsMap.selectedFolder : null
+
+    // Folder path is dimmed, more so when there's none. Not while nesting: the folder rows are disabled
+    // then, and a set opacity would stop them dimming this label along with the rest
+    def styleFolderPathLabel = {
+        folderPathLabel.setStyle( nestButton.isSelected() ? "" : selectedFolderPath ? "-fx-opacity: 0.8;" : "-fx-opacity: 0.5;" )
+    }
+
     // Formatting/updating folder path label
     boolean widthUpdated = false
     double folderPathLabelWidth = 0
@@ -1030,10 +1290,10 @@ def codePreferences = runOnFxThreadAndWait {
         if (!widthUpdated) {
             folderPathLabelWidth = folderPathLabel.getWidth()
             widthUpdated = true
-            
-            folderPathLabel.setText( formatFolderPathView( prePrefsMap.selectedFolder ?: null, folderPathLabelWidth, folderPathLabelFont ) )
-            setTT( folderPathLabel, prePrefsMap.selectedFolder ?: "No folder selected" )
-            folderPathLabel.setStyle( prePrefsMap.selectedFolder ? "-fx-opacity: 0.8;" : "-fx-opacity: 0.5;" )
+
+            folderPathLabel.setText( formatFolderPathView( selectedFolderPath, folderPathLabelWidth, folderPathLabelFont ) )
+            setTT( folderPathLabel, selectedFolderPath ?: "No folder selected" )
+            styleFolderPathLabel()
         }
     }
     
@@ -1045,19 +1305,9 @@ def codePreferences = runOnFxThreadAndWait {
     folderStatusRow.getChildren().addAll( folderStatusTitle, folderStatusLabel )
     folderStatusLabel.setStyle( "-fx-opacity: 0.8;" )
     
-    // Closure: Count number of geoJson files in a folder path
-    def countGeoJsonFiles = { String folderPath ->
-        if (!folderPath) return 0
-        def folder = new File( folderPath )
-        if (!folder.exists() || !folder.isDirectory()) return 0
-        return folder.listFiles()?.count { f ->
-            f.isFile() && f.name.toLowerCase().endsWith( ".geojson" )
-        } ?: 0
-    }
-    
-    // Closure: Get all geoJson file names from target folder
+    // Closure: Get all geoJson file names from target folder (none if it's missing)
     List geojsonFileNames = []
-    Map CbFileMatches = [:]
+    Map matchInfo = [:]   // which selected images do / don't have a file in the folder
     def getGeojsonFileNames = { String folderPath ->
         if (!folderPath) { return [] }
         
@@ -1066,7 +1316,11 @@ def codePreferences = runOnFxThreadAndWait {
             it.isFile() && it.getName().toLowerCase().endsWith( ".geojson" )
         }
         
-        return geojsonFiles.collect { it.getName().replace( ".geojson", "" ) }
+        // Names less the extension, however it's capitalised (as the filter above allows)
+        return geojsonFiles.collect { file ->
+            String name = file.getName()
+            name.substring( 0, name.length() - ".geojson".length() )
+        }
     }
     
     // Closure: Find matching text between list and selected CB names
@@ -1079,34 +1333,43 @@ def codePreferences = runOnFxThreadAndWait {
     }
     
     // Closure: Change folder status label formatting
-    def updateFolderStatus = { String folderPath, Map matchInfo ->
-        def setStatus = { String text, String style, String tooltip, FontAwesome.Glyph icon = null ->
-            folderStatusLabel.setText( text )
-            folderStatusLabel.setStyle( style )
-            setTT( folderStatusLabel, tooltip )
-            if (icon) { addIcon( folderStatusTitle, icon, 14 ) }
+    def updateFolderStatus = { String folderPath, Map matches_status ->
+        // Named arguments (a map), so nothing here is mistaken for a script-wide variable
+        def setStatus = { Map a ->
+            folderStatusLabel.setText( a.text )
+            folderStatusLabel.setStyle( a.style )
+            setTT( folderStatusLabel, a.tooltip )
+            if (a.icon) { addIcon( folderStatusTitle, a.icon, 14 ) }
         }
     
         def dim     = "-fx-opacity: 0.5;"
         def green   = "-fx-text-fill: green;"
         def red     = "-fx-text-fill: red;"
         def neutral = "Specifics of issues with files in folder will appear here."
-    
+
+        if (nestButton.isSelected()) {
+            setStatus( text:     "Not used when nesting",
+                       style:    "", // dimmed with the rest of the disabled folder rows
+                       tooltip:  "Nesting only uses the objects already in each image.",
+                       icon:     FontAwesome.Glyph.SEARCH )
+            return
+        }
+
         if (!folderPath) {
-            setStatus( text    = "No folder selected",
-                       style   = dim,
-                       tooltip = neutral )
+            setStatus( text:     "No folder selected",
+                       style:    dim,
+                       tooltip:  neutral )
             return
         }
     
-        List matches    = matchInfo.matchingFileNames
-        List nonMatches = matchInfo.unmatchingFileNames
+        List matches    = matches_status.matchingFileNames
+        List nonMatches = matches_status.unmatchingFileNames
     
         if (matches.isEmpty() && nonMatches.isEmpty()) {
-            setStatus( text    = "No images selected",
-                       style   = dim,
-                       tooltip = neutral,
-                       icon    = FontAwesome.Glyph.SEARCH )
+            setStatus( text:     "No images selected",
+                       style:    dim,
+                       tooltip:  neutral,
+                       icon:     FontAwesome.Glyph.SEARCH )
             return
         }
     
@@ -1114,47 +1377,74 @@ def codePreferences = runOnFxThreadAndWait {
     
         if (exportMode) {
             if (matches.isEmpty()) {
-                setStatus( text    = "Found no files matching selected images.",
-                           style   = green,
-                           tooltip = "No issues with folder.",
-                           icon    = FontAwesome.Glyph.THUMBS_UP )
+                setStatus( text:     "Found no files matching selected images.",
+                           style:    green,
+                           tooltip:  "No issues with folder.",
+                           icon:     FontAwesome.Glyph.THUMBS_UP )
             } else {
-                setStatus( text    = "Found (${matches.size()}) existing files matching selected images.",
-                           style   = red,
-                           tooltip = "Image files with matching names in selected folder: \n\n- ${matches.join('\n- ')}",
-                           icon    = FontAwesome.Glyph.THUMBS_DOWN )
+                setStatus( text:     "Found (${matches.size()}) existing files matching selected images.",
+                           style:    red,
+                           tooltip:  "Image files with matching names in selected folder: \n\n- ${matches.join('\n- ')}",
+                           icon:     FontAwesome.Glyph.THUMBS_DOWN )
             }
         } else {
             if (nonMatches.isEmpty()) {
-                setStatus( text    = "Found files matching all selected images.",
-                           style   = green,
-                           tooltip = "No issues with folder.",
-                           icon    = FontAwesome.Glyph.THUMBS_UP )
+                setStatus( text:     "Found files matching all selected images.",
+                           style:    green,
+                           tooltip:  "No issues with folder.",
+                           icon:     FontAwesome.Glyph.THUMBS_UP )
             } else if (matches.isEmpty()) {
-                setStatus( text    = "Could not find any files matching selected images.", 
-                           style   = red, 
-                           tooltip = "No image files found.", 
-                           icon    = FontAwesome.Glyph.THUMBS_DOWN )
+                setStatus( text:     "Could not find any files matching selected images.", 
+                           style:    red, 
+                           tooltip:  "No image files found.", 
+                           icon:     FontAwesome.Glyph.THUMBS_DOWN )
             } else {
-                setStatus( text    = "Could not find (${nonMatches.size()}) files matching selected images.",
-                           style   = red,
-                           tooltip = "Image files that could not be found in selected folder: \n\n- ${nonMatches.join('\n- ')}",
-                           icon    = FontAwesome.Glyph.THUMBS_DOWN )
+                setStatus( text:     "Could not find (${nonMatches.size()}) files matching selected images.",
+                           style:    red,
+                           tooltip:  "Image files that could not be found in selected folder: \n\n- ${nonMatches.join('\n- ')}",
+                           icon:     FontAwesome.Glyph.THUMBS_DOWN )
             }
         }
     }
     
+    // Red ring on each selected image that would hit a problem in the chosen mode
+    def updateImageFlags = {
+        Set withFile    = selectedFolderPath ? matchInfo.matchingFileNames : []   // selected, file in folder
+        Set withoutFile = selectedFolderPath ? matchInfo.unmatchingFileNames : [] // selected, no file in folder
+        def selectedClasses = pathClassBox.CBs.findAll { it.isSelected() }.collect { it.getUserData() }
+        outlineImageProblems( imagesBox.CBs, currentEntry?.getImageName() ) { String name ->
+            List problems = []
+            if (nestButton.isSelected()) {
+                if (objectCount( name ) == 0) { problems << "No objects to nest" }
+            } else if (exportButton.isSelected()) {
+                if (name in withFile) { problems << "A file for this image is already in the folder" }
+                // Only once a class is chosen (until then the class box itself is flagged)
+                if (selectedClasses && !selectedClasses.any { imageClassCounts[ name ]?.get( it ) }) {
+                    problems << "No objects of the selected classes to export"
+                }
+            } else if (name in withoutFile) {
+                problems << "No file for this image in the folder"
+            }
+            return problems
+        }
+    }
+    pathClassBox.CBs.each { cb -> cb.selectedProperty().addListener { obs, oldVal, newVal -> updateImageFlags() } }
+
+    // Re-run the folder check, and the image outlines with it, for the current folder, images and mode
+    def refreshFolderCheck = {
+        matchInfo = getMatchingFiles( geojsonFileNames, imagesBox.CBs )
+        updateFolderStatus( selectedFolderPath, matchInfo )
+        updateImageFlags()
+    }
+
     def browseButton = new Button( " Browse" )
     addIcon( browseButton, FontAwesome.Glyph.FOLDER_OPEN_ALT, 14 )
     setTT( browseButton, "Select folder" )
-    def selectedFolderPath = prePrefsMap.selectedFolder ?: null
-    
+
     // Making a binding to stop from importing from an empty folder
-    def hasGeoJsonFiles = Bindings.createBooleanBinding(
-        { if (!selectedFolderPath) return false
-          return countGeoJsonFiles( selectedFolderPath ) > 0 }
-    )
-    
+    geojsonFileNames = getGeojsonFileNames( selectedFolderPath )
+    def hasGeoJsonFiles = Bindings.createBooleanBinding( { !geojsonFileNames.isEmpty() } )
+
     // Allowing a folder to be browsed for and making updates after
     browseButton.setOnAction {
         def chooser = new DirectoryChooser()
@@ -1173,119 +1463,123 @@ def codePreferences = runOnFxThreadAndWait {
         def chosen = chooser.showDialog( owner )
         if (chosen != null) {
             selectedFolderPath = chosen.getAbsolutePath()
-            hasGeoJsonFiles.invalidate()
+            geojsonFileNames = getGeojsonFileNames( selectedFolderPath )
+            hasGeoJsonFiles.invalidate() // only once the new file names are in, as it's re-read straight away
             folderPathLabel.setText( formatFolderPathView( selectedFolderPath, folderPathLabelWidth, folderPathLabelFont ) )
             setTT( folderPathLabel, selectedFolderPath )
-            geojsonFileNames = getGeojsonFileNames( selectedFolderPath )
-            matchInfo = getMatchingFiles( geojsonFileNames, imagesBox.CBs )
-            updateFolderStatus( selectedFolderPath, matchInfo )
-            folderPathLabel.setStyle( "-fx-opacity: 0.8;" )
+            styleFolderPathLabel()
+            refreshFolderCheck()
         }
     }
-    
+
     imagesBox.CBs.each { cb ->
-        cb.selectedProperty().addListener { obs, oldVal, newVal ->
-            matchInfo = getMatchingFiles( geojsonFileNames, imagesBox.CBs )
-            updateFolderStatus( selectedFolderPath, matchInfo )
-        }
+        cb.selectedProperty().addListener { obs, oldVal, newVal -> refreshFolderCheck() }
     }
-    
-    geojsonFileNames = getGeojsonFileNames( selectedFolderPath )
-    matchInfo = getMatchingFiles( geojsonFileNames, imagesBox.CBs )
-    updateFolderStatus( selectedFolderPath, matchInfo )
-    
+
     folderRow.getChildren().addAll( folderTitleLabel, folderPathLabel, browseButton )
     
     
     
-    // SECOND TO TOP ROW: mode, remove objects, include parents buttons
-    // Setting the text on the confirm button to which mode is pre-selected (import vs export)
-    boolean exportPreSelected = exportButton.isSelected()
-    okBtn.setText( exportPreSelected ? " Export" : " Import" )
-    addIcon( okBtn, exportPreSelected ? FontAwesome.Glyph.UPLOAD : FontAwesome.Glyph.DOWNLOAD, 14 )
-    
+    // SECOND TO TOP ROW: mode buttons and Include Parents
     // Spacer pushes Include Parents to far right
     def modeSpacer = new Region()
     HBox.setHgrow( modeSpacer, Priority.ALWAYS )
-    
+
     // Include Parents checkbox
     def includeParentsCheck = new CheckBox( "Include Parents" )
     includeParentsCheck.setSelected( true ) // Default to true
-    
-    // Initial tooltip hint
+
     def exportParentsTTtext = "Add parent info to objects' metadata before export (so hierarchy can be restored when re-imported)"
     def importParentsTTtext = "Use saved parent info in metadata to restore hierarchy (only if exported from here)"
-    setTT( includeParentsCheck, exportButton.isSelected() ? exportParentsTTtext : importParentsTTtext )
-    
-    if (prePrefsMap.mode == "import" || importButton.isSelected()) {
-        modeButtons.selectToggle( importButton )
-        pathClassBox.box.setVisible( false )
-    }
-    
-    // Updates when mode is switched between import and export
-    modeButtons.selectedToggleProperty().addListener { obs, oldToggle, newToggle ->
-        boolean exportSelected = (newToggle == exportButton)
-        
-        okBtn.setText( exportSelected ? " Export" : " Import" )  
-        addIcon( okBtn, exportSelected ? FontAwesome.Glyph.UPLOAD : FontAwesome.Glyph.DOWNLOAD, 14 )    
-        
-        pathClassBox.box.setVisible( exportSelected )     
-        setTT( includeParentsCheck, exportSelected ? exportParentsTTtext : importParentsTTtext )  
-        updateFolderStatus( selectedFolderPath, matchInfo )
-    }
-    
+
+    // Widen boxes to their widest item (window grows to fit, up to the screen width)
+    def refitBoxes = fitBoxesToScreen( dialog ) { [imagesBox, pathClassBox] }
+
     // Creating row and adding children
     def secondRow = new HBox( 10 )
     secondRow.setPadding( new Insets( 0, 0, 10, 0 ) )
     secondRow.getChildren().addAll(
         exportButton,
         importButton,
+        nestButton,
         modeSpacer,
         includeParentsCheck
     )
-    
+
     // Creating container for both top rows and adding children
     def topContainer = new VBox( 8 )
     topContainer.setPadding( new Insets( 10 ) )
     def folderBox = new VBox( 2 )
-    folderBox.getChildren().addAll( folderRow, folderStatusRow )  
+    folderBox.getChildren().addAll( folderRow, folderStatusRow )
     topContainer.getChildren().addAll( folderBox, secondRow )
-    
+
     root.top = topContainer
-    
-    
-    
-    // Disabling the "OK" button if not all inputs are met    
+
+    // Updates for the selected mode, now and whenever it changes
+    def updateForMode = {
+        def modeBtn = modeButtons.getSelectedToggle()
+        okBtn.setText( modeBtn.getText() )
+        addIcon( okBtn, modeBtn.getUserData(), 14 )
+
+        pathClassBox.box.setVisible( exportButton.isSelected() ) // classes are only chosen for export
+        refitBoxes() // the class box may not have been measured while hidden
+        folderBox.setDisable( nestButton.isSelected() )           // nesting reads and writes no files
+        includeParentsCheck.setDisable( nestButton.isSelected() ) // nesting always uses the saved parent info
+        setTT( includeParentsCheck, exportButton.isSelected() ? exportParentsTTtext : importParentsTTtext )
+        styleFolderPathLabel()
+        refreshFolderCheck()
+    }
+    modeButtons.selectedToggleProperty().addListener { obs, oldToggle, newToggle -> updateForMode() }
+    updateForMode()
+
+    // Tick boxes are only built once the dialog shows, so outline them then
+    Platform.runLater {
+        if (currentEntry) { currentImageCB.lookup( ".box" )?.setStyle( "-fx-border-color: black; -fx-border-width: 2; -fx-border-radius: 1;" ) }
+        updateImageFlags()
+    }
+
+
+
+    // Disabling the "OK" button if not all inputs are met
     def anySelectedImage = Bindings.createBooleanBinding(
         { imagesBox.CBs.any { it.isSelected() } },
+        *imagesBox.CBs.collect { it.selectedProperty() }
+    )
+    def anySelectedWithObjects = Bindings.createBooleanBinding(
+        { imagesBox.CBs.any { it.isSelected() && objectCount( it.getText() ) > 0 } },
         *imagesBox.CBs.collect { it.selectedProperty() }
     )
     def anySelectedPathClass = Bindings.createBooleanBinding(
         { pathClassBox.CBs.any { it.isSelected() } },
         *pathClassBox.CBs.collect { it.selectedProperty() }
     )
-    okBtn.disableProperty().bind(
-        folderPathLabel.textProperty().isEqualTo( "No folder selected" )
-        .or( anySelectedImage.not() )
-        .or( exportButton.selectedProperty()
-                .and( anySelectedPathClass.not() ) )
-        .or( importButton.selectedProperty()
-                .and( hasGeoJsonFiles.not() ) )
-    )
-
-    // Red outline on each input while it is a reason the "OK" button is disabled
-    flagWhenBlocking( folderRow,
+    // Images: none selected, or when nesting, none of those selected has any objects
+    def imagesBlocking = Bindings.when( nestButton.selectedProperty() )
+        .then( anySelectedWithObjects.not() )
+        .otherwise( anySelectedImage.not() )
+    // Folder (not used when nesting): none chosen, or importing from one with no files
+    def folderBlocking = nestButton.selectedProperty().not().and(
         folderPathLabel.textProperty().isEqualTo( "No folder selected" )
         .or( importButton.selectedProperty().and( hasGeoJsonFiles.not() ) ) )
-    flagWhenBlocking( imagesBox.box, anySelectedImage.not() )
-    flagWhenBlocking( pathClassBox.box,
-        exportButton.selectedProperty().and( anySelectedPathClass.not() ) )
+    def classesBlocking = exportButton.selectedProperty().and( anySelectedPathClass.not() )
 
-    // Disabling the "Nest existing objects" button if no images are selected
-    resolveHierarchyBtn.disableProperty().bind(
-        anySelectedImage.not()
-    )
-    
+    okBtn.disableProperty().bind( imagesBlocking.or( folderBlocking ).or( classesBlocking ) )
+
+    // Red outline on each input while it is a reason the "OK" button is disabled
+    flagWhenBlocking( folderRow, folderBlocking )
+    flagWhenBlocking( imagesBox.box, imagesBlocking )
+    flagWhenBlocking( pathClassBox.box, classesBlocking )
+
+    // Say why on hover, while disabled
+    explainWhenDisabled( okBtn ) { [
+        "Select at least one image"                       : !anySelectedImage.get(),
+        "None of the selected images has objects to nest" : nestButton.isSelected() && anySelectedImage.get() && !anySelectedWithObjects.get(),
+        "Choose a folder with \"Browse\""                 : !nestButton.isSelected() && !selectedFolderPath,
+        "The folder has no GeoJSON files to import"       : importButton.isSelected() && selectedFolderPath && !hasGeoJsonFiles.get(),
+        "Select at least one object class to export"      : classesBlocking.get()
+    ] }
+    [browseButton, includeParentsCheck].each { explainWhenDisabled( it ) { "Not used when nesting" } }
+
     
     
     // Attach root & show dialog
@@ -1295,23 +1589,19 @@ def codePreferences = runOnFxThreadAndWait {
     if (dlgResult.isPresent()) {
         def button = dlgResult.get()
         
-        if (button in [ButtonType.OK, resolveHierarchyBtnType]) {                
+        if (button == ButtonType.OK) {
             def selectedImages = imagesBox.CBs
                     .findAll { it.isSelected() }
                     .collect { it.getText() }
-                    
+
             def selectedPathClasses = pathClassBox.CBs
                     .findAll { it.isSelected() }
                     .collect { it.getUserData() }
-                    
-            // Determine mode from selected toggle buttons
-            def selectedModeBtn = modeButtons.getSelectedToggle()
-            def mode = ((button == resolveHierarchyBtnType) ? "resolveHierarchy" : (selectedModeBtn == exportButton) ? "export" : "import")
-            
-            // Return all preferences of "OK" is selected
+
+            // Return all preferences if "OK" is selected
             return [
                 selectedFolder: selectedFolderPath?.toString(),
-                mode          : mode,
+                mode          : modes.find { name, btn -> btn.isSelected() }.key,
                 includeParents: includeParentsCheck.isSelected(),
                 selectedImages: selectedImages,
                 currentImage  : currentImageCB.isSelected(),
@@ -1331,8 +1621,8 @@ def codePreferences = runOnFxThreadAndWait {
 // Exit if cancelling
 if (codePreferences == null) {
     return
-    
-} else if (codePreferences.mode != "resolveHierarchy") { // Write to .json if exporting/importing
+
+} else { // Remember the choices for next time
     def currentPrefs = [
         selectedFolder: codePreferences.selectedFolder ?: "",
         mode          : codePreferences.mode ?: "export",
@@ -1350,7 +1640,7 @@ def imagesToRun = project.getImageList().findAll { it.getImageName() in codePref
 
 def total = imagesToRun.size()
 def progressUI = createProgressWindow(
-    (codePreferences.mode == "resolveHierarchy") ? "Nesting objects..." : 
+    (codePreferences.mode == "nest") ? "Nesting objects..." :
     (codePreferences.mode == "export") ? "Exporting..." : 
     "Importing...", total, imagesToRun.collect { it.getImageName() })
 def stopLaterFlag = progressUI.stopLaterFlag
@@ -1375,6 +1665,10 @@ boolean anyNestingProblems = false
 // an error" is useless when the run covered a hundred images
 String imageInFlight = null
 
+// Lets go of that image's data if an "Exit" or an error leaves it part-way: it isn't saved, but a background
+// copy is still closed, and the viewers showing changed live data redraw what it now holds
+Closure releaseUnfinished = null
+
 try {
 imageLoop:
 for (image in imagesToRun) {
@@ -1384,7 +1678,6 @@ for (image in imagesToRun) {
     imageInFlight = image.getImageName()
 
     boolean skipImage = false
-    boolean nestingProblem = false
     def imageName = image.getImageName()
 
     // Image data is read lazily: an image that ends up skipped (nothing to export, no import file,
@@ -1394,37 +1687,36 @@ for (image in imagesToRun) {
     def hierarchy = null
     boolean dataChanged = false
     
-    // Viewers showing this image right now — a pane the user re-pointed mid-run no longer counts
-    def openViewers = ( viewersByEntryId[ image.getID() ] ?: [] ).findAll { viewer ->
-        def viewerData = viewer.getImageData()
-        viewerData != null && project.getEntry( viewerData )?.getID() == image.getID()
-    }
+    def openViewers = viewersForEntry( image )
     
     def loadData = {
         if (imageData == null) {
             // Editing the data a viewer already holds, so that pane stays in step with the run
             imageData = openViewers ? openViewers[ 0 ].getImageData() : image.readImageData()
             hierarchy = imageData.getHierarchy()
+            releaseUnfinished = {
+                if (dataChanged) { redrawViewers( imageData, openViewers ) }
+                if (!openViewers) { imageData.close() }
+            }
         }
     }
     
     
     // Reporting current image
-    updateProgressWindow( progressUI, [imageName: image] )
+    updateProgressWindow( progressUI, [imageName: image.getImageName(), imageNum: processed + 1] )
     
     
     // --- Execution ---
     def filePath = buildFilePath( codePreferences.selectedFolder, imageName + ".geojson" )
-    def folder = new File( codePreferences.selectedFolder )
     def file = new File( filePath )
     
     
     // Fixing hierarchy if desired
-    if (codePreferences.mode == "resolveHierarchy") {
+    if (codePreferences.mode == "nest") {
         loadData()
-        def objectsToresolve = hierarchy.getAnnotationObjects()
-        anyNestingProblems = resolveHierarchy( objectsToresolve, hierarchy, image )
-        dataChanged = true
+        def objectsToNest = hierarchy.getAnnotationObjects()
+        if (resolveHierarchy( objectsToNest, hierarchy, image )) { anyNestingProblems = true } // kept once set, across images
+        dataChanged = !objectsToNest.isEmpty() // an image with no objects is left as it was
         
     } else if (codePreferences.mode == "export") {
         
@@ -1809,7 +2101,7 @@ for (image in imagesToRun) {
 
                 // Resolving hierarchy if desired
                 if (codePreferences.includeParents) {
-                    anyNestingProblems = resolveHierarchy( workingObjects, hierarchy, image )
+                    if (resolveHierarchy( workingObjects, hierarchy, image )) { anyNestingProblems = true } // kept once set, across images
                 }
             }
         }
@@ -1818,48 +2110,38 @@ for (image in imagesToRun) {
     
     // Updating viewer and saving (when relevant) — only images whose data was actually read and
     // changed are written back; skipped images are left completely untouched
-    if (imageData != null && codePreferences.mode in ["resolveHierarchy", "import"]) {
+    if (imageData != null) {
         if (dataChanged) {
-            // Saving data
+            redrawViewers( imageData, openViewers )
             image.saveImageData( imageData )
-            
-            // Ensure every viewer showing this image updates — including split panes that aren't
-            // selected, which otherwise keep drawing the objects they had before the run
-            if (openViewers) {
-                runOnFxThreadAndWait {
-                    imageData.getHierarchy().fireHierarchyChangedEvent( this )
-                    openViewers.each { it.repaintEntireImage() }
-                }
-            }
         }
         
         // Closing background imagedata — data a viewer holds stays open, it isn't ours to close
         if (!openViewers) {
             imageData.close()
         }
+        releaseUnfinished = null
     }
     
     
     // - Reporting progress - 
     processed++
     double frac = processed / total
-    updateProgressWindow( progressUI, [imagePer: frac, imageNum: processed] )
+    updateProgressWindow( progressUI, [imagePer: frac] )
     System.sleep( 10 )
 }
 } catch (Throwable err) {
     // Runs outside the script editor, so a thrown error would be invisible: log it (the full stack
-    // trace goes to QuPath's log), point the user there, and close the modal window so QuPath isn't
-    // left blocked. Then stop.
+    // trace goes to QuPath's log) and point the user there. Then stop.
     String failedOn = imageInFlight ? " on image '${imageInFlight}'" : ""
     logger.error( "Export / Import stopped after an error" + failedOn, err )
     Dialogs.showErrorNotification( "Export / Import", "Stopped after an error" + failedOn + ". See the log for details." )
-    Platform.runLater { progressUI.stage.close() }
     return
-}
-
-// Closing progress bar window (runs on the success path)
-Platform.runLater {
-    progressUI.stage.close()
+} finally {
+    // Always runs — on success, error, or a stop — so the modal progress window can never be left
+    // open blocking the rest of QuPath. An image an "Exit" or an error leaves part-way is let go of first
+    releaseUnfinished?.call()
+    Platform.runLater { progressUI.stage.close() }
 }
 
 // Reporting how many images were passed over as duplicates
@@ -1895,7 +2177,6 @@ import javafx.scene.control.*
 import javafx.scene.control.ButtonBar.ButtonData
 import javafx.scene.layout.*
 import javafx.scene.input.*
-import javafx.scene.text.Text
 import javafx.scene.text.Font
 import javafx.stage.*
 import javafx.beans.binding.Bindings

@@ -8,18 +8,22 @@
 def omittedMdKeys = ["Parent_ID", "Parent_Name"]
 
 // --- FUNCTIONS ---
-// Function: Helper to run on FX thread
+// Function: Helper to run on FX thread. An error there is thrown again here, so the caller stops (rather
+// than carrying on as if the code had run)
 def runOnFxThreadAndWait( Closure fxCode ) {
     def latch = new CountDownLatch( 1 )
-    def result = [value: null]
+    def result = [value: null, error: null]
     Platform.runLater {
         try {
             result.value = fxCode.call()
+        } catch (Throwable t) {
+            result.error = t
         } finally {
             latch.countDown()
         }
     }
     latch.await()
+    if (result.error != null) { throw result.error }
     return result.value
 }
 
@@ -39,6 +43,22 @@ def setTT( objs, String tooltip ) {
             }
         }
     }
+}
+
+// Function: Widest a window may be — the width of the screen it's on (or, before it's shown, its
+// owner's screen), less a small margin
+def maxWindowWidth( Window window ) {
+    def ref = window?.isShowing() ? window : (window instanceof Stage ? window.getOwner() : null)
+    def screen = ref ? Screen.getScreensForRectangle( ref.getX(), ref.getY(), ref.getWidth(), ref.getHeight() ).find() : null
+    return (screen ?: Screen.getPrimary()).getVisualBounds().getWidth() - 20
+}
+
+// Function: Move a window back inside its screen if it hangs off the left or right edge
+def keepOnScreen( Window window ) {
+    def screen = Screen.getScreensForRectangle( window.getX(), window.getY(), window.getWidth(), window.getHeight() ).find() ?: Screen.getPrimary()
+    def bounds = screen.getVisualBounds()
+    double x = Math.min( window.getX(), bounds.getMaxX() - window.getWidth() )
+    window.setX( Math.max( x, bounds.getMinX() ) )
 }
 
 // Function: Create window showing script progress
@@ -85,7 +105,7 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         def updateMinWidth = {
             double preferred = rows.collect { it.getWidth() }.max() + vbox.getPadding().getLeft() + vbox.getPadding().getRight()
             if ( preferred > stage.getWidth() ) {
-                stage.setWidth( preferred )
+                stage.setWidth( Math.min( preferred, maxWindowWidth( stage ) ) )
             }
         }
         rows.each { node ->
@@ -98,7 +118,7 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
                 double maxRowPref = rows.collect { it.prefWidth(-1) }.max()
                 double needed = Math.max(maxRowPref + vbox.getPadding().getLeft() + vbox.getPadding().getRight(), 350)
                 if (needed > stage.getWidth()) {
-                    stage.setWidth(needed)
+                    stage.setWidth( Math.min( needed, maxWindowWidth( stage ) ) )
                 }
             }
         }
@@ -122,6 +142,18 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         }
         stage.show()
 
+        // Never wider than the screen: any text line too long to fit (e.g. a long image name) is
+        // shortened in the middle instead, keeping its start and end
+        double maxContentWidth = maxWindowWidth( stage ) - vbox.getPadding().getLeft() - vbox.getPadding().getRight()
+        rows.each { row ->
+            row.getChildren().findAll { it instanceof Label }.each { label ->
+                label.setMaxWidth( maxContentWidth )
+                label.setTextOverrun( OverrunStyle.CENTER_ELLIPSIS )
+            }
+        }
+        // The window grows rightwards from where it opened, so pull it back if that runs it off screen
+        stage.widthProperty().addListener { obs, oldVal, newVal -> keepOnScreen( stage ) }
+
         // Pre-size once to fit the longest image name (plus every other row), never
         // below the minimum width, so the window opens at its final size rather than
         // growing as image names appear during the run. The grow-never-shrink logic
@@ -139,8 +171,8 @@ def createProgressWindow( String title, int totalImages, boolean simplify = fals
         double frameWidth = scene.getWidth() > 0 ? Math.max( stage.getWidth() - scene.getWidth(), 0 ) : 0
         double contentWidth = rows.collect { it.prefWidth( -1 ) }.max() + vbox.getPadding().getLeft() + vbox.getPadding().getRight()
         double baselineWidth = Math.max( contentWidth + frameWidth, stage.getMinWidth() )
-        if (baselineWidth > stage.getMinWidth()) { stage.setMinWidth( baselineWidth ) }
-        if (baselineWidth > stage.getWidth())    { stage.setWidth( baselineWidth ) }
+        if (baselineWidth > stage.getMinWidth()) { stage.setMinWidth( Math.min( baselineWidth, maxWindowWidth( stage ) ) ) }
+        if (baselineWidth > stage.getWidth())    { stage.setWidth( Math.min( baselineWidth, maxWindowWidth( stage ) ) ) }
         imageName.set( initialImageName )
         imageNum.set( initialImageNum )
         updateStageWidth()
@@ -244,19 +276,19 @@ def lockDimensions( Node nodes ) {
 def makeSelectAllCB( List groupCBs ) {
     def selectAllCB = new CheckBox()
     
-    // Select / deselect all action
+    // Select / deselect all action. Only the boxes on show: a hidden one keeps its state
     selectAllCB.setOnAction {
         selectAllCB.setIndeterminate( false )
-        groupCBs.each { it.setSelected( it.isVisible() ? selectAllCB.isSelected() : it.isSelected() ) }
+        groupCBs.findAll { it.isVisible() }.each { it.setSelected( selectAllCB.isSelected() ) }
     }
     
     // Update relevant labels/instructions when boxes are clicked
     groupCBs.each { cb ->
         cb.selectedProperty().addListener { obs, oldVal, newVal ->
-            int numCBs = groupCBs.size()
-            int numSelected = groupCBs.count { it.isSelected() }
+            def shownCBs = groupCBs.findAll { it.isVisible() }
+            int numSelected = shownCBs.count { it.isSelected() }
             
-            if (numSelected !in [0, numCBs]) {
+            if (numSelected !in [0, shownCBs.size()]) {
                 selectAllCB.setIndeterminate( true )
             
             } else {
@@ -282,13 +314,11 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     }
     if (prefHeight > 0) {
         checkboxBox.setPrefHeight( prefHeight )
-        checkboxBox.setMaxHeight( prefHeight )
-        checkboxBox.setMinHeight( prefHeight )
     }
     
     def checkboxContainer = new VBox( 5 )
     checkboxContainer.setPadding( new Insets( 5 ) )
-
+    
     // Build checkboxes from supplied objects
     def checkboxes = objects.collect { obj ->
 
@@ -319,65 +349,18 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     
     def scrollPane = new ScrollPane( checkboxContainer )
     VBox.setVgrow( scrollPane, Priority.ALWAYS )
-    
-    
-    // Making scrollpane slide back to left if horizontally scrollable
-    scrollPane.sceneProperty().addListener { obs, oldScene, newScene ->
-        if (newScene != null) {
-            Platform.runLater {  // extra pulse so CSS skin is applied
-                def hBar = scrollPane.lookupAll( ".scroll-bar" )
-                    .find { it instanceof ScrollBar && it.orientation == Orientation.HORIZONTAL }
-    
-                if (hBar != null && hBar.isVisible()) {
-                    def snapBack = new PauseTransition( Duration.millis( 300 ) )
-                    snapBack.setOnFinished {
-                        new Timeline(
-                            new KeyFrame(
-                                Duration.millis( 200 ),
-                                new KeyValue( scrollPane.hvalueProperty(), 0, Interpolator.EASE_BOTH )
-                            )
-                        ).play()
-                    }
-                    
-                    scrollPane.addEventFilter( ScrollEvent.SCROLL ) { e ->
-                        if (Math.abs( e.deltaX ) > 0 || e.isShiftDown()) {
-                            def delta = (e.deltaX != 0 ? e.deltaX : e.deltaY)
-                            def sensitivity = 250.0
-                            def newValue = scrollPane.hvalue - (delta / sensitivity)
-                            scrollPane.hvalue = Math.max( 0, Math.min( 1, newValue ) )
-                            e.consume()
-                        }
-                    }
-                    
-                    scrollPane.addEventFilter( ScrollEvent.SCROLL_FINISHED ) { e ->
-                        snapBack.playFromStart()
-                        e.consume()
-                    }
-                    
-                    hBar.addEventFilter( MouseEvent.MOUSE_RELEASED ) {
-                        snapBack.playFromStart()
-                    }
-                }
-            }
-        }
-    }
-    
+    pinCheckboxesWhileScrolling( scrollPane, checkboxes )
     
     def titleLabel = new Label()
     titleLabel.setPadding( new Insets( 5, 0, 0, 0 ) )
 
-    String TTword = keyWord ?: title
+    // Set initial wording so the box's purpose is clear even when there's nothing to check
     titleLabel.setText( "${title.capitalize()} [0]" )
     selectAllCB.setText( "${title.capitalize()} [0]" )
-    setTT( selectAllCB, "Include all ${TTword.uncapitalize()}" )
 
-    // Reserve at least the widest-count width so the count changing (e.g. [9] -> [10]) never nudges the
-    // header — but only as a *floor* (minWidth), never a fixed or max width. Capping the width to a
-    // measurement is exactly what clipped the title: the first box is laid out before the app's font is
-    // applied, so its measured width comes out too small, and a hard cap then truncates the label for
-    // good (later boxes, rebuilt after the window is styled, measured fine — hence "[0]" clipped but a
-    // rebuilt "[1]" didn't). With only a floor the checkbox always takes at least its own preferred width
-    // for the current text, so the title can never be clipped no matter when we happen to measure.
+    // Floor the header at its widest count, so the count changing (e.g. [9] -> [10]) never nudges it.
+    // Only a floor (minWidth), never a fixed width: the first box can be measured before the app's font
+    // is applied, and a fixed width would then clip the title for good
     boolean selectAllFloorSet = false
     selectAllCB.widthProperty().addListener { obs, oldW, newW ->
         if (!selectAllFloorSet && newW.doubleValue() > 0) {
@@ -396,38 +379,37 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
         }
     }
 
-    // Add listeners to checkboxes (for changing instructions/labels)
+    // Add listeners to checkboxes (for changing instructions/labels). Hidden boxes don't count as selected
+    String TTword = keyWord ?: title
     def refreshLabels = {
-
-            def selectedNow = checkboxes.findAll { it.isSelected() && it.isVisible() }.collect { it.getText() }
-            titleLabel.setText( "${title.capitalize()} [${selectedNow.size()}]" )
-
-            selectAllCB.setText( "${title.capitalize()} [${selectedNow.size()}]" )
-
-            String tooltipText = "Select ${TTword.uncapitalize()}"
-            
-            if (selectedNow.size() > 0) {
-                tooltipText = "${(keyWord ?: title).capitalize()} selected:"
-                selectedNow.eachWithIndex { item, i ->
-                    tooltipText += "\n ${i+1}. ${item}"
-                }
+        def selectedNow = checkboxes.findAll { it.isSelected() && it.isVisible() }.collect { it.getText() }
+        titleLabel.setText( "${title.capitalize()} [${selectedNow.size()}]" )
+        
+        selectAllCB.setText( "${title.capitalize()} [${selectedNow.size()}]" )
+        setTT( selectAllCB, selectAllCB.isSelected() ? "Deselect all ${TTword.uncapitalize()}" : "Select all ${TTword.uncapitalize()}" )
+        
+        String tooltipText = "Select ${TTword.uncapitalize()}"
+        
+        if (selectedNow.size() > 0) {
+            tooltipText = "${TTword.capitalize()} selected:"
+            selectedNow.eachWithIndex { item, i ->
+                tooltipText += "\n ${i+1}. ${item}"
             }
-            
-            setTT( [titleLabel, scrollPane], tooltipText )
         }
+        
+        setTT( [titleLabel, scrollPane], tooltipText )
+    }
     checkboxes.each { cb ->
         cb.selectedProperty().addListener { obs, oldVal, newVal -> refreshLabels() }
         cb.textProperty().addListener { obs, oldVal, newVal -> refreshLabels() }
         
+        // Hidden boxes don't count as selected, so showing/hiding one re-fires its selection listeners
         cb.visibleProperty().addListener { obs, oldVal, newVal ->
             cb.setSelected( !cb.isSelected() )
             cb.setSelected( !cb.isSelected() )
         }
-        
-        // Double fire to spark listeners
-        cb.setSelected( !cb.isSelected() )
-        cb.setSelected( !cb.isSelected() )
     }
+    refreshLabels()
     
     // Allowing shift + click to select/deselect multiple
     CheckBox lastClicked = null   
@@ -440,13 +422,13 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
                 int start = Math.min( lastIdx, idx )
                 int end   = Math.max( lastIdx, idx )
     
-                // Use the state of the checkbox just clicked
+                // JavaFX doesn't tick a box on a shift-click, so the range copies the box clicked before it
                 boolean value = lastClicked.isSelected()
     
                 (start..end).each { i ->
-                    cb = checkboxes[i]
-                    if (!cb.isDisabled() && cb.isVisible() ) {
-                        cb.setSelected( value )
+                    def other = checkboxes[ i ] // never reassign cb: this handler would keep it, and anchor later clicks on the wrong box
+                    if (!other.isDisabled() && other.isVisible()) {
+                        other.setSelected( value )
                     }
                 }
             }
@@ -473,15 +455,193 @@ def makeCheckboxBox( String title, String keyWord = null, List objects, int pref
     topRow.setStyle( "-fx-border-color: #000000; -fx-border-width: 0 0 1 0" )    
     scrollPane.setStyle( "-fx-background-color: transparent" )
     
+    // Width needed to show the widest item without clipping, never less than the requested width.
+    // Measures every checkbox, hidden ones included, so filtering the list never changes the width
+    def naturalWidth = {
+        double widest = noneAvailableLabel.prefWidth( -1 )
+        checkboxes.each { cb ->
+            cb.applyCss()
+            double w = cb.prefWidth( -1 )
+            // A checkbox whose text changes (e.g. a count that follows the selected images) can name the
+            // widest text it may ever show, as a closure taking its font, so the box doesn't resize with it
+            def widestText = cb.getProperties().get( "widestText" )
+            if (widestText != null) {
+                w += textWidth( widestText( cb.getFont() ), cb.getFont() ) - textWidth( cb.getText(), cb.getFont() )
+            }
+            widest = Math.max( widest, w )
+        }
+        def vBar = scrollPane.lookupAll( ".scroll-bar" ).find { it instanceof ScrollBar && it.orientation == Orientation.VERTICAL }
+        double barW = (vBar != null && vBar.prefWidth( -1 ) > 0) ? vBar.prefWidth( -1 ) : 15 // always leave room for the bar
+        double listW = widest + insetsW( checkboxContainer ) + insetsW( scrollPane ) + barW
+        double contentW = Math.max( listW, topRow.prefWidth( -1 ) ) + insetsW( checkboxBox )
+        return Math.ceil( Math.max( prefWidth, contentW ) )
+    }
+
     return [
-        box      : checkboxBox,
-        header   : topRow,
-        selectAll: selectAllCB,
-        title    : titleLabel,
-        spacer   : topRowSpacer,
-        clear    : clearBtn,
-        CBs      : checkboxes
+        box         : checkboxBox,
+        header      : topRow,
+        selectAll   : selectAllCB,
+        title       : titleLabel,
+        spacer      : topRowSpacer,
+        clear       : clearBtn,
+        CBs         : checkboxes,
+        naturalWidth: naturalWidth,
+        minWidth    : prefWidth > 0 ? prefWidth : 150 // narrowest the box may shrink to when the screen is too small
     ]
+}
+
+// Function: Keep each checkbox's box pinned at the left edge while its text scrolls horizontally. The
+// text is drawn by a clipped Label set as the checkbox's graphic: the checkbox keeps its own text (so
+// anything reading getText() is unaffected), it just doesn't draw it. Scrolling slides the whole
+// checkbox right by the scroll offset and its Label back left by the same amount, so the words move
+// with the scroll while the box stays put, and the clip hides the words once they reach the box
+def pinCheckboxesWhileScrolling( ScrollPane scrollPane, List checkboxes ) {
+    List labels = checkboxes.collect { cb ->
+        def label = new Label()
+        label.textProperty().bind( cb.textProperty() )
+        // A graphic doesn't get the gap a checkbox normally leaves before its text, so add it back
+        label.layoutXProperty().bind( Bindings.createDoubleBinding( { cb.getLabelPadding().getLeft() }, cb.labelPaddingProperty() ) )
+        def holder = new Pane( label )
+        def clip = new javafx.scene.shape.Rectangle()
+        clip.xProperty().bind( label.layoutXProperty() ) // scrolled words vanish at the usual gap, not right against the box
+        clip.widthProperty().bind( holder.widthProperty().subtract( label.layoutXProperty() ) )
+        clip.heightProperty().bind( holder.heightProperty() )
+        holder.setClip( clip )
+        cb.setGraphic( holder )
+        cb.setContentDisplay( ContentDisplay.GRAPHIC_ONLY )
+        return label
+    }
+
+    // The scroll pane scrolls by shifting a wrapper around the content to a pixel-snapped position.
+    // Follow that exact position rather than recomputing it from the scroll value — any rounding
+    // difference between the two makes the boxes jiggle as you scroll
+    def content = scrollPane.getContent()
+    def update = {
+        double offset = -(content.getLayoutX() + (content.getParent()?.getLayoutX() ?: 0))
+        checkboxes.eachWithIndex { cb, i ->
+            cb.setTranslateX( offset )
+            labels[ i ].setTranslateX( -offset )
+        }
+    }
+    content.layoutXProperty().addListener { obs, oldVal, newVal -> update() }
+    content.parentProperty().addListener { obs, oldParent, newParent ->
+        newParent?.layoutXProperty()?.addListener { o, oldVal, newVal -> update() }
+        update()
+    }
+}
+
+// Function: Rendered width of a string in a given font
+def textWidth( text, font ) {
+    def t = new javafx.scene.text.Text( text as String )
+    t.setFont( font )
+    return t.getLayoutBounds().getWidth()
+}
+
+// Function: The widest-rendering number with as many digits as max (digit glyphs differ in width, so
+// e.g. "1" is narrower than "0") — for reserving room for a count that can grow up to max
+def widestNumber( max, font ) {
+    String widestDigit = ('0'..'9').max { textWidth( it, font ) }
+    return widestDigit * "${max}".length()
+}
+
+// Function: Horizontal padding + border of a region
+def insetsW( Region region ) {
+    def ins = region.getInsets()
+    return ins.getLeft() + ins.getRight()
+}
+
+// Function: Size each checkbox box to its widest item, widening the dialog to fit — but never past the
+// edge of the screen; if everything can't fit, the widest boxes give up width first (down to their
+// minimum, or 100px on a screen too small even for that) and their lists scroll horizontally.
+// Re-fits whenever an item's text changes. Takes a closure returning the current box maps so rebuilt
+// boxes are picked up; returns a closure that requests a re-fit (call it after rebuilding boxes)
+def fitBoxesToScreen( Dialog dialog, Closure currentBoxes ) {
+    boolean pending = false
+    Double decoration = null // window frame width; measured once, as the scene lags behind window resizes
+    def refit
+    def requestRefit = {
+        if (pending) { return }
+        pending = true
+        Platform.runLater { pending = false; refit() } // coalesce bursts of text changes into one pass
+    }
+
+    refit = {
+        def window = dialog.getDialogPane().getScene()?.getWindow()
+        if (window == null || !window.isShowing()) { return }
+        List boxes = currentBoxes().findAll { it != null }
+
+        boxes.each { b ->
+            // The header's count floor (see makeCheckboxBox) lands a pulse after showing and can widen it
+            if (!b.selectAll.getProperties().containsKey( "fitBoxesListener" )) {
+                b.selectAll.getProperties().put( "fitBoxesListener", true )
+                b.selectAll.minWidthProperty().addListener { obs, oldVal, newVal -> requestRefit() }
+            }
+            // Boxes that show a count title in their header (rather than the select-all) widen with it
+            if (b.header.getChildren().contains( b.title ) && !b.title.getProperties().containsKey( "fitBoxesListener" )) {
+                b.title.getProperties().put( "fitBoxesListener", true )
+                b.title.textProperty().addListener { obs, oldVal, newVal -> requestRefit() }
+            }
+            b.CBs.each { cb ->
+                if (!cb.getProperties().containsKey( "fitBoxesListener" )) {
+                    cb.getProperties().put( "fitBoxesListener", true )
+                    cb.textProperty().addListener { obs, oldVal, newVal -> requestRefit() }
+                }
+            }
+        }
+
+        // No max width, so a box can still stretch into spare room (e.g. when it's the BorderPane centre)
+        def setBoxWidth = { b, double w ->
+            b.box.setMinWidth( w )
+            b.box.setPrefWidth( w )
+            b.box.setMaxWidth( Double.MAX_VALUE )
+        }
+
+        List naturals = boxes.collect { it.naturalWidth() as double }
+        boxes.eachWithIndex { b, i -> setBoxWidth( b, naturals[ i ] ) }
+
+        def pane = dialog.getDialogPane()
+        pane.applyCss()
+        if (decoration == null) { decoration = Math.max( 0, window.getWidth() - window.getScene().getWidth() ) }
+        double needed = pane.prefWidth( -1 ) + decoration
+
+        def screen = Screen.getScreensForRectangle( window.getX(), window.getY(), window.getWidth(), window.getHeight() )
+                .find() ?: Screen.getPrimary()
+        def bounds = screen.getVisualBounds()
+        double available = bounds.getWidth() - 20
+
+        if (needed > available) {
+            // Find the cap level where capping every box at max(level, its minimum) absorbs the excess.
+            // Repeated, since boxes stacked in a column only free up the width of the widest of them
+            List floors = (0..<boxes.size()).collect { i -> Math.min( boxes[ i ].minWidth as double, naturals[ i ] as double ) }
+            def widthsAt = { List fl, double level -> (0..<naturals.size()).collect { i -> Math.min( naturals[ i ] as double, Math.max( level, fl[ i ] as double ) ) } }
+            double target = naturals.sum()
+            for (int pass = 0; pass < 6 && needed > available + 0.5; pass++) {
+                target -= (needed - available)
+                if (floors.sum() > target) { floors = floors.collect { Math.min( it as double, 100d ) } } // tiny screen
+                double lo = 0, hi = naturals.max()
+                30.times {
+                    double mid = (lo + hi) / 2
+                    if (widthsAt( floors, mid ).sum() > target) { hi = mid } else { lo = mid }
+                }
+                List capped = widthsAt( floors, lo )
+                boxes.eachWithIndex { b, i -> setBoxWidth( b, Math.floor( capped[ i ] as double ) ) }
+                pane.applyCss()
+                needed = pane.prefWidth( -1 ) + decoration
+            }
+            needed = Math.min( needed, available )
+        }
+
+        // Grow (or shrink) around the window's current centre, then keep it on screen
+        double oldW = window.getWidth()
+        if (Math.abs( needed - oldW ) < 1) { return }
+        double x = window.getX() - (needed - oldW) / 2
+        window.setWidth( needed )
+        x = Math.min( x, bounds.getMaxX() - needed )
+        window.setX( Math.max( x, bounds.getMinX() ) )
+    }
+
+    dialog.setOnShown { requestRefit() }
+    return requestRefit
 }
 
 // Function: Create icon for UI
@@ -499,6 +659,12 @@ def flagWhenBlocking( node, blocking, String blockedStyle = null ) {
     def flaggedStyle = blockedStyle ?: outlineRedStyle // e.g. an underline in place of an outline
     def clearedStyle = node.getStyle()                 // however the input looks when it isn't blocking
 
+    // A node with no border of its own gets an invisible copy of the flag's border, so the flag
+    // coming and going doesn't change the node's size and nudge the layout around it
+    if (!clearedStyle?.contains( "-fx-border-color" )) {
+        clearedStyle = (clearedStyle ?: "") + flaggedStyle.replace( "red", "transparent" )
+    }
+
     // Hold the binding on the node — a derived binding (e.g. someBinding.not()) is only weakly
     // referenced by its dependencies, so otherwise it can be collected part way through the dialog
     node.getProperties().put( "flagWhenBlocking", blocking )
@@ -506,6 +672,68 @@ def flagWhenBlocking( node, blocking, String blockedStyle = null ) {
     def applyStyle = { boolean isBlocking -> node.setStyle( isBlocking ? flaggedStyle : clearedStyle ) }
     blocking.addListener { obs, oldVal, newVal -> applyStyle( newVal ) }
     applyStyle( blocking.getValue() )
+}
+
+// Function: While the mouse is over a disabled control, show why it's disabled. JavaFX never shows a
+// disabled control's own tooltip (it isn't even picked under the mouse), so this follows the mouse from
+// the window instead. reasons() gives the text: a String, or a map of each reason to whether it applies
+// right now. Nothing shows while no reason applies
+def explainWhenDisabled( Node node, Closure reasons ) {
+    def tip = new Tooltip()
+    def delay = new PauseTransition( tip.getShowDelay() ) // waits as long as an ordinary tooltip
+    double mouseX = 0, mouseY = 0
+    delay.setOnFinished {
+        def window = node.getScene()?.getWindow()
+        if (window?.isShowing()) { tip.show( window, mouseX + 10, mouseY + 7 ) } // where JavaFX puts its own
+    }
+    def hideTip = { delay.stop(); tip.hide() }
+
+    def onMove = { MouseEvent e ->
+        // The window picks the nearest enabled ancestor under the mouse: walk up to it through visible
+        // nodes, and check the node itself is under the mouse (not a part scrolled out of view)
+        def picked = e.getPickResult().getIntersectedNode()
+        def n = node
+        while (n != null && n != picked && n.isVisible()) { n = n.getParent() }
+        boolean over = node.isDisabled() && picked != null && n == picked &&
+                       node.contains( node.sceneToLocal( e.getSceneX(), e.getSceneY() ) )
+
+        def why = over ? reasons() : null
+        List lines = why instanceof Map ? why.findAll { it.value }.collect { it.key as String } : (why ? [why as String] : [])
+        if (!lines) { hideTip(); return }
+        tip.setText( lines.size() > 1 ? lines.collect { "• " + it }.join( "\n" ) : lines[ 0 ] )
+        mouseX = e.getScreenX()
+        mouseY = e.getScreenY()
+        if (!tip.isShowing()) { delay.playFromStart() }
+    } as javafx.event.EventHandler
+    def onExit = { MouseEvent e -> hideTip() } as javafx.event.EventHandler
+
+    // Follow the node into whichever window shows it
+    def attach = { oldScene, newScene ->
+        hideTip()
+        oldScene?.removeEventFilter( MouseEvent.MOUSE_MOVED, onMove )
+        oldScene?.removeEventHandler( MouseEvent.MOUSE_EXITED, onExit )
+        newScene?.addEventFilter( MouseEvent.MOUSE_MOVED, onMove )
+        newScene?.addEventHandler( MouseEvent.MOUSE_EXITED, onExit )
+    }
+    node.sceneProperty().addListener { obs, oldScene, newScene -> attach( oldScene, newScene ) }
+    attach( null, node.getScene() )
+    node.disabledProperty().addListener { obs, oldVal, isDisabled -> if (!isDisabled) { hideTip() } }
+}
+
+// Function: Outline in red the tick box of each selected image with a problem, with the problems as its
+// tooltip. problemsWith( name ) lists an image's problems (none if it has none). The ring is drawn over the
+// box's own edge and just outside it, so it takes no room and nothing moves as it comes and goes. The
+// current image's box keeps its black border
+def outlineImageProblems( List imageCBs, String currentImageName, Closure problemsWith ) {
+    String currentStyle = "-fx-border-color: black; -fx-border-width: 2; -fx-border-radius: 1;"
+    imageCBs.each { cb ->
+        List problems = cb.isSelected() ? (problemsWith( cb.getText() ) ?: []) : []
+        boolean isCurrent = cb.getText() == currentImageName
+        String ring = "-fx-background-color: red, -fx-inner-border, -fx-body-color;" +
+                      "-fx-background-insets: ${isCurrent ? -2 : -1}, 1, 2; -fx-background-radius: 4, 2, 1;"
+        cb.lookup( ".box" )?.setStyle( (isCurrent ? currentStyle : "") + (problems ? ring : "") )
+        problems ? setTT( cb, problems.join( "\n" ) ) : cb.setTooltip( null )
+    }
 }
 
 // Function: Scan the entire project to collect annotation field availability by class
@@ -537,13 +765,12 @@ def collectProjectAnnotationIndex( project, Stage ownerStage = null, Collection 
                 if (imageData) {
                     def annos = imageData.getHierarchy()?.getAnnotationObjects() ?: []
                     annos.each { obj ->
-                        def className = obj.getPathClass()?.getName()
-                        if (className) {
-                            localClassCounts[ className ]++
-                            obj.getMeasurementList()?.getMeasurementNames()?.each { localMeasurements[ className ] << it }
-                            obj.getMetadata()?.keySet()?.each { 
-                                if (!(it in omittedMdKeys)) { localMetadata[ className ] << it }
-                            }
+                        // Filed under the name the class list shows, so unclassified annotations are included
+                        def className = classLabelForObject( obj )
+                        localClassCounts[ className ]++
+                        obj.getMeasurementList()?.getMeasurementNames()?.each { localMeasurements[ className ] << it }
+                        obj.getMetadata()?.keySet()?.each {
+                            if (!(it in omittedMdKeys)) { localMetadata[ className ] << it }
                         }
                     }
                 }
@@ -604,17 +831,57 @@ def naturalCompare( String s1, String s2 ) {
 
 
 // Function: The class label used to identify an object by class. Mirrors QuPath's project
-// summary (DefaultProject.HierarchySummary.pathClassToString), which labels null-class
-// (unclassified) objects "Unclassified". That's the label the class list offers, so null-class
-// objects must map back to it here — otherwise "Unclassified" is selectable but never matches.
+// summary (DefaultProject.HierarchySummary.pathClassToString), which the class lists come from: the
+// full name, so a subclass is "Tumor: Positive" rather than getName()'s "Positive", and "Unclassified"
+// for an object with no class. A label that differs would be selectable but never match.
 def classLabelForObject( obj ) {
-    return obj.getPathClass()?.getName() ?: "Unclassified"
+    return obj.getPathClass()?.toString() ?: "Unclassified"
 }
 
 
 // Project & preferences file
+def project = getProject()
 def currentImageData = getCurrentImageData()
 def currentEntry = currentImageData ? project.getEntry( currentImageData ) : null
+
+// Each pane of a split viewer holds its own live ImageData, which can have changes not yet saved to
+// disk. So any image open in *any* viewer is read through the instance that viewer holds, so the export
+// matches what's on screen
+def viewersByEntryId = [:]   // entry ID -> viewers currently showing that image
+runOnFxThreadAndWait {
+    QuPathGUI.getInstance().getAllViewers().each { viewer ->
+        def viewerData = viewer.getImageData()
+        if (viewerData == null) { return }
+        def viewerEntry = project.getEntry( viewerData )
+        if (viewerEntry == null) { return }
+        viewersByEntryId.get( viewerEntry.getID(), [] ) << viewer
+    }
+}
+
+// Viewers showing an image right now — a pane the user re-points mid-run stops counting
+def viewersForEntry = { entry ->
+    if (entry == null) { return [] }
+    ( viewersByEntryId[ entry.getID() ] ?: [] ).findAll { viewer ->
+        def viewerData = viewer.getImageData()
+        viewerData != null && project.getEntry( viewerData )?.getID() == entry.getID()
+    }
+}
+
+// The live ImageData a viewer holds for this image, or null when no pane is showing it
+def liveDataForEntry = { entry ->
+    def viewers = viewersForEntry( entry )
+    viewers ? viewers[ 0 ].getImageData() : null
+}
+
+// Annotation class counts taken straight from a live hierarchy
+def liveClassCounts = { imgData ->
+    def counts = [:]
+    imgData.getHierarchy().getAnnotationObjects().each { obj ->
+        def cn = classLabelForObject( obj )
+        counts[ cn ] = (counts[ cn ] ?: 0) + 1
+    }
+    return counts
+}
 def projectDirectory = project.getBaseDirectory()
 
 // Folder and file names of where preferences are stored in directory
@@ -641,15 +908,18 @@ if (prefsFile.length() > 0L && prefsFile.getText() != "null") {
     }
 }
 
-// Build map of project specifics to cache
+// Build map of project specifics to cache. scanVersion goes up whenever the scan starts collecting something
+// new, so a cache from an older scan is rebuilt rather than reused (3: unclassified annotations are included,
+// and subclasses are filed under their full name)
 def projectFingerprint = { proj ->
     def imageNames = proj.getImageList().collect { it.getImageName() }.sort()
     def baseDir = proj.getBaseDirectory()?.getAbsolutePath() ?: ""
-    return [ baseDir: baseDir,
-             images:  imageNames ]
+    return [ baseDir:     baseDir,
+             images:      imageNames,
+             scanVersion: "3" ]
 }
 
-// If chache with project fingerprint exists, gets measurement/metadata specifics from there
+// If a cache with this project's fingerprint exists, gets measurement/metadata specifics from there
 // If not, regenerates by scanning the project
 def loadProjectCache = { proj, File cacheFile, boolean forceReload = false, Stage ownerStage = null ->
     def currentFingerprint = projectFingerprint( proj )
@@ -753,18 +1023,21 @@ def codePreferences = runOnFxThreadAndWait {
     }
     pool.shutdown()
     
-    // If an image is open, use its LIVE hierarchy for that image's class counts so unsaved
-    // objects are reflected — both in the counts and in whether a class appears at all. Cheap,
-    // since the image is already loaded, and safe on the FX thread we're already running on.
-    if (currentEntry != null && currentImageData != null) {
-        def liveCounts = [:]
-        currentImageData.getHierarchy().getAnnotationObjects().each { obj ->
-            def cn = classLabelForObject( obj )
-            liveCounts[ cn ] = (liveCounts[ cn ] ?: 0) + 1
-        }
-        imageClassCounts[ currentEntry.getImageName() ] = liveCounts
+    // If an image is open in a viewer, use its LIVE hierarchy for that image's class counts so
+    // unsaved objects are reflected — both in the counts and in whether a class appears at all.
+    // Every pane of a split viewer counts, not just the selected one, since the summary.json read
+    // above only knows what was last saved. Cheap, since those images are already loaded, and safe
+    // on the FX thread we're already running on.
+    boolean anyLiveCounts = false
+    project.getImageList().each { entry ->
+        def liveData = liveDataForEntry( entry )
+        if (liveData == null) { return }
+        imageClassCounts[ entry.getImageName() ] = liveClassCounts( liveData )
+        anyLiveCounts = true
+    }
 
-        // Rebuild totals in place so the override is reflected everywhere downstream
+    // Rebuild totals in place so the overrides are reflected everywhere downstream
+    if (anyLiveCounts) {
         totalsByClass.clear()
         imageClassCounts.each { imgName, counts ->
             counts.each { className, count ->
@@ -801,16 +1074,8 @@ def codePreferences = runOnFxThreadAndWait {
             currentCB.selectedProperty()
         )
         
-        // Setting bright border on checkbox for current image
-        Platform.runLater { 
-            [currentCB, currentImageCB].each {
-                it.lookup( ".box" )?.setStyle("""
-                    -fx-border-color: black;
-                    -fx-border-width: 2;
-                    -fx-border-radius: 1;
-                """)
-            }
-        }
+        // Setting bright border on the "Current Image" checkbox (the list's own is set by outlineImageProblems)
+        Platform.runLater { currentImageCB.lookup( ".box" )?.setStyle( "-fx-border-color: black; -fx-border-width: 2; -fx-border-radius: 1;" ) }
         
         // If current image was only one selected, will update to new image
         if (prePrefsMap.currentImage == true && prePrefsMap.selectedImages.size() == 1) {
@@ -819,6 +1084,7 @@ def codePreferences = runOnFxThreadAndWait {
         }
     } else {
         currentImageCB.setDisable( true )
+        explainWhenDisabled( currentImageCB ) { "No image is open in the viewer" }
     }
     
     // Setting and updating tooltip for current image checkbox
@@ -844,6 +1110,8 @@ def codePreferences = runOnFxThreadAndWait {
             def sel   = selectedTotals[ className ] ?: 0
             def total = totalsByClass[ className ]  ?: 0
             cb.setText( total > 0 ? "${className} [${sel} / ${total}]" : className )
+            // Reserve room for the widest the count can read, so selecting images doesn't resize the box
+            cb.getProperties().put( "widestText", { font -> total > 0 ? "${className} [${widestNumber( total, font )} / ${total}]" : className } )
         }
     }
     
@@ -851,6 +1119,19 @@ def codePreferences = runOnFxThreadAndWait {
         cb.selectedProperty().addListener { obs, oldVal, newVal -> updateClassCounts() }
     }
     updateClassCounts()
+
+    // Red ring on each selected image without objects of the selected classes (only once a class is
+    // chosen; until then the class box itself is flagged)
+    def updateImageFlags = {
+        def chosen = pathClassBox.CBs.findAll { it.isSelected() }*.getUserData()
+        outlineImageProblems( imagesBox.CBs, currentEntry?.getImageName() ) { String name ->
+            chosen && !chosen.any { imageClassCounts[ name ]?.get( it ) } ? ["No objects of the selected classes to save"] : []
+        }
+    }
+    (imagesBox.CBs + pathClassBox.CBs).each { cb ->
+        cb.selectedProperty().addListener { obs, oldVal, newVal -> updateImageFlags() }
+    }
+    Platform.runLater { updateImageFlags() } // tick boxes are only built once the dialog shows
     
     
     
@@ -863,6 +1144,20 @@ def codePreferences = runOnFxThreadAndWait {
         CBs.each { it.setSelected( it.getUserData() in matches ) }
     }
     
+    // Closure to show only the measurements/metadata that objects of the selected classes have
+    def showFieldsOfSelectedClasses = {
+        def selectedPCs = pathClassBox.CBs.findAll { it.isSelected() }.collect { it.getUserData() }
+        [[measurementsBox, projectCache.index.measurementsByClass], [metadataBox, projectCache.index.metadataByClass]].each { box, byClass ->
+            Set available = selectedPCs.collectMany { byClass?.get( it ) ?: [] } as Set
+            box.CBs.each { cbCheck ->
+                boolean match = cbCheck.getText() in available
+                cbCheck.setVisible( match )
+                cbCheck.setManaged( match )
+            }
+        }
+    }
+    pathClassBox.CBs.each { cb -> cb.selectedProperty().addListener { obs, oldVal, newVal -> showFieldsOfSelectedClasses() } }
+    
     // Closure to generate available measurements and metadata options by selected object class
     def setRightBox = {
 
@@ -871,36 +1166,13 @@ def codePreferences = runOnFxThreadAndWait {
         def allMeasurementsMap = allMeasurements.collect { [name: it] }
         measurementsBox = makeCheckboxBox( "Available measurements", "existing measurements from objects of the selected classes", allMeasurementsMap, 250, 0, "None for selected classes" )
         measurementsBox.header.getChildren().add( measurementsBox.selectAll )
-        measurementsBox.box.setMinWidth( Region.USE_PREF_SIZE )
         
         def metadataByClass = projectCache.index.metadataByClass ?: [:]
         LinkedHashSet allMetadata = new LinkedHashSet( (metadataByClass.values() ?: []).collectMany { it ?: [] } )
         def allMetadataMap = allMetadata.collect { [name: it] }
         metadataBox = makeCheckboxBox( "Available metadata", "existing metadata from objects of the selected classes", allMetadataMap, 250, 0, "None for selected classes" )
         metadataBox.header.getChildren().add( metadataBox.selectAll )
-        metadataBox.box.setMinWidth( Region.USE_PREF_SIZE )
-        
-        pathClassBox.CBs.each { cb ->
-            cb.selectedProperty().addListener { obs, oldVal, newVal ->
-                def selectedPCs = pathClassBox.CBs.findAll { it.isSelected() }.collect { it.getUserData() }
-                
-                LinkedHashSet availableMeasurements = new LinkedHashSet( selectedPCs.collectMany { measurementsByClass[ it ] ?: [] } )
-                measurementsBox.CBs.each { cbCheck ->
-                    boolean match = cbCheck.getText() in availableMeasurements
-                    cbCheck.setVisible( match )
-                    cbCheck.setManaged( match )
-                }
-                
-                LinkedHashSet availableMetadata = new LinkedHashSet( selectedPCs.collectMany { metadataByClass[ it ] ?: [] } )
-                metadataBox.CBs.each { cbCheck ->
-                    boolean match = cbCheck.getText() in availableMetadata
-                    cbCheck.setVisible( match )
-                    //cbCheck.setManaged( match )
-                }
-            }
-            cb.setSelected( !cb.isSelected() )
-            cb.setSelected( !cb.isSelected() )
-        }
+        showFieldsOfSelectedClasses()
         
         bottomRightPanel.getChildren().setAll( measurementsBox.box, metadataBox.box )
         
@@ -922,6 +1194,7 @@ def codePreferences = runOnFxThreadAndWait {
     def topRow = new HBox( 10, refreshBtn, timeStamp )
     
     def rightPanel = new VBox( 10, topRow, bottomRightPanel )
+    VBox.setVgrow( bottomRightPanel, Priority.ALWAYS ) // keep the boxes full height rather than shrinking to their contents
     
     root.right = rightPanel
     
@@ -938,9 +1211,9 @@ def codePreferences = runOnFxThreadAndWait {
             new FileChooser.ExtensionFilter( "CSV files", "*.csv" )
         )
         
-        def startingDir = prePrefsMap.folder ?
-            new File( prePrefsMap.folder ) ?: project.getBaseDirectory() :
-            project.getBaseDirectory()
+        // The last folder used, if it still exists (the chooser refuses one that doesn't)
+        def lastFolder = prePrefsMap.folder ? new File( prePrefsMap.folder ) : null
+        def startingDir = lastFolder?.isDirectory() ? lastFolder : project.getBaseDirectory()
     
         chooser.setInitialFileName( "results.csv" )
         chooser.setInitialDirectory( startingDir )
@@ -965,38 +1238,36 @@ def codePreferences = runOnFxThreadAndWait {
     
     
     
-    // Disabling the "OK" button if not all inputs are met    
-    def rebindOkBtn = {
-        okBtn.disableProperty().unbind()
-        def anySelectedImage = Bindings.createBooleanBinding(
-            { imagesBox.CBs.any { it.isSelected() } },
-            *imagesBox.CBs.collect { it.selectedProperty() }
-        )
-        def anySelectedClass = Bindings.createBooleanBinding(
-            { pathClassBox.CBs.any { it.isSelected() } },
-            *pathClassBox.CBs.collect { it.selectedProperty() }
-        )
-        okBtn.disableProperty().bind(
-            anySelectedImage.not()
-            .or( anySelectedClass.not() )
-        )
-    }
-
-    // Initial bind
-    rebindOkBtn()
-
-    // Red outline on each input while it is a reason the "OK" button is disabled. These boxes are
-    // never rebuilt, so they're flagged once rather than on every rebind
-    flagWhenBlocking( imagesBox.box, Bindings.createBooleanBinding(
-        { !imagesBox.CBs.any { it.isSelected() } },
+    // Disabling the "OK" button if not all inputs are met (only the image and class boxes count, and a
+    // refresh never rebuilds those)
+    def anySelectedImage = Bindings.createBooleanBinding(
+        { imagesBox.CBs.any { it.isSelected() } },
         *imagesBox.CBs.collect { it.selectedProperty() }
-    ) )
-    flagWhenBlocking( pathClassBox.box, Bindings.createBooleanBinding(
-        { !pathClassBox.CBs.any { it.isSelected() } },
+    )
+    def anySelectedClass = Bindings.createBooleanBinding(
+        { pathClassBox.CBs.any { it.isSelected() } },
         *pathClassBox.CBs.collect { it.selectedProperty() }
-    ) )
+    )
+    okBtn.disableProperty().bind(
+        anySelectedImage.not()
+        .or( anySelectedClass.not() )
+    )
+
+    // Red outline on each input while it is a reason the "OK" button is disabled
+    flagWhenBlocking( imagesBox.box, anySelectedImage.not() )
+    flagWhenBlocking( pathClassBox.box, anySelectedClass.not() )
+
+    // Say why on hover, while disabled
+    explainWhenDisabled( okBtn ) { [
+        "Select at least one image": !anySelectedImage.get(),
+        "Select at least one class": !anySelectedClass.get()
+    ] }
+    explainWhenDisabled( refreshBtn ) { timeStamp.getText().contains( "[CURRENT DATA]" ) ? "The project data shown is already current" : null }
 
     
+    // Widen boxes to their widest item (window grows to fit, up to the screen width)
+    def refitBoxes = fitBoxesToScreen( dialog ) { [imagesBox, pathClassBox, measurementsBox, metadataBox] }
+
     // Refresh project details
     refreshBtn.setOnAction {
         refreshBtn.setDisable( true )
@@ -1030,7 +1301,7 @@ def codePreferences = runOnFxThreadAndWait {
                 }
 
                 dialog.getDialogPane().setDisable( false )
-                rebindOkBtn()
+                refitBoxes() // the measurement/metadata boxes were just rebuilt
 
                 // The progress window's owner here is the dialog, not the root QuPath
                 // stage — so the root window never gets implicitly refocused when the
@@ -1066,7 +1337,7 @@ def codePreferences = runOnFxThreadAndWait {
                 .findAll { it.isSelected() && it.isVisible() }
                 .collect { it.getText() }
         
-        // Return all preferences of "OK" is selected
+        // Return all preferences if "OK" is selected
         return [
             selectedImages : selectedImages,
             currentImage   : currentImageCB.isSelected(),
@@ -1084,7 +1355,7 @@ def codePreferences = runOnFxThreadAndWait {
 if (codePreferences == null) {
     return
     
-} else { // Write to .json if exporting/importing
+} else { // Remember the choices for next time
     
     prefsFile.text = outputGson.toJson( codePreferences )
 }
@@ -1126,10 +1397,11 @@ def onImage = { String imageName, Closure work ->
 
 try {
 def futures = imagesToRun.indices.collect { idx ->
-    if (stopLaterFlag.get()) return null
     def image = imagesToRun[ idx ]
+    def liveData = liveDataForEntry( image ) // looked up here, on the script thread, not in the pool
     pool.submit( onImage( image.getImageName(), {
-        def imageData = image == currentEntry ? currentImageData : image.readImageData()
+        if (stopLaterFlag.get()) { return } // stopped: leave the images not yet started
+        def imageData = liveData ?: image.readImageData()
         try {
             def hierarchy = imageData.getHierarchy()
             def annotations = hierarchy.getAnnotationObjects().findAll {
@@ -1162,13 +1434,13 @@ def futures = imagesToRun.indices.collect { idx ->
                 
                 rowMap[ "Image" ]                = imageName
                 rowMap[ "Anno_Name" ]            = anno.getName()
-                rowMap[ "Anno_Class" ]           = anno.getPathClass()?.getName()
+                rowMap[ "Anno_Class" ]           = anno.getPathClass()?.toString()
                 rowMap[ "Anno_ID" ]              = anno.getID()
                 rowMap[ "Anno_ID_Path" ]         = idPath.reverse().join( "/" )
                 rowMap[ "Anno_Area_um" ]         = anno.getROI()?.getScaledArea( pixelCalibration )
                 rowMap[ "Anno_Hierarchy_Level" ] = anno.getLevel()
                 rowMap[ "Parent_Name" ]          = parent?.getName()
-                rowMap[ "Parent_Class" ]         = parent?.getPathClass()?.getName()
+                rowMap[ "Parent_Class" ]         = parent?.getPathClass()?.toString()
                 // The root object is the image itself, not a real parent annotation, so it gets no ID
                 rowMap[ "Parent_ID" ]            = parent?.isRootObject() ? null : parent?.getID()
                 
@@ -1186,13 +1458,13 @@ def futures = imagesToRun.indices.collect { idx ->
             }
             rowResults[ idx ] = localRows
         } finally {
-            if (image != currentEntry) imageData.close()
+            if (liveData == null) { imageData.close() } // a viewer's live data stays open for the viewer
         }
         
         progressUI.lastImageName.set( image.getImageName() )
         progressUI.doneCount.incrementAndGet()
     }) as Callable)
-}.findAll { it != null }
+}
 
 futures.each { it.get() }
 pool.shutdown()
@@ -1250,10 +1522,12 @@ if (emptyImages.size() == imagesToRun.size()) {
 // Exporting all data if allowed
 if (export) {
     def file = new File( codePreferences.file )
-    
-    // Creating a CSV file if one doesn't exist (to append to)
-    if (!file.exists()) {  
-        file.createNewFile() 
+
+    // A value holding a comma, quote or line break is quoted (with inner quotes doubled), so it stays
+    // in one cell instead of spilling into the next columns. A missing value is left blank
+    def csvCell = { v ->
+        String text = v == null ? "" : "${v}"
+        text ==~ /(?s).*[",\r\n].*/ ? '"' + text.replace( '"', '""' ) + '"' : text
     }
     
     // Catching any errors if the file is open
@@ -1262,7 +1536,7 @@ if (export) {
         try {
             file.withWriter { writer ->
                 outputMatrix.each {
-                    def row = it.join( "," )
+                    def row = it.collect { csvCell( it ) }.join( "," )
                     writer.writeLine( row )
                 }
             }
