@@ -736,28 +736,30 @@ def outlineImageProblems( List imageCBs, String currentImageName, Closure proble
     }
 }
 
-// Function: Scan the entire project to collect annotation field availability by class
-def collectProjectAnnotationIndex( project, Stage ownerStage = null, Collection omittedMdKeys = [] ) {
-    List projectImages = project.getImageList()
-    def collectingUI = createProgressWindow( "Getting project specifics", projectImages.size(), true, ownerStage, projectImages.collect { it.getImageName() } )
-    int total = projectImages.size()
+// Function: Scan a specific set of images — not necessarily the whole project — to collect their
+// annotation measurement/metadata field names by class. The caller (loadFieldIndex) decides which
+// images actually need this, based on its per-image cache
+def collectImageFieldIndexes( List entries, Collection omittedMdKeys = [] ) {
+    if (entries.isEmpty()) { return [ byEntryId: [:], cancelled: false ] }
+
+    def collectingUI = createProgressWindow( "Getting project specifics", entries.size(), true, null, entries.collect { it.getImageName() } )
     def stopLaterFlag = collectingUI.stopLaterFlag
 
-    def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), total )
+    def nThreads = Math.min( Runtime.getRuntime().availableProcessors(), entries.size() )
     def pool = Executors.newFixedThreadPool( nThreads )
 
-    def futures = projectImages.collect { entry ->
+    def futures = entries.collect { entry ->
         pool.submit({
-            // Bail out before touching image data once a stop has been requested
+            // Bail out before touching image data once a stop has been requested — the image simply
+            // keeps whatever was already cached for it (handled by the caller)
             if (stopLaterFlag.get()) {
                 collectingUI.lastImageName.set( entry.getImageName() )
                 collectingUI.doneCount.incrementAndGet()
-                return [ classCounts: [:], measurements: [:], metadata: [:] ]
+                return null
             }
 
-            def localClassCounts     = [:].withDefault { 0 }
-            def localMeasurements    = [:].withDefault { new LinkedHashSet() }
-            def localMetadata        = [:].withDefault { new LinkedHashSet() }
+            def localMeasurements = [:].withDefault { new LinkedHashSet() }
+            def localMetadata     = [:].withDefault { new LinkedHashSet() }
 
             def imageData = null
             try {
@@ -767,7 +769,6 @@ def collectProjectAnnotationIndex( project, Stage ownerStage = null, Collection 
                     annos.each { obj ->
                         // Filed under the name the class list shows, so unclassified annotations are included
                         def className = classLabelForObject( obj )
-                        localClassCounts[ className ]++
                         obj.getMeasurementList()?.getMeasurementNames()?.each { localMeasurements[ className ] << it }
                         obj.getMetadata()?.keySet()?.each {
                             if (!(it in omittedMdKeys)) { localMetadata[ className ] << it }
@@ -782,21 +783,19 @@ def collectProjectAnnotationIndex( project, Stage ownerStage = null, Collection 
             collectingUI.lastImageName.set( entry.getImageName() )
             collectingUI.doneCount.incrementAndGet()
 
-            return [ classCounts: localClassCounts, measurements: localMeasurements, metadata: localMetadata ]
+            return [ id: entry.getID() as String, measurements: localMeasurements, metadata: localMetadata ]
         } as Callable)
     }
 
-    // Serial merge — fast, no contention
-    def index = [
-        classCounts        : [:].withDefault { 0 },
-        measurementsByClass: [:].withDefault { new LinkedHashSet() },
-        metadataByClass    : [:].withDefault { new LinkedHashSet() }
-    ]
+    def byEntryId = [:]
     futures.each { future ->
-        def local = future.get()
-        local.classCounts.each    { k, v -> index.classCounts[ k ] = ( index.classCounts[ k ] ?: 0 ) + v }
-        local.measurements.each   { k, v -> index.measurementsByClass[ k ].addAll( v ) }
-        local.metadata.each       { k, v -> index.metadataByClass[ k ].addAll( v ) }
+        def result = future.get()
+        if (result != null) {
+            byEntryId[ result.id ] = [
+                measurementsByClass: result.measurements.collectEntries { k, v -> [k, new ArrayList( v )] },
+                metadataByClass    : result.metadata.collectEntries     { k, v -> [k, new ArrayList( v )] }
+            ]
+        }
     }
 
     pool.shutdown()
@@ -804,11 +803,7 @@ def collectProjectAnnotationIndex( project, Stage ownerStage = null, Collection 
     Thread.sleep( 200 )
     Platform.runLater { collectingUI.stage.close() }
 
-    index.measurementsByClass = index.measurementsByClass.collectEntries { k, v -> [k, new LinkedHashSet( v )] }
-    index.metadataByClass     = index.metadataByClass.collectEntries     { k, v -> [k, new LinkedHashSet( v )] }
-    index.classCounts         = index.classCounts.collectEntries         { k, v -> [k, v as int] }
-    index.cancelled           = stopLaterFlag.get()
-    return index
+    return [ byEntryId: byEntryId, cancelled: stopLaterFlag.get() ]
 }
 
 
@@ -929,6 +924,21 @@ def liveClassCounts = { imgData ->
     }
     return counts
 }
+
+// Measurement/metadata field names by class taken straight from a live hierarchy — used instead of the
+// on-disk cache for any image currently open in a viewer, since its unsaved state isn't reflected there
+def liveFieldIndexForEntry = { imgData ->
+    def measurements = [:].withDefault { new LinkedHashSet() }
+    def metadata     = [:].withDefault { new LinkedHashSet() }
+    imgData.getHierarchy().getAnnotationObjects().each { obj ->
+        def className = classLabelForObject( obj )
+        obj.getMeasurementList()?.getMeasurementNames()?.each { measurements[ className ] << it }
+        obj.getMetadata()?.keySet()?.each {
+            if (!(it in omittedMdKeys)) { metadata[ className ] << it }
+        }
+    }
+    return [ measurementsByClass: measurements, metadataByClass: metadata ]
+}
 def projectDirectory = project.getBaseDirectory()
 
 // Folder and file names of where preferences are stored in directory
@@ -952,64 +962,96 @@ if (prefsFile.length() > 0L && prefsFile.getText() != "null") {
     prePrefsMap = inputGson.fromJson( prefsFile.getText(), Map )
 }
 
-// Build map of project specifics to cache. scanVersion goes up whenever the scan starts collecting something
-// new, so a cache from an older scan is rebuilt rather than reused (3: unclassified annotations are included,
-// and subclasses are filed under their full name)
-def projectFingerprint = { proj ->
-    def imageNames = proj.getImageList().collect { it.getImageName() }.sort()
+// The measurement/metadata field names available by class, rebuilt only for the images whose
+// summary.json "timestamp" (the instant of their last save) has changed since the last scan, or that
+// have never been scanned — every other image's fields are pulled straight from the cache on disk, so
+// opening the dialog costs nothing once a project has already been scanned. An image open live in a
+// viewer always contributes its live, possibly-unsaved fields instead, since disk lags behind until
+// it's saved. scanVersion goes up whenever a scan should start collecting something new (4: switched to
+// this per-image cache; 3: unclassified annotations included, subclasses filed under their full name)
+def loadFieldIndex = { proj, File cacheFile ->
+    def scanVersion = "4"
     def baseDir = proj.getBaseDirectory()?.getAbsolutePath() ?: ""
-    return [ baseDir:     baseDir,
-             images:      imageNames,
-             scanVersion: "3" ]
-}
 
-// If a cache with this project's fingerprint exists, gets measurement/metadata specifics from there
-// If not, regenerates by scanning the project
-def loadProjectCache = { proj, File cacheFile, boolean forceReload = false, Stage ownerStage = null ->
-    def currentFingerprint = projectFingerprint( proj )
-    def previousCache = null
+    def cachedImages = [:]
     if (cacheFile.exists() && cacheFile.length() > 0L) {
         try {
             def cached = inputGson.fromJson( cacheFile.text, Object )
-            if (cached instanceof Map) { previousCache = cached }
-            if (!forceReload && cached?.fingerprint == currentFingerprint && cached?.index instanceof Map) {
-                return cached
+            if (cached instanceof Map && cached.scanVersion == scanVersion && cached.baseDir == baseDir && cached.images instanceof Map) {
+                cachedImages = cached.images
             }
         } catch (Exception ignored) {
             // rebuild below
         }
     }
 
-    def builtIndex = collectProjectAnnotationIndex( proj, ownerStage, omittedMdKeys )
+    def allEntries = proj.getImageList()
 
-    if (builtIndex.cancelled) {
-        // Stopped partway through — keep whatever was already on disk rather than
-        // persisting a partial scan as if it were complete, current data
-        return previousCache ?
-            previousCache + [ cancelled: true ] :
-            [
-                timeStamp  : "No cached data available",
-                fingerprint: currentFingerprint,
-                index      : builtIndex,
-                cancelled  : true
-            ]
+    // Every image's current summary.json timestamp, read in parallel — cheap, no image data touched
+    def currentTimestamps = Collections.synchronizedMap( [:] )
+    def tsGson = new Gson()
+    def tsPool = Executors.newFixedThreadPool( Math.min( Runtime.getRuntime().availableProcessors(), Math.max( allEntries.size(), 1 ) ) )
+    allEntries.collect { entry ->
+        tsPool.submit({
+            def summaryFile = entry.getEntryPath().resolve( "summary.json" )
+            Long ts = null
+            if (Files.exists( summaryFile )) {
+                try {
+                    def rawTs = tsGson.fromJson( new String( Files.readAllBytes( summaryFile ) ), Object )?.get( "timestamp" )
+                    if (rawTs instanceof Number) { ts = ((Number) rawTs).longValue() }
+                } catch (Exception ignored) {
+                }
+            }
+            currentTimestamps[ entry.getID() as String ] = ts
+        } as Callable)
+    }.each { it.get() }
+    tsPool.shutdown()
+
+    def liveEntryIds = allEntries.findAll { liveDataForEntry( it ) != null }.collect { it.getID() as String } as Set
+    def sameTimestamp = { a, b ->
+        if (a == null || b == null) { return a == null && b == null }
+        (a instanceof Number ? ((Number) a).doubleValue() : null) == (b instanceof Number ? ((Number) b).doubleValue() : null)
     }
 
-    def timestamp = LocalDateTime.now().format(
-        DateTimeFormatter.ofPattern( "yyyy-MM-dd HH:mm:ss" )
-    )
+    // Live images are always read fresh below, so a stale disk timestamp never sends them through a scan
+    List needsScan = allEntries.findAll { entry ->
+        def id = entry.getID() as String
+        !(id in liveEntryIds) && !sameTimestamp( cachedImages[ id ]?.timestamp, currentTimestamps[ id ] )
+    }
 
-    def cacheObj = [
-        timeStamp  : timestamp,
-        fingerprint: currentFingerprint,
-        index      : builtIndex
+    def scanResult = collectImageFieldIndexes( needsScan, omittedMdKeys )
+
+    // Keep every untouched cached entry; overwrite only the ones just rescanned. Each entry stands on
+    // its own, so a scan stopped partway through only ever adds to what was already cached, never
+    // replaces good data with a partial result
+    def updatedImages = [:]
+    cachedImages.each { id, entry -> updatedImages[ id ] = entry }
+    scanResult.byEntryId.each { id, fields -> updatedImages[ id ] = fields + [ timestamp: currentTimestamps[ id ] ] }
+    def currentIds = allEntries.collect { it.getID() as String } as Set
+    updatedImages = updatedImages.findAll { id, entry -> id in currentIds } // drop images no longer in the project
+
+    cacheFile.text = outputGson.toJson( [ scanVersion: scanVersion, baseDir: baseDir, images: updatedImages ] )
+
+    // Merge every image's fields into one project-wide index, live images contributing their live state
+    def measurementsByClass = [:].withDefault { new LinkedHashSet() }
+    def metadataByClass     = [:].withDefault { new LinkedHashSet() }
+    allEntries.each { entry ->
+        def id = entry.getID() as String
+        def liveData = liveDataForEntry( entry )
+        def fields = liveData != null ? liveFieldIndexForEntry( liveData ) : ( updatedImages[ id ] ?: [:] )
+        fields.measurementsByClass?.each { k, v -> measurementsByClass[ k ].addAll( v ) }
+        fields.metadataByClass?.each     { k, v -> metadataByClass[ k ].addAll( v ) }
+    }
+
+    // Plain maps, not the withDefault wrapper above — a lookup miss later (e.g. a class with no
+    // measurements) must not silently insert an empty entry as a side effect of being read
+    return [
+        measurementsByClass: measurementsByClass.collectEntries { k, v -> [k, new LinkedHashSet( v )] },
+        metadataByClass    : metadataByClass.collectEntries     { k, v -> [k, new LinkedHashSet( v )] }
     ]
-
-    cacheFile.text = outputGson.toJson(cacheObj)
-    return cacheObj
 }
 
-def projectCache = loadProjectCache( project, fieldCacheFile )
+def fieldIndex = loadFieldIndex( project, fieldCacheFile )
 
 
 // --- PREFERENCES POPUP ---
@@ -1191,7 +1233,7 @@ def codePreferences = runOnFxThreadAndWait {
     // Closure to show only the measurements/metadata that objects of the selected classes have
     def showFieldsOfSelectedClasses = {
         def selectedPCs = pathClassBox.CBs.findAll { it.isSelected() }.collect { it.getUserData() }
-        [[measurementsBox, projectCache.index.measurementsByClass], [metadataBox, projectCache.index.metadataByClass]].each { box, byClass ->
+        [[measurementsBox, fieldIndex.measurementsByClass], [metadataBox, fieldIndex.metadataByClass]].each { box, byClass ->
             Set available = selectedPCs.collectMany { byClass?.get( it ) ?: [] } as Set
             box.CBs.each { cbCheck ->
                 boolean match = cbCheck.getText() in available
@@ -1205,42 +1247,27 @@ def codePreferences = runOnFxThreadAndWait {
     // Closure to generate available measurements and metadata options by selected object class
     def setRightBox = {
 
-        def measurementsByClass = projectCache.index.measurementsByClass ?: [:]
+        def measurementsByClass = fieldIndex.measurementsByClass ?: [:]
         LinkedHashSet allMeasurements = new LinkedHashSet( (measurementsByClass.values() ?: []).collectMany { it ?: [] } )
         def allMeasurementsMap = allMeasurements.collect { [name: it] }
         measurementsBox = makeCheckboxBox( "Available measurements", "existing measurements from objects of the selected classes", allMeasurementsMap, 250, 0, "None for selected classes" )
         measurementsBox.header.getChildren().add( measurementsBox.selectAll )
-        
-        def metadataByClass = projectCache.index.metadataByClass ?: [:]
+
+        def metadataByClass = fieldIndex.metadataByClass ?: [:]
         LinkedHashSet allMetadata = new LinkedHashSet( (metadataByClass.values() ?: []).collectMany { it ?: [] } )
         def allMetadataMap = allMetadata.collect { [name: it] }
         metadataBox = makeCheckboxBox( "Available metadata", "existing metadata from objects of the selected classes", allMetadataMap, 250, 0, "None for selected classes" )
         metadataBox.header.getChildren().add( metadataBox.selectAll )
         showFieldsOfSelectedClasses()
-        
+
         bottomRightPanel.getChildren().setAll( measurementsBox.box, metadataBox.box )
-        
-        return [ mmCBs: measurementsBox.CBs,
-                 mdCBs: metadataBox.CBs ]
     }
-    
-    def liveRightCBs = setRightBox()
-    selectSpecificCBs( liveRightCBs.mmCBs, prePrefsMap.measurements )
-    selectSpecificCBs( liveRightCBs.mdCBs, prePrefsMap.metadata )
-    
-    
-    def timeStamp = new Label( " Last refresh: ${projectCache.timeStamp}" )
-    addIcon( timeStamp, FontAwesome.Glyph.CLOCK_ALT, 14 )
-    timeStamp.setPadding( new Insets( 5 ) )
-    def refreshBtn = new Button( " Refresh project data" )
-    addIcon( refreshBtn, FontAwesome.Glyph.REFRESH, 12 )
-    setTT( refreshBtn, "Re-scan project to update existing measurements and metadata." )
-    def topRow = new HBox( 10, refreshBtn, timeStamp )
-    
-    def rightPanel = new VBox( 10, topRow, bottomRightPanel )
-    VBox.setVgrow( bottomRightPanel, Priority.ALWAYS ) // keep the boxes full height rather than shrinking to their contents
-    
-    root.right = rightPanel
+
+    setRightBox()
+    selectSpecificCBs( measurementsBox.CBs, prePrefsMap.measurements )
+    selectSpecificCBs( metadataBox.CBs, prePrefsMap.metadata )
+
+    root.right = bottomRightPanel
     
     
     
@@ -1299,61 +1326,12 @@ def codePreferences = runOnFxThreadAndWait {
         "Select at least one class"                   : !pathClassBox.CBs.any { it.isSelected() },
         "Select at least one measurement or metadata field": !(measurementsBox.CBs + metadataBox.CBs).any { it.isSelected() && it.isVisible() }
     ] }
-    explainWhenDisabled( refreshBtn ) { timeStamp.getText().contains( "[CURRENT DATA]" ) ? "The project data shown is already current" : null }
 
-    
+
     // Widen boxes to their widest item (window grows to fit, up to the screen width)
     def refitBoxes = fitBoxesToScreen( dialog ) { [imagesBox, pathClassBox, measurementsBox, metadataBox] }
 
-    // Refresh project details
-    refreshBtn.setOnAction { e ->
-        refreshBtn.setDisable( true )
-        def dialogStage = dialog.getDialogPane().getScene().getWindow() as Stage
 
-        // The progress window is non-modal while nested under this dialog (see
-        // createProgressWindow), so disable the dialog's own content/buttons here
-        // instead — it stands in for the modality we can no longer use
-        dialog.getDialogPane().setDisable( true )
-
-        List measurementsSelected = measurementsBox.CBs.findResults { it.isSelected() ? it.getText() : null }
-        List metadataSelected     = metadataBox.CBs.findResults { it.isSelected() ? it.getText() : null }
-
-        Thread.startDaemon {
-            def newCache = loadProjectCache( project, fieldCacheFile, true, dialogStage )
-
-            Platform.runLater {
-                projectCache = newCache
-                liveRightCBs = setRightBox()
-                selectSpecificCBs( liveRightCBs.mmCBs, measurementsSelected )
-                selectSpecificCBs( liveRightCBs.mdCBs, metadataSelected )
-
-                if (projectCache.cancelled) {
-                    // Refresh didn't finish — leave the timestamp/button as if it
-                    // never ran, rather than claiming the (possibly stale) data is current
-                    timeStamp.setText( " Last refresh: ${projectCache.timeStamp}" )
-                    refreshBtn.setDisable( false )
-                } else {
-                    timeStamp.setText( " Last refresh: ${projectCache.timeStamp}  [CURRENT DATA]" )
-                    refreshBtn.setDisable( true )
-                }
-
-                dialog.getDialogPane().setDisable( false )
-                rebindOkBtn()
-                refitBoxes() // the measurement/metadata boxes were just rebuilt
-
-                // The progress window's owner here is the dialog, not the root QuPath
-                // stage — so the root window never gets implicitly refocused when the
-                // progress window/Alert close. Bring both back explicitly, main window
-                // first so the dialog ends up on top of it, not the other way round.
-                QuPathGUI.getInstance().getStage()?.toFront()
-                dialogStage.toFront()
-            }
-        }
-
-        e.consume()
-    }
-    
-    
     // Requesting confirmation to remove
     boolean confirmRemove = false
     okBtn.addEventFilter( ActionEvent.ACTION ) { e ->
@@ -1574,8 +1552,6 @@ import javafx.scene.input.*
 import javafx.stage.*
 import javafx.beans.binding.Bindings
 import com.google.gson.*
-import java.time.LocalDateTime
-import java.time.format.DateTimeFormatter
 import qupath.lib.gui.tools.IconFactory
 import org.controlsfx.glyphfont.FontAwesome
 
