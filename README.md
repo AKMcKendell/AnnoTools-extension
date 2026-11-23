@@ -1,5 +1,7 @@
 # AnnoTools
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24484412.svg)](https://doi.org/10.5281/zenodo.24484412)
+
 AnnoTools is a [QuPath](https://qupath.github.io) extension for working with annotations across a whole project. Its eight tools each run over as many images as you choose, so you can move annotations between projects, build rings around them, find where classes overlap, classify them by eye, add or remove measurements, delete them by class and export their data to a spreadsheet.
 
 Requires QuPath 0.7.
