@@ -16,6 +16,11 @@ qupathExtension {
     automaticModule = "qupath.ext.annotools"
 }
 
+// Only the shadow/fat jar is ever installed into QuPath, so skip building the plain jar
+tasks.jar {
+    enabled = false
+}
+
 // TODO: Define your dependencies here
 dependencies {
 
