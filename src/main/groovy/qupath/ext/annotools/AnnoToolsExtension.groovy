@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class AnnoToolsExtension implements QuPathExtension {
 
     String name = "AnnoTools"
-    String description = "Toolbar dropdown launcher for annoToolScripts"
+    String description = "Toolbar and menu launcher for the AnnoTools scripts"
     Version quPathVersion = Version.parse("v0.7.0")
 
     // Runs a tool script with visible "loading" feedback. Some scripts take a

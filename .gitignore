@@ -1,11 +1,6 @@
 # Javadocs
 docs/
 
-# Maven
-deploy/
-target/
-log/
-
 # IntelliJ
 .idea/
 *.iml
@@ -16,7 +11,6 @@ out/
 gradle.properties
 build/
 .gradle/
-gradle.properties
 
 # Eclipse
 .settings/
@@ -36,6 +30,6 @@ hs_err*.log
 *.tmp
 *.bak
 *.swp
-*~.nib
-*thumbs.db
+*~
+Thumbs.db
 bin/
