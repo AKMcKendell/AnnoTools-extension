@@ -7,7 +7,7 @@ pluginManagement {
     }
 }
 
-// TODO: Specify which version of QuPath the extension is targeting here
+// The QuPath version the extension is built against
 qupath {
     version = "0.7.0"
 }

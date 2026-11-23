@@ -1,39 +1,39 @@
 plugins {
-    // Support writing the extension in Groovy (remove this if you don't want to)
     groovy
-    // To optionally create a shadow/fat jar that bundle up any non-core dependencies
+    // Builds the shadow (fat) jar that bundles the non-core dependencies
     id("com.gradleup.shadow") version "8.3.5"
     // QuPath Gradle extension convention plugin
     id("qupath-conventions")
 }
 
-// TODO: Configure your extension here (please change the defaults!)
 qupathExtension {
     name = "AnnoTools"
     group = "io.github.qupath"
-    version = "0.1.0"
+    version = "1.0.0"
     description = "A simple QuPath extension to easily modify annotations across a project"
     automaticModule = "qupath.ext.annotools"
 }
 
-// Only the shadow/fat jar is ever installed into QuPath, so skip building the plain jar
+// The shadow jar is the one users install, so skip the plain jar and give the shadow jar the plain name
 tasks.jar {
     enabled = false
 }
 
-// TODO: Define your dependencies here
+tasks.shadowJar {
+    archiveClassifier = ""
+}
+
+// Make a plain `gradlew build` produce the installable jar
+tasks.build {
+    dependsOn(tasks.shadowJar)
+}
+
 dependencies {
 
-    // Main dependencies for most QuPath extensions
+    // Dependencies provided by QuPath, bundled into the shadow jar
     shadow(libs.bundles.qupath)
     shadow(libs.bundles.logging)
     shadow(libs.qupath.fxtras)
-
-    // If you aren't using Groovy, this can be removed
     shadow(libs.bundles.groovy)
-
-    // For testing
-    testImplementation(libs.bundles.qupath)
-    testImplementation(libs.junit)
 
 }
