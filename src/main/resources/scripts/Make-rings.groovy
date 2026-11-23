@@ -676,6 +676,237 @@ def explainWhenDisabled( Node node, Closure reasons ) {
     node.disabledProperty().addListener { obs, oldVal, isDisabled -> if (!isDisabled) { hideTip() } }
 }
 
+// Function: Add a "?" button to a dialog's button row that opens a help panel beside the dialog: a short
+// intro, then an entry for each input. entries are maps of title, text and nodes (the controls the entry is
+// about; oneBox: true outlines them as one block rather than row by row). While the panel is open the two
+// are linked: pointing at an entry outlines its controls in the dialog, and pointing at a control picks
+// out its entry. An entry can also give now: a closure returning a sentence about the dialog as it stands
+// (what is chosen, what that will do), shown under its text as "Current: ..." and kept up to date while the
+// panel is open. Call it once the dialog's inputs are all built
+def addHelpButton( Dialog dialog, String heading, String intro, List entries ) {
+    def pane = dialog.getDialogPane()
+    String blue    = "rgb(47,143,230)"
+    String cardOff = "-fx-background-radius: 4; -fx-border-width: 0 0 0 3; -fx-border-color: transparent;"
+    String cardOn  = cardOff.replace( "transparent", blue ) + " -fx-background-color: rgba(47,143,230,0.15);"
+
+    // A dialog's buttons close it when clicked, so this one's click is taken before the dialog sees it
+    def helpType = new ButtonType( "?", ButtonBar.ButtonData.HELP_2 )
+    pane.getButtonTypes().add( helpType )
+    def helpBtn = pane.lookupButton( helpType )
+    ButtonBar.setButtonUniformSize( helpBtn, false )
+    helpBtn.setFocusTraversable( false ) // the input being typed in keeps the focus, and the tab order is unchanged
+    helpBtn.setStyle( """
+        -fx-font-weight: bold;
+        -fx-padding: 0;
+        -fx-background-radius: 5em;
+        -fx-min-width: 2em;  -fx-pref-width: 2em;  -fx-max-width: 2em;
+        -fx-min-height: 2em; -fx-pref-height: 2em; -fx-max-height: 2em;
+    """ )
+    setTT( helpBtn, "Open a dynamic help panel showing what each option does." )
+
+    List items = entries.collect { [entry: it, card: null, nowLabel: null] } // card: the entry's block in the panel
+    def current = null                                                       // the item being pointed at, if any
+    Stage panel = null
+    ScrollPane scroll = null
+    def scrolling = new javafx.animation.Timeline()
+
+    // The "Current: ..." lines, re-read a few times a second while the panel is open: simpler and surer than
+    // listening to every input an entry might depend on. A line that can't be worked out is left off
+    def refreshNow = {
+        items.each { item ->
+            if (item.nowLabel == null) { return }
+            String now = null
+            try { now = item.entry.now.call() } catch (Exception ignored) { }
+            String shown = now ? "Current: " + now : ""
+            if (shown != item.nowLabel.getText()) { item.nowLabel.setText( shown ) }
+            item.nowLabel.setVisible( !shown.isEmpty() )
+            item.nowLabel.setManaged( !shown.isEmpty() )
+        }
+    }
+    def keepingUp = new javafx.animation.Timeline( new javafx.animation.KeyFrame( Duration.millis( 250 ), { refreshNow() } as javafx.event.EventHandler ) )
+    keepingUp.setCycleCount( javafx.animation.Animation.INDEFINITE )
+
+    // Outlines drawn over the dialog around the controls being explained. The dialog doesn't lay them out
+    // and the mouse passes through them, so nothing under them moves or stops responding
+    def outlines = new javafx.scene.Group()
+    outlines.setManaged( false )
+    outlines.setMouseTransparent( true )
+    String outlineStyle = "-fx-stroke: ${blue}; -fx-stroke-width: 2; -fx-stroke-type: inside; -fx-arc-width: 8;" +
+                          "-fx-arc-height: 8; -fx-fill: rgba(47,143,230,0.10);"
+
+    // Where an entry's controls are in the dialog's scene: a rectangle around each row of those on show.
+    // Controls side by side share one; controls above one another get their own, so that a group spread
+    // over two rows isn't boxed together with whatever else sits beside it (unless the entry asks for
+    // oneBox, e.g. a label sitting on top of its field)
+    def rowsOf = { entry ->
+        List shown = entry.nodes.findAll { node ->
+            def n = node
+            while (n != null && n.isVisible()) { n = n.getParent() }
+            n == null && node.getScene() == pane.getScene() // not hidden, and in the dialog
+        }.collect { it.localToScene( it.getBoundsInLocal() ) }.findAll { it.getWidth() > 0 && it.getHeight() > 0 }
+        List rows = []
+        shown.sort { it.getMinY() }.each { b ->
+            def row = rows ? rows.last() : null
+            if (row != null && (entry.oneBox || b.getMinY() < row.getMaxY())) {
+                double x0 = Math.min( row.getMinX(), b.getMinX() )
+                rows[ -1 ] = new BoundingBox( x0, row.getMinY(), Math.max( row.getMaxX(), b.getMaxX() ) - x0,
+                                              Math.max( row.getMaxY(), b.getMaxY() ) - row.getMinY() )
+            } else {
+                rows << b
+            }
+        }
+        return rows
+    }
+
+    // Point at an item (or at nothing): its card is picked out in the panel and its controls are outlined
+    // in the dialog. reveal also scrolls the panel to the card, for when the pointing is done in the dialog
+    def pointAt = { item, boolean reveal ->
+        boolean changed = item !== current
+        current = item
+        if (changed) { items.each { it.card?.setStyle( it === item ? cardOn : cardOff ) } }
+
+        List rows = (item != null && panel?.isShowing()) ? rowsOf( item.entry ) : []
+        if (rows) {
+            // In front of the dialog's own parts, which it adds to itself as they're set
+            if (outlines.getParent() == null) { pane.getChildren().add( outlines ) }
+            if (pane.getChildren().last() !== outlines) { outlines.toFront() }
+        }
+        while (outlines.getChildren().size() < rows.size()) {
+            def shape = new javafx.scene.shape.Rectangle()
+            shape.setStyle( outlineStyle )
+            outlines.getChildren().add( shape )
+        }
+        outlines.getChildren().eachWithIndex { shape, i ->
+            shape.setVisible( i < rows.size() )
+            if (i >= rows.size()) { return }
+            def local = pane.sceneToLocal( rows[ i ] )
+            double x = Math.floor( local.getMinX() ) - 4, y = Math.floor( local.getMinY() ) - 4
+            shape.setX( x )
+            shape.setY( y )
+            shape.setWidth( Math.ceil( local.getMaxX() ) + 4 - x )
+            shape.setHeight( Math.ceil( local.getMaxY() ) + 4 - y )
+        }
+
+        if (!changed || !reveal || item == null) { return }
+        double viewH = scroll.getViewportBounds().getHeight()
+        double spare = scroll.getContent().getBoundsInLocal().getHeight() - viewH // how far the panel can scroll
+        if (spare <= 0) { return }
+        def cardAt = item.card.getBoundsInParent()
+        double top = scroll.getVvalue() * spare
+        double want = top
+        if (cardAt.getMinY() - 8 < top)              { want = cardAt.getMinY() - 8 }
+        else if (cardAt.getMaxY() + 8 > top + viewH) { want = Math.min( cardAt.getMinY() - 8, cardAt.getMaxY() + 8 - viewH ) }
+        want = Math.max( 0d, Math.min( spare, want ) )
+        if (Math.abs( want - top ) < 0.5) { return }
+        scrolling.stop()
+        scrolling.getKeyFrames().setAll( new javafx.animation.KeyFrame( Duration.millis( 150 ),
+            new javafx.animation.KeyValue( scroll.vvalueProperty(), (want / spare) as double ) ) )
+        scrolling.playFromStart()
+    }
+
+    // The panel is only built if it's asked for
+    def buildPanel = {
+        def title = new Label( heading )
+        title.setStyle( "-fx-font-size: 1.3em; -fx-font-weight: bold;" )
+        def about = new Label( intro )
+        def howTo = new Label( "Hover over an option below to see it outlined in the window, or over something in the window to find it here." )
+        howTo.setStyle( "-fx-font-style: italic; -fx-opacity: 0.7;" )
+        def content = new VBox( 8, title, about, howTo, new Separator() )
+        content.setPadding( new Insets( 12, 10, 12, 10 ) )
+
+        items.each { item ->
+            def name = new Label( item.entry.title as String )
+            name.setStyle( "-fx-font-weight: bold;" )
+            def text = new Label( item.entry.text as String )
+            def card = new VBox( 3, name, text )
+            card.setPadding( new Insets( 6, 8, 6, 8 ) )
+            card.setStyle( cardOff )
+            card.setOnMouseEntered { pointAt( item, false ) }
+            card.setOnMouseExited { pointAt( null, false ) }
+            item.card = card
+            content.getChildren().add( card )
+            [name, text].each { it.setWrapText( true ) }
+
+            if (item.entry.now instanceof Closure) {
+                item.nowLabel = new Label()
+                item.nowLabel.setWrapText( true )
+                item.nowLabel.setMaxWidth( Double.MAX_VALUE )
+                item.nowLabel.setStyle( "-fx-background-color: rgba(47,143,230,0.13); -fx-background-radius: 4; -fx-padding: 4 6 4 6;" )
+                VBox.setMargin( item.nowLabel, new Insets( 3, 0, 0, 0 ) )
+                card.getChildren().add( item.nowLabel )
+            }
+        }
+        [about, howTo].each { it.setWrapText( true ) }
+
+        scroll = new ScrollPane( content )
+        scroll.setFitToWidth( true )
+        scroll.setHbarPolicy( ScrollPane.ScrollBarPolicy.NEVER )
+
+        // Owned by the dialog, so it stays in front of it, takes input while the dialog is up and closes with it.
+        // An ordinary window rather than a utility one: on a Mac a utility window gets a thin title bar whose
+        // close/minimize/zoom buttons sit out of line
+        def stage = new Stage()
+        stage.initOwner( pane.getScene().getWindow() )
+        stage.setTitle( heading + " help" )
+        stage.setScene( new Scene( scroll ) )
+        stage.setMinWidth( 240 )
+        stage.setMinHeight( 200 )
+        stage.getScene().addEventHandler( KeyEvent.KEY_PRESSED ) { KeyEvent e -> if (e.getCode() == KeyCode.ESCAPE) { stage.hide() } }
+        stage.showingProperty().addListener { obs, was, showing ->
+            if (showing && items.any { it.nowLabel != null }) { keepingUp.play() }
+            if (!showing) { keepingUp.stop(); pointAt( null, false ) }
+        }
+
+        // Pointing at a control in the dialog: the entry whose controls are under the mouse (the smallest
+        // such, if several are). Judged by position, as a disabled control is never picked under the mouse
+        def dialogScene = pane.getScene()
+        dialogScene.addEventFilter( MouseEvent.MOUSE_MOVED ) { MouseEvent e ->
+            if (!stage.isShowing()) { return }
+            def hit = null
+            double hitArea = Double.MAX_VALUE
+            items.each { item ->
+                List rows = rowsOf( item.entry )
+                double area = rows.sum { it.getWidth() * it.getHeight() } ?: 0d
+                if (area < hitArea && rows.any { it.contains( e.getSceneX(), e.getSceneY() ) }) {
+                    hit = item
+                    hitArea = area
+                }
+            }
+            pointAt( hit, true )
+        }
+        dialogScene.addEventHandler( MouseEvent.MOUSE_EXITED ) { MouseEvent e -> pointAt( null, false ) }
+
+        return stage
+    }
+
+    helpBtn.addEventFilter( javafx.event.ActionEvent.ACTION ) { e ->
+        e.consume()
+        if (panel == null) { panel = buildPanel() }
+        if (panel.isShowing() && !panel.isIconified()) { panel.hide(); return }
+        panel.setIconified( false ) // minimized: bring it back rather than closing it unseen
+
+        // Opens beside the dialog and as tall as it: to its right, else to its left, else (no room on
+        // either side) over its right-hand edge
+        def window = pane.getScene().getWindow()
+        def screen = Screen.getScreensForRectangle( window.getX(), window.getY(), window.getWidth(), window.getHeight() ).find() ?: Screen.getPrimary()
+        def area = screen.getVisualBounds()
+        double w = Math.min( 360d, area.getWidth() )
+        double h = Math.min( Math.max( window.getHeight(), 440d ), area.getHeight() )
+        double x = window.getX() + window.getWidth() + 8
+        if (x + w > area.getMaxX()) {
+            double left = window.getX() - 8 - w
+            x = left >= area.getMinX() ? left : area.getMaxX() - w
+        }
+        panel.setWidth( w )
+        panel.setHeight( h )
+        panel.setX( x )
+        panel.setY( Math.max( area.getMinY(), Math.min( window.getY(), area.getMaxY() - h ) ) )
+        refreshNow() // so it opens already saying how things stand
+        panel.show()
+    }
+    dialog.showingProperty().addListener { obs, was, showing -> if (!showing) { panel?.hide() } }
+}
+
 // Function: Outline in red the tick box of each selected image with a problem, with the problems as its
 // tooltip. problemsWith( name ) lists an image's problems (none if it has none). The ring is drawn over the
 // box's own edge and just outside it, so it takes no room and nothing moves as it comes and goes. The
@@ -1604,6 +1835,114 @@ def codePreferences = runOnFxThreadAndWait {
     ] }
 
     
+    // "?" button: what each input does. Each entry's now: says how that input stands at the moment, read
+    // from the dialog every time the help panel refreshes
+    def chosenImages  = { imagesBox.CBs.findAll { it.isSelected() }*.getText() }
+    def chosenClasses = { pathClassBox.CBs.findAll { it.isSelected() }*.getUserData() }
+    def annosIn = { String imgName, List classes -> (classes.sum { imageClassCounts[ imgName ]?.get( it ) ?: 0 } ?: 0) as int }
+    def some    = { int n, String one, String many -> n == 1 ? "1 ${one}" : "${n} ${many}" }
+    def listOut = { List xs -> xs.size() < 2 ? xs.join() : xs[ 0..-2 ].join( ", " ) + " and " + xs[ -1 ] } // "a, b and c"
+
+    addHelpButton( dialog, "Make rings",
+        "Builds concentric rings around every annotation of the classes you choose, in the images you choose.",
+        [
+            [ title: "Expansion radii (μm)",
+              nodes: [expansionLabel, expansionField, previewLabel, expansionsPreview],
+              text : "How far each ring reaches from the edge of its annotation, in μm. Type up to ${maxExpansions} whole numbers separated by commas, such as 6,16,31." +
+                     "\nEach ring is the band between its distance and the one before: 6,16,31 makes rings covering 0-6, 6-16 and 16-31 μm." +
+                     "\nThe list after the = shows the distances that will be used, in order and without repeats.",
+              now  : {
+                  if (!expansions) { return "Nothing entered yet, so there are no rings to make." }
+                  int from = 0
+                  List bands = expansions.collect { reach -> String band = "${from} to ${reach}"; from = reach; band }
+                  "${some( expansions.size(), 'ring', 'rings' )} around each annotation, covering ${listOut( bands )} μm."
+              } ],
+            [ title: "Output classes preview",
+              nodes: [outputClassPreview],
+              text : "The classes the new rings will get: the class of the annotation they surround, then the ring's outer distance (a 6 μm ring around a Vessel annotation is classed Vessel_6). Up to three are shown.",
+              now  : {
+                  List classes = chosenClasses()
+                  if (!classes || !expansions) { return "Select a class and enter a radius to see the names your rings will get." }
+                  List names = classes.collectMany { cls -> expansions.collect { "${cls}_${it}".toString() } }
+                  names.size() <= 6 ? "Rings will be classed ${listOut( names )}." :
+                                      "Rings will be classed ${names.take( 6 ).join( ', ' )} and ${names.size() - 6} more."
+              } ],
+            [ title: "Nest new rings?",
+              nodes: [nestDropdownLabel, nestDropdown],
+              text : "Where the new rings go in the hierarchy." +
+                     "\n${NestStrings.CENTER}: under the annotation each ring surrounds." +
+                     "\n${NestStrings.TOP_OBJECT}: under the top-level object of the surrounded annotation's hierarchy (its highest parent, not necessarily the physically outermost)." +
+                     "\n${NestStrings.NONE}: not nested under anything.",
+              now  : {
+                  nestDropdown.getValue() == NestStrings.TOP_OBJECT ? "Each ring will go under the top-level object of its annotation's hierarchy." :
+                  nestDropdown.getValue() == NestStrings.NONE       ? "Rings won't be nested under anything." :
+                                                                      "Each ring will go under the annotation it surrounds."
+              } ],
+            [ title: "Select images",
+              nodes: [imagesBox.box],
+              text : "The images to make rings in." +
+                     "\nTop box: selects or clears them all. Current Image: selects the image open in the viewer." +
+                     "\nShift-click: click one box, then shift-click another to set every box between them to match the first." +
+                     "\nOutlined in red: a selected image with no annotations of the chosen classes, which will be skipped.",
+              now  : {
+                  List images = chosenImages(), classes = chosenClasses()
+                  if (!imagesBox.CBs) { return "No images in the project. Add images to the project first." }
+                  if (!images) { return "No images selected yet." }
+                  int without = classes ? images.count { annosIn( it, classes ) == 0 } : 0
+                  "${images.size()} of ${some( imagesBox.CBs.size(), 'image', 'images' )} selected." + (
+                      without == 0             ? "" :
+                      without == images.size() ? " None of them has annotations of the selected classes, so there is nothing to do." :
+                                                 " ${without} of them ${without == 1 ? 'has' : 'have'} no annotations of the selected classes and would be skipped." )
+              } ],
+            [ title: "Object classes",
+              nodes: [pathClassBox.box],
+              text : "The classes of annotation to build rings around. The numbers show how many annotations of each class are in the selected images and in the project [images / project]." +
+                     "\nAnnotations without a class are listed as Unclassified." +
+                     "\nTrash button: clears the list.",
+              now  : {
+                  List images = chosenImages(), classes = chosenClasses()
+                  if (!pathClassBox.CBs) { return "No annotations in the project yet, so there are no classes to choose from. Draw or import annotations first." }
+                  if (!classes) { return "No classes selected yet." }
+                  String chosen = "${some( classes.size(), 'class', 'classes' )} selected"
+                  if (!images) { return chosen + ". Select images to see how many annotations that covers." }
+                  chosen + ", with ${some( images.sum { annosIn( it, classes ) } as int, 'annotation', 'annotations' )} in the selected images."
+              } ],
+            [ title: "Only expand outward",
+              nodes: [expandOnlyOutwardCheck],
+              text : "Fills any holes in an annotation before building its rings, so they only grow outward from its outer edge. Selected by default." +
+                     "\nDeselect it to let rings grow into the holes too.",
+              now  : { expandOnlyOutwardCheck.isSelected() ? "Selected, so holes are filled first and rings only grow outward." :
+                                                             "Unselected, so rings also grow into any holes." } ],
+            [ title: "Constrain to parent",
+              nodes: [constrainToParentCheck],
+              text : "Trims each ring so it stays inside the parent of the annotation it surrounds. Selected by default." +
+                     "\nRings around an annotation with no parent aren't trimmed.",
+              now  : { constrainToParentCheck.isSelected() ? "Selected, so rings are trimmed to stay inside the parent." :
+                                                             "Unselected, so rings can reach past the parent." } ],
+            [ title: "Simplify geometry",
+              nodes: [simplifyGeomCheck, simpleLabel, maxVerticesSlider, complexLabel],
+              text : "Speeds up rings around very detailed shapes by simplifying the shapes first, which makes the rings less exact. Unselected by default." +
+                     "\nSlider: how detailed a shape can be before it's simplified, from 2,000 points (Fast) to 10,000 (Complex).",
+              now  : { simplifyGeomCheck.isSelected() ?
+                           "Selected, so shapes with more than ${String.format( '%,d', maxVerticesSlider.getValue().toInteger() * 1000 )} points are simplified first." :
+                           "Unselected, so every shape is expanded exactly as it is." } ],
+            [ title: "Make rings",
+              nodes: [okBtn],
+              text : "Starts the run and remembers these choices for next time. New rings, and the annotations they surround, are locked." +
+                     "\nIf a selected image already has rings from an earlier run, you're asked whether to keep them, remove them or skip that image." +
+                     "\nGreyed out until an image, a class and a radius are chosen: hover over it to see what's missing.",
+              now  : {
+                  List images = chosenImages(), classes = chosenClasses()
+                  List missing = [ images ? null : "an image", classes ? null : "an object class", expansions ? null : "an expansion radius" ].findAll()
+                  if (missing) { return "Not ready. Still needs ${listOut( missing )}." }
+                  int annos = images.sum { annosIn( it, classes ) } as int
+                  if (annos == 0) { return "None of the selected images has annotations of the selected classes, so there is nothing to do." }
+                  "Ready. It will make ${some( expansions.size(), 'ring', 'rings' )} around " +
+                      (annos == 1 ? "the 1 annotation" : "each of the ${annos} annotations") +
+                      " of the selected classes, in ${some( images.count { annosIn( it, classes ) > 0 } as int, 'image', 'images' )}."
+              } ]
+        ] )
+
     // Attach root & show dialog
     // Widen boxes to their widest item (window grows to fit, up to the screen width)
     fitBoxesToScreen( dialog ) { [imagesBox, pathClassBox] }

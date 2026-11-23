@@ -581,6 +581,237 @@ def explainWhenDisabled( Node node, Closure reasons ) {
     node.disabledProperty().addListener { obs, oldVal, isDisabled -> if (!isDisabled) { hideTip() } }
 }
 
+// Function: Add a "?" button to a dialog's button row that opens a help panel beside the dialog: a short
+// intro, then an entry for each input. entries are maps of title, text and nodes (the controls the entry is
+// about; oneBox: true outlines them as one block rather than row by row). While the panel is open the two
+// are linked: pointing at an entry outlines its controls in the dialog, and pointing at a control picks
+// out its entry. An entry can also give now: a closure returning a sentence about the dialog as it stands
+// (what is chosen, what that will do), shown under its text as "Current: ..." and kept up to date while the
+// panel is open. Call it once the dialog's inputs are all built
+def addHelpButton( Dialog dialog, String heading, String intro, List entries ) {
+    def pane = dialog.getDialogPane()
+    String blue    = "rgb(47,143,230)"
+    String cardOff = "-fx-background-radius: 4; -fx-border-width: 0 0 0 3; -fx-border-color: transparent;"
+    String cardOn  = cardOff.replace( "transparent", blue ) + " -fx-background-color: rgba(47,143,230,0.15);"
+
+    // A dialog's buttons close it when clicked, so this one's click is taken before the dialog sees it
+    def helpType = new ButtonType( "?", ButtonBar.ButtonData.HELP_2 )
+    pane.getButtonTypes().add( helpType )
+    def helpBtn = pane.lookupButton( helpType )
+    ButtonBar.setButtonUniformSize( helpBtn, false )
+    helpBtn.setFocusTraversable( false ) // the input being typed in keeps the focus, and the tab order is unchanged
+    helpBtn.setStyle( """
+        -fx-font-weight: bold;
+        -fx-padding: 0;
+        -fx-background-radius: 5em;
+        -fx-min-width: 2em;  -fx-pref-width: 2em;  -fx-max-width: 2em;
+        -fx-min-height: 2em; -fx-pref-height: 2em; -fx-max-height: 2em;
+    """ )
+    setTT( helpBtn, "Open a dynamic help panel showing what each option does." )
+
+    List items = entries.collect { [entry: it, card: null, nowLabel: null] } // card: the entry's block in the panel
+    def current = null                                                       // the item being pointed at, if any
+    Stage panel = null
+    ScrollPane scroll = null
+    def scrolling = new javafx.animation.Timeline()
+
+    // The "Current: ..." lines, re-read a few times a second while the panel is open: simpler and surer than
+    // listening to every input an entry might depend on. A line that can't be worked out is left off
+    def refreshNow = {
+        items.each { item ->
+            if (item.nowLabel == null) { return }
+            String now = null
+            try { now = item.entry.now.call() } catch (Exception ignored) { }
+            String shown = now ? "Current: " + now : ""
+            if (shown != item.nowLabel.getText()) { item.nowLabel.setText( shown ) }
+            item.nowLabel.setVisible( !shown.isEmpty() )
+            item.nowLabel.setManaged( !shown.isEmpty() )
+        }
+    }
+    def keepingUp = new javafx.animation.Timeline( new javafx.animation.KeyFrame( Duration.millis( 250 ), { refreshNow() } as javafx.event.EventHandler ) )
+    keepingUp.setCycleCount( javafx.animation.Animation.INDEFINITE )
+
+    // Outlines drawn over the dialog around the controls being explained. The dialog doesn't lay them out
+    // and the mouse passes through them, so nothing under them moves or stops responding
+    def outlines = new javafx.scene.Group()
+    outlines.setManaged( false )
+    outlines.setMouseTransparent( true )
+    String outlineStyle = "-fx-stroke: ${blue}; -fx-stroke-width: 2; -fx-stroke-type: inside; -fx-arc-width: 8;" +
+                          "-fx-arc-height: 8; -fx-fill: rgba(47,143,230,0.10);"
+
+    // Where an entry's controls are in the dialog's scene: a rectangle around each row of those on show.
+    // Controls side by side share one; controls above one another get their own, so that a group spread
+    // over two rows isn't boxed together with whatever else sits beside it (unless the entry asks for
+    // oneBox, e.g. a label sitting on top of its field)
+    def rowsOf = { entry ->
+        List shown = entry.nodes.findAll { node ->
+            def n = node
+            while (n != null && n.isVisible()) { n = n.getParent() }
+            n == null && node.getScene() == pane.getScene() // not hidden, and in the dialog
+        }.collect { it.localToScene( it.getBoundsInLocal() ) }.findAll { it.getWidth() > 0 && it.getHeight() > 0 }
+        List rows = []
+        shown.sort { it.getMinY() }.each { b ->
+            def row = rows ? rows.last() : null
+            if (row != null && (entry.oneBox || b.getMinY() < row.getMaxY())) {
+                double x0 = Math.min( row.getMinX(), b.getMinX() )
+                rows[ -1 ] = new BoundingBox( x0, row.getMinY(), Math.max( row.getMaxX(), b.getMaxX() ) - x0,
+                                              Math.max( row.getMaxY(), b.getMaxY() ) - row.getMinY() )
+            } else {
+                rows << b
+            }
+        }
+        return rows
+    }
+
+    // Point at an item (or at nothing): its card is picked out in the panel and its controls are outlined
+    // in the dialog. reveal also scrolls the panel to the card, for when the pointing is done in the dialog
+    def pointAt = { item, boolean reveal ->
+        boolean changed = item !== current
+        current = item
+        if (changed) { items.each { it.card?.setStyle( it === item ? cardOn : cardOff ) } }
+
+        List rows = (item != null && panel?.isShowing()) ? rowsOf( item.entry ) : []
+        if (rows) {
+            // In front of the dialog's own parts, which it adds to itself as they're set
+            if (outlines.getParent() == null) { pane.getChildren().add( outlines ) }
+            if (pane.getChildren().last() !== outlines) { outlines.toFront() }
+        }
+        while (outlines.getChildren().size() < rows.size()) {
+            def shape = new javafx.scene.shape.Rectangle()
+            shape.setStyle( outlineStyle )
+            outlines.getChildren().add( shape )
+        }
+        outlines.getChildren().eachWithIndex { shape, i ->
+            shape.setVisible( i < rows.size() )
+            if (i >= rows.size()) { return }
+            def local = pane.sceneToLocal( rows[ i ] )
+            double x = Math.floor( local.getMinX() ) - 4, y = Math.floor( local.getMinY() ) - 4
+            shape.setX( x )
+            shape.setY( y )
+            shape.setWidth( Math.ceil( local.getMaxX() ) + 4 - x )
+            shape.setHeight( Math.ceil( local.getMaxY() ) + 4 - y )
+        }
+
+        if (!changed || !reveal || item == null) { return }
+        double viewH = scroll.getViewportBounds().getHeight()
+        double spare = scroll.getContent().getBoundsInLocal().getHeight() - viewH // how far the panel can scroll
+        if (spare <= 0) { return }
+        def cardAt = item.card.getBoundsInParent()
+        double top = scroll.getVvalue() * spare
+        double want = top
+        if (cardAt.getMinY() - 8 < top)              { want = cardAt.getMinY() - 8 }
+        else if (cardAt.getMaxY() + 8 > top + viewH) { want = Math.min( cardAt.getMinY() - 8, cardAt.getMaxY() + 8 - viewH ) }
+        want = Math.max( 0d, Math.min( spare, want ) )
+        if (Math.abs( want - top ) < 0.5) { return }
+        scrolling.stop()
+        scrolling.getKeyFrames().setAll( new javafx.animation.KeyFrame( Duration.millis( 150 ),
+            new javafx.animation.KeyValue( scroll.vvalueProperty(), (want / spare) as double ) ) )
+        scrolling.playFromStart()
+    }
+
+    // The panel is only built if it's asked for
+    def buildPanel = {
+        def title = new Label( heading )
+        title.setStyle( "-fx-font-size: 1.3em; -fx-font-weight: bold;" )
+        def about = new Label( intro )
+        def howTo = new Label( "Hover over an option below to see it outlined in the window, or over something in the window to find it here." )
+        howTo.setStyle( "-fx-font-style: italic; -fx-opacity: 0.7;" )
+        def content = new VBox( 8, title, about, howTo, new Separator() )
+        content.setPadding( new Insets( 12, 10, 12, 10 ) )
+
+        items.each { item ->
+            def name = new Label( item.entry.title as String )
+            name.setStyle( "-fx-font-weight: bold;" )
+            def text = new Label( item.entry.text as String )
+            def card = new VBox( 3, name, text )
+            card.setPadding( new Insets( 6, 8, 6, 8 ) )
+            card.setStyle( cardOff )
+            card.setOnMouseEntered { pointAt( item, false ) }
+            card.setOnMouseExited { pointAt( null, false ) }
+            item.card = card
+            content.getChildren().add( card )
+            [name, text].each { it.setWrapText( true ) }
+
+            if (item.entry.now instanceof Closure) {
+                item.nowLabel = new Label()
+                item.nowLabel.setWrapText( true )
+                item.nowLabel.setMaxWidth( Double.MAX_VALUE )
+                item.nowLabel.setStyle( "-fx-background-color: rgba(47,143,230,0.13); -fx-background-radius: 4; -fx-padding: 4 6 4 6;" )
+                VBox.setMargin( item.nowLabel, new Insets( 3, 0, 0, 0 ) )
+                card.getChildren().add( item.nowLabel )
+            }
+        }
+        [about, howTo].each { it.setWrapText( true ) }
+
+        scroll = new ScrollPane( content )
+        scroll.setFitToWidth( true )
+        scroll.setHbarPolicy( ScrollPane.ScrollBarPolicy.NEVER )
+
+        // Owned by the dialog, so it stays in front of it, takes input while the dialog is up and closes with it.
+        // An ordinary window rather than a utility one: on a Mac a utility window gets a thin title bar whose
+        // close/minimize/zoom buttons sit out of line
+        def stage = new Stage()
+        stage.initOwner( pane.getScene().getWindow() )
+        stage.setTitle( heading + " help" )
+        stage.setScene( new Scene( scroll ) )
+        stage.setMinWidth( 240 )
+        stage.setMinHeight( 200 )
+        stage.getScene().addEventHandler( KeyEvent.KEY_PRESSED ) { KeyEvent e -> if (e.getCode() == KeyCode.ESCAPE) { stage.hide() } }
+        stage.showingProperty().addListener { obs, was, showing ->
+            if (showing && items.any { it.nowLabel != null }) { keepingUp.play() }
+            if (!showing) { keepingUp.stop(); pointAt( null, false ) }
+        }
+
+        // Pointing at a control in the dialog: the entry whose controls are under the mouse (the smallest
+        // such, if several are). Judged by position, as a disabled control is never picked under the mouse
+        def dialogScene = pane.getScene()
+        dialogScene.addEventFilter( MouseEvent.MOUSE_MOVED ) { MouseEvent e ->
+            if (!stage.isShowing()) { return }
+            def hit = null
+            double hitArea = Double.MAX_VALUE
+            items.each { item ->
+                List rows = rowsOf( item.entry )
+                double area = rows.sum { it.getWidth() * it.getHeight() } ?: 0d
+                if (area < hitArea && rows.any { it.contains( e.getSceneX(), e.getSceneY() ) }) {
+                    hit = item
+                    hitArea = area
+                }
+            }
+            pointAt( hit, true )
+        }
+        dialogScene.addEventHandler( MouseEvent.MOUSE_EXITED ) { MouseEvent e -> pointAt( null, false ) }
+
+        return stage
+    }
+
+    helpBtn.addEventFilter( javafx.event.ActionEvent.ACTION ) { e ->
+        e.consume()
+        if (panel == null) { panel = buildPanel() }
+        if (panel.isShowing() && !panel.isIconified()) { panel.hide(); return }
+        panel.setIconified( false ) // minimized: bring it back rather than closing it unseen
+
+        // Opens beside the dialog and as tall as it: to its right, else to its left, else (no room on
+        // either side) over its right-hand edge
+        def window = pane.getScene().getWindow()
+        def screen = Screen.getScreensForRectangle( window.getX(), window.getY(), window.getWidth(), window.getHeight() ).find() ?: Screen.getPrimary()
+        def area = screen.getVisualBounds()
+        double w = Math.min( 360d, area.getWidth() )
+        double h = Math.min( Math.max( window.getHeight(), 440d ), area.getHeight() )
+        double x = window.getX() + window.getWidth() + 8
+        if (x + w > area.getMaxX()) {
+            double left = window.getX() - 8 - w
+            x = left >= area.getMinX() ? left : area.getMaxX() - w
+        }
+        panel.setWidth( w )
+        panel.setHeight( h )
+        panel.setX( x )
+        panel.setY( Math.max( area.getMinY(), Math.min( window.getY(), area.getMaxY() - h ) ) )
+        refreshNow() // so it opens already saying how things stand
+        panel.show()
+    }
+    dialog.showingProperty().addListener { obs, was, showing -> if (!showing) { panel?.hide() } }
+}
+
 // Function: Outline in red the tick box of each selected image with a problem, with the problems as its
 // tooltip. problemsWith( name ) lists an image's problems (none if it has none). The ring is drawn over the
 // box's own edge and just outside it, so it takes no room and nothing moves as it comes and goes. The
@@ -1579,6 +1810,126 @@ def codePreferences = runOnFxThreadAndWait {
         "Select at least one object class to export"      : classesBlocking.get()
     ] }
     [browseButton, includeParentsCheck].each { explainWhenDisabled( it ) { "Not used when nesting" } }
+
+    // "?" button: what each input does. Each entry's now: says how that input stands at the moment, read
+    // from the dialog every time the help panel refreshes
+    def chosenImages  = { imagesBox.CBs.findAll { it.isSelected() }*.getText() }
+    def chosenClasses = { pathClassBox.CBs.findAll { it.isSelected() }*.getUserData() }
+    def annosIn = { String imgName, List classes -> (classes.sum { imageClassCounts[ imgName ]?.get( it ) ?: 0 } ?: 0) as int }
+    def some    = { int n, String one, String many -> n == 1 ? "1 ${one}" : "${n} ${many}" }
+    def listOut = { List xs -> xs.size() < 2 ? xs.join() : xs[ 0..-2 ].join( ", " ) + " and " + xs[ -1 ] } // "a, b and c"
+    def classesNow = {
+        List images = chosenImages(), classes = chosenClasses()
+        if (!pathClassBox.CBs) { return "No annotations in the project yet, so there are no classes to choose from. Draw or import annotations first." }
+        if (!classes) { return "No classes selected yet." }
+        String chosen = "${some( classes.size(), 'class', 'classes' )} selected"
+        images ? chosen + ", with ${some( images.sum { annosIn( it, classes ) } as int, 'annotation', 'annotations' )} in the selected images." :
+                 chosen + ". Select images to see how many annotations that covers."
+    }
+
+    addHelpButton( dialog, "Export or Import",
+        "Moves annotations between images or projects as GeoJSON files, one file per image, named after the image.",
+        [
+            [ title: "Folder",
+              nodes: [folderRow],
+              text : "The folder the files are written to when exporting and read from when importing. Each image's file is its name followed by .geojson." +
+                     "\nBrowse: chooses the folder." +
+                     "\nNot used when nesting.",
+              now  : {
+                  nestButton.isSelected()   ? "Not used while Nest is selected." :
+                  !selectedFolderPath       ? "No folder chosen yet." :
+                  exportButton.isSelected() ? "Files will be written to the folder named ${new File( selectedFolderPath as String ).getName()}." :
+                                              "Files will be read from the folder named ${new File( selectedFolderPath as String ).getName()}."
+              } ],
+            [ title: "Folder check",
+              nodes: [folderStatusTitle, folderStatusLabel],
+              text : "Compares the folder with the selected images." +
+                     "\nExport: warns you if files for those images are already there." +
+                     "\nImport: warns you if any are missing." +
+                     "\nHover over the message to see which images.",
+              now  : {
+                  if (nestButton.isSelected()) { return "Not used while Nest is selected." }
+                  if (!selectedFolderPath)     { return "Nothing to check until a folder is chosen." }
+                  if (!chosenImages())         { return "Nothing to check until images are selected." }
+                  int have = (matchInfo.matchingFileNames ?: []).size(), lack = (matchInfo.unmatchingFileNames ?: []).size()
+                  if (exportButton.isSelected()) {
+                      return have == 0 ? "None of the selected images has a file in the folder yet." :
+                                         "${have} of the selected images already ${have == 1 ? 'has' : 'have'} a file in the folder, so you'll be asked whether to overwrite or skip."
+                  }
+                  lack == 0 ? "Every selected image has a file in the folder." :
+                              "${lack} of the selected images ${lack == 1 ? 'has' : 'have'} no file in the folder, so you'll be asked whether to skip or browse."
+              } ],
+            [ title: "Export, Import, Nest",
+              nodes: [exportButton, importButton, nestButton],
+              text : "What to do with the selected images." +
+                     "\nExport: writes each image's annotations of the selected classes to the folder." +
+                     "\nImport: adds every object in each image's file to that image." +
+                     "\nNest: reads and writes no files. It rebuilds the hierarchy of annotations already in the images, using the parent details saved when they were exported.",
+              now  : {
+                  exportButton.isSelected() ? "Export is selected, so annotations will be written out to the folder." :
+                  importButton.isSelected() ? "Import is selected, so annotations will be read in from the folder." :
+                                              "Nest is selected, so no files are used and only the hierarchy is rebuilt."
+              } ],
+            [ title: "Include Parents",
+              nodes: [includeParentsCheck],
+              text : "Keeps the hierarchy intact across the move. It starts selected every time." +
+                     "\nExport: saves each annotation's parent in its metadata (Parent_ID and Parent_Name)." +
+                     "\nImport: nests annotations back under those parents." +
+                     "\nNot used when nesting, which always goes by the saved parent details.",
+              now  : {
+                  boolean ticked = includeParentsCheck.isSelected()
+                  nestButton.isSelected()   ? "Not used while Nest is selected." :
+                  exportButton.isSelected() ? (ticked ? "Selected, so each annotation's parent will be saved with it." :
+                                                        "Unselected, so parent details won't be saved and the hierarchy can't be rebuilt on import.") :
+                                              (ticked ? "Selected, so imported annotations will be nested back under their saved parents." :
+                                                        "Unselected, so imported annotations will all be added at the top level.")
+              } ],
+            [ title: "Select images",
+              nodes: [imagesBox.box],
+              text : "The images to export from, import into or nest." +
+                     "\nTop box: selects or clears them all. Current Image: selects the image open in the viewer." +
+                     "\nShift-click: click one box, then shift-click another to set every box between them to match the first." +
+                     "\nOutlined in red: a selected image that would hit a problem in the chosen mode, such as a file already in the folder when exporting or no file to read when importing. Hover over it to see why.",
+              now  : {
+                  List images = chosenImages(), classes = chosenClasses()
+                  if (!imagesBox.CBs) { return "No images in the project. Add images to the project first." }
+                  if (!images) { return "No images selected yet." }
+                  String selected = "${images.size()} of ${some( imagesBox.CBs.size(), 'image', 'images' )} selected."
+                  if (nestButton.isSelected()) {
+                      int empty = images.count { objectCount( it ) == 0 }
+                      return selected + (empty ? " ${empty} of them ${empty == 1 ? 'has' : 'have'} no annotations to nest." : "")
+                  }
+                  if (exportButton.isSelected() && classes) {
+                      int without = images.count { annosIn( it, classes ) == 0 }
+                      return selected + (without ? " ${without} of them ${without == 1 ? 'has' : 'have'} no annotations of the selected classes to export." : "")
+                  }
+                  selected
+              } ],
+            [ title: "Object classes",
+              nodes: [pathClassBox.box],
+              text : "Only shown when exporting: the classes of annotation to export. The numbers show how many annotations of each class are in the selected images and in the project [images / project]." +
+                     "\nTrash button: clears the list.",
+              now  : { exportButton.isSelected() ? classesNow() : "Only used when exporting." } ],
+            [ title: "Run button",
+              nodes: [okBtn],
+              text : "Named after the chosen mode, which it starts. Imported annotations are locked." +
+                     "\nAlong the way you may be asked what to do when a file already exists, an image has nothing to export, a file to import can't be found, or an image already has annotations of the classes being imported." +
+                     "\nGreyed out until what the mode needs is set: hover over it to see what's missing.",
+              now  : {
+                  List images = chosenImages(), classes = chosenClasses()
+                  boolean nesting = nestButton.isSelected(), exporting = exportButton.isSelected()
+                  List missing = [ images ? null : "an image",
+                                   nesting && images && !images.any { objectCount( it ) > 0 } ? "an image that has annotations" : null,
+                                   !nesting && !selectedFolderPath ? "a folder" : null,
+                                   !nesting && !exporting && selectedFolderPath && !geojsonFileNames ? "a folder with GeoJSON files in it" : null,
+                                   exporting && !classes ? "an object class" : null ].findAll()
+                  if (missing)   { return "Not ready. Still needs ${listOut( missing )}." }
+                  if (nesting)   { return "Ready. It will rebuild the hierarchy in ${some( images.count { objectCount( it ) > 0 } as int, 'image', 'images' )}." }
+                  if (exporting) { return "Ready. It will export ${some( images.sum { annosIn( it, classes ) } as int, 'annotation', 'annotations' )} from " +
+                                          "${some( images.count { annosIn( it, classes ) > 0 } as int, 'image', 'images' )}." }
+                  "Ready. It will import the files for ${some( (matchInfo.matchingFileNames ?: []).size(), 'image', 'images' )}."
+              } ]
+        ] )
 
     
     

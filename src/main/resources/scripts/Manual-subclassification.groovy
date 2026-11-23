@@ -22,6 +22,7 @@ class ViewerSessionVars {
     String       toolKeyPrefix
     String       annoClass
     int          gridSize
+    boolean      singleObjects // classifier mode: one annotation at a time instead of a grid square of them
     def          hierarchy
     def          allClassAnnos
     boolean      checkingWork
@@ -58,6 +59,7 @@ class ViewerSessionVars {
     int          viewerMoveTimeMS
     boolean      groupDone
     List         hoverAnnos
+    List         currentGroup // classifier mode: the annotations being classified right now
     def          hoveredAnno
     String       UI_COMMAND
     
@@ -131,6 +133,7 @@ class elements {
     List        classesSummaryBtns
     Map         classesSummaryStyleMap
     Label       lastLabelHighlighted
+    Label       savedStatusLabel
     String      lastHighlightStr
 }
 
@@ -283,9 +286,6 @@ def makeLines( List<List> rows ) {
 def makeClassesSummaryBtn( Map group, elements uiElements, ViewerSessionVars session ) {
     String stateName = group.state
     String cssColor  = intToFx( group.color ).toString().replace( "0x", "#" )
-    if (group.containsKey( "colorU" ) && !session.groupDone) {
-        cssColor = intToFx( group.colorU ).toString().replace( "0x", "#" )
-    }
     
     def standardStateSummaryStyle   = "-fx-border-color: ${cssColor}; -fx-border-width: 1.5; -fx-border-radius: 3;"
     def unselectedStateSummaryStyle = "-fx-opacity: 0.5; -fx-effect: innershadow(gaussian, rgba(0,0,0,1), 8, 0.3, 2, 2);"
@@ -405,20 +405,20 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     uiElements.btnMap << [ name   : ActionStrings.REMOVE,
                            action : { queue.put( ActionStrings.REMOVE ) },
                            btnType: new ButtonType( "(R)emove All", ButtonData.HELP_2 ),
-                           btnTT  : "Remove current user's classifications from all objects in current group",
+                           btnTT  : "Remove current user's subclassifications from ${session.singleObjects ? 'the current annotation' : 'all objects in current group'}",
                            key    : "r" ]
                            
     uiElements.btnMap << [ name   : ActionStrings.BACK,
                            action : { queue.put( ActionStrings.BACK ) },
                            btnType: new ButtonType( "(B)ack", ButtonData.BACK_PREVIOUS ),
-                           btnTT  : "Go back to previous ${session.classifierMode ? 'group' : 'annotation'}",
+                           btnTT  : "Go back to previous ${session.classifierMode && !session.singleObjects ? 'group' : 'annotation'}",
                            key    : "b",
                            click  : MouseButton.BACK ]
                            
     uiElements.btnMap << [ name   : ActionStrings.NEXT,
                            action : { queue.put( ActionStrings.NEXT ) },
                            btnType: new ButtonType( "(N)ext", ButtonData.YES ),
-                           btnTT  : "Save current classifications and move to next group",
+                           btnTT  : "Save current subclassifications and move to next group",
                            key    : "n",
                            click  : MouseButton.FORWARD ]
                            
@@ -428,9 +428,13 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     
     
     // - Classification labels -
-    def classLabel = new Label( "${session.classifyingName} classification:" )  
+    def classLabel = new Label( "${session.classifyingName} subclassification:" )  
     classLabel.setStyle( "-fx-font-weight: bold;" )
-    uiElements.classesSection.getChildren().addAll( classLabel, uiElements.classesGrid )
+    
+    // Says whether the current annotation's (or group's) calls are saved yet, since a saved call in the
+    // first state and no call at all are drawn in the same color. Kept up to date by updateControlPanel
+    uiElements.savedStatusLabel = new Label()
+    uiElements.classesSection.getChildren().addAll( classLabel, uiElements.classesGrid, uiElements.savedStatusLabel )
     
     uiElements.btnMap << [ name  : "Classification label",
                            btn   : classLabel,
@@ -457,7 +461,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
         
         
     // - Image classes summary labels -
-    def allClassesLabel = new Label( "SUMMARY: ${session.classifyingName} classifications from ${session.classifierMode ? session.userName : session.classifiers}:" )
+    def allClassesLabel = new Label( "SUMMARY: ${session.classifyingName} subclassifications from ${session.classifierMode ? session.userName : session.classifiers}:" )
     allClassesLabel.setStyle( "-fx-font-weight: bold;" )
 
     uiElements.classesSummaryToggleGroup  = new ToggleGroup()
@@ -481,7 +485,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
     
     
     // - Reviewer classification buttons -
-    def revClassLabel = new Label( "Set classification:" )
+    def revClassLabel = new Label( "Set subclassification:" )
     revClassLabel.setStyle( "-fx-font-weight: bold;" )
     uiElements.revClassSection.getChildren().addAll( revClassLabel, uiElements.revClassGrid )
     
@@ -498,7 +502,7 @@ def buildControlPanel( Alert alert, ViewerSessionVars session, elements uiElemen
         def btnStyle = "-fx-effect: dropshadow(gaussian, rgba(${c.red},${c.green},${c.blue},1), 3, 0.4, 0, 0)"
         uiElements.revClassGrid.getChildren().add( revClassBtn )
         
-        String btnTT = "Set classification to \"${state}\""
+        String btnTT = "Set subclassification to \"${state}\""
         
         def action = {
             session.reviewerClassification = state
@@ -735,8 +739,9 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
         availableBtns.addAll( ActionStrings.TOGGLE_FOCUS, ActionStrings.TOGGLE_GRID )
         availableBtns.addAll( uiElements.btnMap.findAll { it.group == "classesSummary" }.name )
     } else if (session.classifierMode) {
-        availableBtns.addAll( ActionStrings.REMOVE, ActionStrings.BACK, ActionStrings.NEXT, 
-                              ActionStrings.TOGGLE_CLASS, ActionStrings.TOGGLE_FOCUS )
+        availableBtns.addAll( ActionStrings.REMOVE, ActionStrings.BACK, ActionStrings.NEXT, ActionStrings.TOGGLE_CLASS )
+        // One at a time, the view is already on the annotation, so there is nothing to focus on
+        if (!session.singleObjects) { availableBtns.add( ActionStrings.TOGGLE_FOCUS ) }
         availableBtns.addAll( uiElements.btnMap.findAll { it.group == "classes" }.name )
     } else if (session.reviewerMode) {
         availableBtns.addAll( ActionStrings.CANCEL, ActionStrings.TOGGLE_ANNOS, ActionStrings.BACK )
@@ -771,6 +776,16 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
     uiElements.revClassSection.setVisible( revClassesActive )
     uiElements.revClassSection.setManaged( revClassesActive )
     
+    // Whether the calls on show are saved: "Saved" once every annotation being classified has one, else "Unsaved"
+    List nowClassifying = session.currentGroup ?: []
+    if (session.classifierMode && nowClassifying) {
+        int saved = nowClassifying.count { containsUserKey( it, session ) }
+        String status = saved == nowClassifying.size() ? "Saved" : "Unsaved"
+        uiElements.savedStatusLabel.setText( status )
+        // Unsaved stands out; saved is quiet
+        uiElements.savedStatusLabel.setStyle( saved < nowClassifying.size() ? "-fx-font-weight: bold; -fx-text-fill: #d08a00;" : "-fx-opacity: 0.75;" )
+    }
+    
     // Set labels for classifications in classifier mode
     session.statesAndColors.each { group ->
         def entry = uiElements.classLabelByClassName[ group.state ]
@@ -778,9 +793,6 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
         
         String cssColor = intToFx( group.color ).toString().replace( "0x", "#" )
         
-        if (group.containsKey( "colorU" ) && !session.groupDone) {
-            cssColor = intToFx( group.colorU ).toString().replace( "0x", "#" )
-        }
         
         entry.cssColor = cssColor
         
@@ -822,8 +834,6 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
             if (!entry) return
             
             String cssColor = intToFx( group.color ).toString().replace( "0x", "#" )
-            if (group.containsKey( "colorU" ) && !session.groupDone)
-                cssColor = intToFx( group.colorU ).toString().replace( "0x", "#" )
             
             String labelText = "${state}  (${group.count})"
             entry.name     = labelText
@@ -905,18 +915,18 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
     // Instruction lines
     List toggleAnnosI  = [I("(A)",                          "Toggle annotations [${annosOn}]")]
     List toggleGridI   = [I("(G)",                          "Toggle grid [${gridOn}]")]
-    List removeAnnosI  = [I("(R)",                          "Remove group classifications")]
-    List nextGroupI    = [I("(N)",                          "Save group and move to next")]
+    List removeAnnosI  = [I("(R)",                          session.singleObjects ? "Remove subclassification" : "Remove group subclassifications")]
+    List nextGroupI    = [I("(N)",                          session.singleObjects ? "Save and move to next" : "Save group and move to next")]
     List fvScrollI     = [I("(scroll)",                     "${scrollInstructions}")]
     List changeBrightI = [I("(scroll)",                     "Brightness [${brightnessChannel}]")]
-    List goBackI       = [I("(B)",                          "Back to previous ${session.reviewerMode ? 'annotation' : 'group'}")]
+    List goBackI       = [I("(B)",                          "Back to previous ${session.reviewerMode || session.singleObjects ? 'annotation' : 'group'}")]
     List cycleClassI   = [I("(left click anno)",            "Cycle class/colors")]
     List changeFocusI  = [I("(right click anno)",           "Focus/unfocus on anno")]
     List moveViewerI   = [I("(drag)",                       "Pan viewer")]
     List switchFvModeI = [I("(SHIFT)",                      "Switch scroll function")]
     List enterFvI      = [I("(hold SHIFT)",                 "Enter free view")]
     List exitFvI       = [I("(hold SHIFT)",                 "Exit free view")]
-    List setRevClassI  = [I("(${revClassKeys.join(', ')})", "Set classification")]
+    List setRevClassI  = [I("(${revClassKeys.join(', ')})", "Set subclassification")]
     List toggleChanI   = [I("(${channelKeys.join(', ')})",  "Toggle channel")]
     List openI         = [I("(I) Hide Instructions:",       " ")]
     List closedI       = [I("(I) Show instructions",        " ")]
@@ -927,7 +937,7 @@ def updateControlPanel( Alert alert, ViewerSessionVars session, elements uiEleme
     def instructionLines = !session.instructions ? closedI
         : session.freeView    ? openI + emptyI + toggleAnnosI + toggleGridI + moveViewerI + changeFocusI + switchFvModeI + fvScrollI +  toggleChanI + emptyI + exitFvI
         : session.reviewerMode? openI + emptyI + toggleAnnosI + goBackI + toggleChanI + changeBrightI + setRevClassI + emptyI + enterFvI
-        :                       openI + emptyI + toggleAnnosI + nextGroupI + goBackI + removeAnnosI + toggleChanI + changeBrightI + changeFocusI + cycleClassI + emptyI + enterFvI
+        :                       openI + emptyI + toggleAnnosI + nextGroupI + goBackI + removeAnnosI + toggleChanI + changeBrightI + (session.singleObjects ? [] : changeFocusI) + cycleClassI + emptyI + enterFvI
     
     
     uiElements.headerBox.getChildren().setAll( makeLines( instructionLines ) )
@@ -1021,8 +1031,8 @@ def changeClassification( annoToChange, ViewerSessionVars session ) {
     
     def value = annoToChange.getMetadata().get( session.userKey )
     
-    // To change the color with changing classification (pink is false when unconfirmed)
-    !value && newIndex == 0 ? annoToChange.setColor( newGroup.colorU ) : annoToChange.setColor( newColor )
+    // To change the color with changing classification
+    annoToChange.setColor( newColor )
     
     Platform.runLater { session.viewer.repaintEntireImage() }
 }
@@ -1621,6 +1631,237 @@ def explainWhenDisabled( Node node, Closure reasons ) {
     node.disabledProperty().addListener { obs, oldVal, isDisabled -> if (!isDisabled) { hideTip() } }
 }
 
+// Function: Add a "?" button to a dialog's button row that opens a help panel beside the dialog: a short
+// intro, then an entry for each input. entries are maps of title, text and nodes (the controls the entry is
+// about; oneBox: true outlines them as one block rather than row by row). While the panel is open the two
+// are linked: pointing at an entry outlines its controls in the dialog, and pointing at a control picks
+// out its entry. An entry can also give now: a closure returning a sentence about the dialog as it stands
+// (what is chosen, what that will do), shown under its text as "Current: ..." and kept up to date while the
+// panel is open. Call it once the dialog's inputs are all built
+def addHelpButton( Dialog dialog, String heading, String intro, List entries ) {
+    def pane = dialog.getDialogPane()
+    String blue    = "rgb(47,143,230)"
+    String cardOff = "-fx-background-radius: 4; -fx-border-width: 0 0 0 3; -fx-border-color: transparent;"
+    String cardOn  = cardOff.replace( "transparent", blue ) + " -fx-background-color: rgba(47,143,230,0.15);"
+
+    // A dialog's buttons close it when clicked, so this one's click is taken before the dialog sees it
+    def helpType = new ButtonType( "?", ButtonBar.ButtonData.HELP_2 )
+    pane.getButtonTypes().add( helpType )
+    def helpBtn = pane.lookupButton( helpType )
+    ButtonBar.setButtonUniformSize( helpBtn, false )
+    helpBtn.setFocusTraversable( false ) // the input being typed in keeps the focus, and the tab order is unchanged
+    helpBtn.setStyle( """
+        -fx-font-weight: bold;
+        -fx-padding: 0;
+        -fx-background-radius: 5em;
+        -fx-min-width: 2em;  -fx-pref-width: 2em;  -fx-max-width: 2em;
+        -fx-min-height: 2em; -fx-pref-height: 2em; -fx-max-height: 2em;
+    """ )
+    setTT( helpBtn, "Open a dynamic help panel showing what each option does." )
+
+    List items = entries.collect { [entry: it, card: null, nowLabel: null] } // card: the entry's block in the panel
+    def current = null                                                       // the item being pointed at, if any
+    Stage panel = null
+    ScrollPane scroll = null
+    def scrolling = new javafx.animation.Timeline()
+
+    // The "Current: ..." lines, re-read a few times a second while the panel is open: simpler and surer than
+    // listening to every input an entry might depend on. A line that can't be worked out is left off
+    def refreshNow = {
+        items.each { item ->
+            if (item.nowLabel == null) { return }
+            String now = null
+            try { now = item.entry.now.call() } catch (Exception ignored) { }
+            String shown = now ? "Current: " + now : ""
+            if (shown != item.nowLabel.getText()) { item.nowLabel.setText( shown ) }
+            item.nowLabel.setVisible( !shown.isEmpty() )
+            item.nowLabel.setManaged( !shown.isEmpty() )
+        }
+    }
+    def keepingUp = new javafx.animation.Timeline( new javafx.animation.KeyFrame( Duration.millis( 250 ), { refreshNow() } as javafx.event.EventHandler ) )
+    keepingUp.setCycleCount( javafx.animation.Animation.INDEFINITE )
+
+    // Outlines drawn over the dialog around the controls being explained. The dialog doesn't lay them out
+    // and the mouse passes through them, so nothing under them moves or stops responding
+    def outlines = new javafx.scene.Group()
+    outlines.setManaged( false )
+    outlines.setMouseTransparent( true )
+    String outlineStyle = "-fx-stroke: ${blue}; -fx-stroke-width: 2; -fx-stroke-type: inside; -fx-arc-width: 8;" +
+                          "-fx-arc-height: 8; -fx-fill: rgba(47,143,230,0.10);"
+
+    // Where an entry's controls are in the dialog's scene: a rectangle around each row of those on show.
+    // Controls side by side share one; controls above one another get their own, so that a group spread
+    // over two rows isn't boxed together with whatever else sits beside it (unless the entry asks for
+    // oneBox, e.g. a label sitting on top of its field)
+    def rowsOf = { entry ->
+        List shown = entry.nodes.findAll { node ->
+            def n = node
+            while (n != null && n.isVisible()) { n = n.getParent() }
+            n == null && node.getScene() == pane.getScene() // not hidden, and in the dialog
+        }.collect { it.localToScene( it.getBoundsInLocal() ) }.findAll { it.getWidth() > 0 && it.getHeight() > 0 }
+        List rows = []
+        shown.sort { it.getMinY() }.each { b ->
+            def row = rows ? rows.last() : null
+            if (row != null && (entry.oneBox || b.getMinY() < row.getMaxY())) {
+                double x0 = Math.min( row.getMinX(), b.getMinX() )
+                rows[ -1 ] = new BoundingBox( x0, row.getMinY(), Math.max( row.getMaxX(), b.getMaxX() ) - x0,
+                                              Math.max( row.getMaxY(), b.getMaxY() ) - row.getMinY() )
+            } else {
+                rows << b
+            }
+        }
+        return rows
+    }
+
+    // Point at an item (or at nothing): its card is picked out in the panel and its controls are outlined
+    // in the dialog. reveal also scrolls the panel to the card, for when the pointing is done in the dialog
+    def pointAt = { item, boolean reveal ->
+        boolean changed = item !== current
+        current = item
+        if (changed) { items.each { it.card?.setStyle( it === item ? cardOn : cardOff ) } }
+
+        List rows = (item != null && panel?.isShowing()) ? rowsOf( item.entry ) : []
+        if (rows) {
+            // In front of the dialog's own parts, which it adds to itself as they're set
+            if (outlines.getParent() == null) { pane.getChildren().add( outlines ) }
+            if (pane.getChildren().last() !== outlines) { outlines.toFront() }
+        }
+        while (outlines.getChildren().size() < rows.size()) {
+            def shape = new javafx.scene.shape.Rectangle()
+            shape.setStyle( outlineStyle )
+            outlines.getChildren().add( shape )
+        }
+        outlines.getChildren().eachWithIndex { shape, i ->
+            shape.setVisible( i < rows.size() )
+            if (i >= rows.size()) { return }
+            def local = pane.sceneToLocal( rows[ i ] )
+            double x = Math.floor( local.getMinX() ) - 4, y = Math.floor( local.getMinY() ) - 4
+            shape.setX( x )
+            shape.setY( y )
+            shape.setWidth( Math.ceil( local.getMaxX() ) + 4 - x )
+            shape.setHeight( Math.ceil( local.getMaxY() ) + 4 - y )
+        }
+
+        if (!changed || !reveal || item == null) { return }
+        double viewH = scroll.getViewportBounds().getHeight()
+        double spare = scroll.getContent().getBoundsInLocal().getHeight() - viewH // how far the panel can scroll
+        if (spare <= 0) { return }
+        def cardAt = item.card.getBoundsInParent()
+        double top = scroll.getVvalue() * spare
+        double want = top
+        if (cardAt.getMinY() - 8 < top)              { want = cardAt.getMinY() - 8 }
+        else if (cardAt.getMaxY() + 8 > top + viewH) { want = Math.min( cardAt.getMinY() - 8, cardAt.getMaxY() + 8 - viewH ) }
+        want = Math.max( 0d, Math.min( spare, want ) )
+        if (Math.abs( want - top ) < 0.5) { return }
+        scrolling.stop()
+        scrolling.getKeyFrames().setAll( new javafx.animation.KeyFrame( Duration.millis( 150 ),
+            new javafx.animation.KeyValue( scroll.vvalueProperty(), (want / spare) as double ) ) )
+        scrolling.playFromStart()
+    }
+
+    // The panel is only built if it's asked for
+    def buildPanel = {
+        def title = new Label( heading )
+        title.setStyle( "-fx-font-size: 1.3em; -fx-font-weight: bold;" )
+        def about = new Label( intro )
+        def howTo = new Label( "Hover over an option below to see it outlined in the window, or over something in the window to find it here." )
+        howTo.setStyle( "-fx-font-style: italic; -fx-opacity: 0.7;" )
+        def content = new VBox( 8, title, about, howTo, new Separator() )
+        content.setPadding( new Insets( 12, 10, 12, 10 ) )
+
+        items.each { item ->
+            def name = new Label( item.entry.title as String )
+            name.setStyle( "-fx-font-weight: bold;" )
+            def text = new Label( item.entry.text as String )
+            def card = new VBox( 3, name, text )
+            card.setPadding( new Insets( 6, 8, 6, 8 ) )
+            card.setStyle( cardOff )
+            card.setOnMouseEntered { pointAt( item, false ) }
+            card.setOnMouseExited { pointAt( null, false ) }
+            item.card = card
+            content.getChildren().add( card )
+            [name, text].each { it.setWrapText( true ) }
+
+            if (item.entry.now instanceof Closure) {
+                item.nowLabel = new Label()
+                item.nowLabel.setWrapText( true )
+                item.nowLabel.setMaxWidth( Double.MAX_VALUE )
+                item.nowLabel.setStyle( "-fx-background-color: rgba(47,143,230,0.13); -fx-background-radius: 4; -fx-padding: 4 6 4 6;" )
+                VBox.setMargin( item.nowLabel, new Insets( 3, 0, 0, 0 ) )
+                card.getChildren().add( item.nowLabel )
+            }
+        }
+        [about, howTo].each { it.setWrapText( true ) }
+
+        scroll = new ScrollPane( content )
+        scroll.setFitToWidth( true )
+        scroll.setHbarPolicy( ScrollPane.ScrollBarPolicy.NEVER )
+
+        // Owned by the dialog, so it stays in front of it, takes input while the dialog is up and closes with it.
+        // An ordinary window rather than a utility one: on a Mac a utility window gets a thin title bar whose
+        // close/minimize/zoom buttons sit out of line
+        def stage = new Stage()
+        stage.initOwner( pane.getScene().getWindow() )
+        stage.setTitle( heading + " help" )
+        stage.setScene( new Scene( scroll ) )
+        stage.setMinWidth( 240 )
+        stage.setMinHeight( 200 )
+        stage.getScene().addEventHandler( KeyEvent.KEY_PRESSED ) { KeyEvent e -> if (e.getCode() == KeyCode.ESCAPE) { stage.hide() } }
+        stage.showingProperty().addListener { obs, was, showing ->
+            if (showing && items.any { it.nowLabel != null }) { keepingUp.play() }
+            if (!showing) { keepingUp.stop(); pointAt( null, false ) }
+        }
+
+        // Pointing at a control in the dialog: the entry whose controls are under the mouse (the smallest
+        // such, if several are). Judged by position, as a disabled control is never picked under the mouse
+        def dialogScene = pane.getScene()
+        dialogScene.addEventFilter( MouseEvent.MOUSE_MOVED ) { MouseEvent e ->
+            if (!stage.isShowing()) { return }
+            def hit = null
+            double hitArea = Double.MAX_VALUE
+            items.each { item ->
+                List rows = rowsOf( item.entry )
+                double area = rows.sum { it.getWidth() * it.getHeight() } ?: 0d
+                if (area < hitArea && rows.any { it.contains( e.getSceneX(), e.getSceneY() ) }) {
+                    hit = item
+                    hitArea = area
+                }
+            }
+            pointAt( hit, true )
+        }
+        dialogScene.addEventHandler( MouseEvent.MOUSE_EXITED ) { MouseEvent e -> pointAt( null, false ) }
+
+        return stage
+    }
+
+    helpBtn.addEventFilter( javafx.event.ActionEvent.ACTION ) { e ->
+        e.consume()
+        if (panel == null) { panel = buildPanel() }
+        if (panel.isShowing() && !panel.isIconified()) { panel.hide(); return }
+        panel.setIconified( false ) // minimized: bring it back rather than closing it unseen
+
+        // Opens beside the dialog and as tall as it: to its right, else to its left, else (no room on
+        // either side) over its right-hand edge
+        def window = pane.getScene().getWindow()
+        def screen = Screen.getScreensForRectangle( window.getX(), window.getY(), window.getWidth(), window.getHeight() ).find() ?: Screen.getPrimary()
+        def area = screen.getVisualBounds()
+        double w = Math.min( 360d, area.getWidth() )
+        double h = Math.min( Math.max( window.getHeight(), 440d ), area.getHeight() )
+        double x = window.getX() + window.getWidth() + 8
+        if (x + w > area.getMaxX()) {
+            double left = window.getX() - 8 - w
+            x = left >= area.getMinX() ? left : area.getMaxX() - w
+        }
+        panel.setWidth( w )
+        panel.setHeight( h )
+        panel.setX( x )
+        panel.setY( Math.max( area.getMinY(), Math.min( window.getY(), area.getMaxY() - h ) ) )
+        refreshNow() // so it opens already saying how things stand
+        panel.show()
+    }
+    dialog.showingProperty().addListener { obs, was, showing -> if (!showing) { panel?.hide() } }
+}
+
 // Function: Keep each checkbox's box pinned at the left edge while its text scrolls horizontally. The
 // text is drawn by a clipped Label set as the checkbox's graphic: the checkbox keeps its own text (so
 // anything reading getText() is unaffected), it just doesn't draw it. Scrolling slides the whole
@@ -1818,7 +2059,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
     runOnFxThreadAndWait {
         // --- Create the dialog ---
         def preferencesDialog = new Dialog()
-        preferencesDialog.setTitle( "Manual Classifications" )
+        preferencesDialog.setTitle( "Manual Subclassification" )
         
         def exportPrefsBtnType = new ButtonType( " Export", ButtonBar.ButtonData.LEFT )
         def importPrefsBtnType = new ButtonType( " Import", ButtonBar.ButtonData.LEFT )
@@ -1840,6 +2081,9 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         setTT( importPrefsBtn, "Import preferences from .json file" )
         
         def root = new BorderPane()
+        
+        // Brings the preview at the bottom of the window up to date. Filled in further down, once the popouts' settings exist
+        def refreshSettingsSummary
         root.setPrefHeight( 350 ) // width follows the content, so the channel box can widen the window
         
         // Define shared column constraints
@@ -1853,8 +2097,8 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def classifierModeBtn = new ToggleButton( "Classifier Mode" )
         def reviewerModeBtn   = new ToggleButton( "Reviewer Mode" )
         
-        setTT( classifierModeBtn, "Classify annotations" )
-        setTT( reviewerModeBtn, "Review annotations with specific classifications from other users" )
+        setTT( classifierModeBtn, "Subclassify annotations" )
+        setTT( reviewerModeBtn, "Review annotations with specific subclassifications from other users" )
         
         // Stop mode buttons from being untoggled (must click other)
         [classifierModeBtn, reviewerModeBtn].each { btn ->
@@ -1885,25 +2129,20 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         updateModeButtonStyles()
         
         
-        def changeClassColorOrderBtn = new Button( "Classes/Colors" )
-        setTT( changeClassColorOrderBtn, "Change classification specifics for both modes" )
+        // The buttons for the two popouts. They sit at the bottom of the window, each beside a preview of
+        // what it is set to (see BOTTOM)
+        def changeClassColorOrderBtn = new Button( "States & colors" )
+        setTT( changeClassColorOrderBtn, "Change the states an annotation can be given, their order and their colors (both modes)" )
         
-        def specifyReviewAnnosBtn = new Button ( "Reviewer annos" )
-        setTT( specifyReviewAnnosBtn, "Specify which annotations should be reviewed (reviewer mode only)" )
-        
-        // Spacer that eats all extra horizontal space
-        def topRowSpacer = new Region()
-        HBox.setHgrow( topRowSpacer, Priority.ALWAYS )
+        def specifyReviewAnnosBtn = new Button ( "Review criteria" )
+        setTT( specifyReviewAnnosBtn, "Choose which annotations should be reviewed (reviewer mode only)" )
         
         // Make bounding box, add children, assign to UI and set spacing
         def topRow = new HBox( 10 )
         topRow.setPadding( new Insets( 8 ) )
         topRow.getChildren().addAll(
             classifierModeBtn,
-            reviewerModeBtn,
-            topRowSpacer,
-            changeClassColorOrderBtn,
-            specifyReviewAnnosBtn
+            reviewerModeBtn
         )
         topRow.getChildren().each {
             it.setPadding( new Insets( 10 ) )
@@ -2287,6 +2526,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                     
                     classifierOptions = classifierOptions.unique()
                     reviewerOptions = reviewerOptions.unique()
+                    refreshSettingsSummary?.call() // the reviewer preview says whose classifications are looked at
                     
                     
                     // Restore the selection the in-place unique() above wiped: keep the previous user if still valid, else default to the first
@@ -2324,7 +2564,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         addIcon( annoClassLabel, FontAwesome.Glyph.STAR_HALF_ALT, 14 )
         def annoClassField = new ComboBox()
         annoClassField.setMaxWidth( Double.MAX_VALUE )
-        setTT( [annoClassLabel, annoClassField], "Class of annotations to be classified. \nPopulated from classes of existing objects in project." )
+        setTT( [annoClassLabel, annoClassField], "Class of annotations to be subclassified. \nPopulated from classes of existing objects in project." )
         lockDimensions( annoClassField )
         
         def projectPathClasses = project.getPathClasses().findAll { it?.getName() }    
@@ -2397,13 +2637,17 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             .collect { pc, count -> [name: pc, num: count, imageNum: currentImageCounts[pc] ?: 0] }
             .sort { a, b -> (b.num <=> a.num) ?: naturalCompare( a.name, b.name ) }
         
-        // Set dropdown selection to show counts (in the open image / in the project)
+        // Set dropdown selection to show counts (in the open image / in the project). With no image open
+        // there is nothing to count in it, so only the project's total is shown
+        def classCountText = { item ->
+            currentImageName ? "${item.name}  [${item.imageNum} / ${item.num}]" : "${item.name}  [${item.num}]"
+        }
         annoClassField.setCellFactory {
             new ListCell() {      
                 @Override
                 protected void updateItem( item, boolean empty ) {
                     super.updateItem( item, empty )
-                    setText( empty || item == null ? null : "${item.name}  [${item.imageNum} / ${item.num}]" )
+                    setText( empty || item == null ? null : classCountText( item ) )
                 }
             }
         }
@@ -2411,7 +2655,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         // Set selection to show same counts as dropdown
         annoClassField.setConverter( new StringConverter() {
             String toString( def item ) {
-                return item == null ? "" : "${item.name}  [${item.imageNum} / ${item.num}]"
+                return item == null ? "" : classCountText( item )
             }
             
             def fromString( String string ) {
@@ -2430,7 +2674,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         
         def classifyingNameOptions
         
-        def classifyingNameLabel = new Label( " Classifying name:" )
+        def classifyingNameLabel = new Label( " Subclassification name:" )
         addIcon( classifyingNameLabel, FontAwesome.Glyph.TAG, 14 )
         
         def classifyingNameNotice = new Label()
@@ -2448,10 +2692,10 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         HBox.setHgrow( classifyingNameSelection, Priority.ALWAYS )
         classifyingNameSelection.setEditable( true )
         classifyingNameSelection.setPromptText( "e.g. CAA" )
-        setTT( [classifyingNameLabel, classifyingNameSelection], "Simple key for what is being classified to be stored in metadata (e.g. CAA). \nLast 5 are stored." )
+        setTT( [classifyingNameLabel, classifyingNameSelection], "Simple key for what is being subclassified to be stored in metadata (e.g. CAA). \nLast 5 are stored." )
         
         def populateClassifyingNamesBtn = new Button()
-        setTT( populateClassifyingNamesBtn, "Populate classifying name options from existing annotations in project." )
+        setTT( populateClassifyingNamesBtn, "Populate subclassification name options from existing annotations in project." )
         addIcon( populateClassifyingNamesBtn, FontAwesome.Glyph.SEARCH, 12 )
         
         def classifyingNameRow = new HBox( 5, classifyingNameSelection, populateClassifyingNamesBtn )
@@ -2566,13 +2810,22 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         }
         
         
-        def gridSizeLabel = new Label( " Grid size (µm):" )
+        def gridSizeLabel = new Label( " Subclassification method:" )
         addIcon( gridSizeLabel, FontAwesome.Glyph.TH, 14 )
+        
+        // The method: a grid square of annotations at a time (with the size of a square beside it), or one
+        // annotation at a time
+        String byGridMethod = "Grid squares (µm):"
+        String oneByOneMethod = "One at a time"
+        def methodChoice = new ComboBox( FXCollections.observableArrayList( byGridMethod, oneByOneMethod ) )
+        methodChoice.setValue( byGridMethod )
+        methodChoice.setMinWidth( Region.USE_PREF_SIZE )
+        setTT( methodChoice, "Subclassify a grid square of annotations at a time, or one annotation at a time." )
         
         def gridSizeField = new TextField()
         gridSizeField.setMaxWidth( Double.MAX_VALUE )
         gridSizeField.setPromptText( "Size of grouping grid (µm)" )
-        setTT( [gridSizeLabel, gridSizeField], "Size of grouping grid (µm). Increasing this reduces the number of groups per image but increases objects per group." )
+        setTT( gridSizeField, "Size of grouping grid (µm). Increasing this reduces the number of groups per image but increases objects per group." )
         
         def gridSizeNotice = new Label()
         gridSizeNotice.setStyle( redFadeMessageStyle )
@@ -2615,6 +2868,12 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             }
         }
         
+        // The grid size sits beside the method it belongs to, and is greyed out for the other one
+        HBox.setHgrow( gridSizeField, Priority.ALWAYS )
+        def methodRow = new HBox( 5, methodChoice, gridSizeField )
+        gridSizeField.disableProperty().bind( methodChoice.valueProperty().isEqualTo( oneByOneMethod ) )
+        explainWhenDisabled( gridSizeField ) { "Not used when subclassifying one at a time" }
+        
         // Create bounding box, add children and set onto UI
         def leftBox = new VBox( 10 )
         leftBox.setPadding( new Insets( 5 ) )
@@ -2623,39 +2882,188 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             userLabelRow, userRow,
             annoClassLabel, annoClassField,
             classifyingNameLabelRow, classifyingNameRow,
-            gridSizeRow, gridSizeField
+            gridSizeRow, methodRow
         )
         
         root.left = leftBox
         
         
         
-        // --- BOTTOM: checkbox for filled classified annos ---
-        def bottomRowSpacer = new Region()
-        HBox.setHgrow( bottomRowSpacer, Priority.ALWAYS )
+        // --- Checkbox for filled classified annos (top right), then BOTTOM: the settings previews ---
+        def topRowSpacer = new Region()
+        HBox.setHgrow( topRowSpacer, Priority.ALWAYS )
         
-        def checkingWorkCheckbox = new CheckBox( "Check work" )
-        setTT( checkingWorkCheckbox, "Go over user's completed objects rather than new ones." )
+        // Closure: Make a simple switch, green when on unless it is given other colors
+        def makeSwitch = { boolean initialValue = false, double height = 18, String onFill = "#4cd964", String offFill = "#c7c7cc" ->
+            def switchOn = new SimpleBooleanProperty( initialValue )
+            
+            double width = height * 2
+            def track = new Rectangle( width, height )
+            track.arcWidth = height
+            track.arcHeight = height
+            track.fill = initialValue ? Color.web( onFill ) : Color.web( offFill )
+            
+            def switchRadius = height / 2.5
+            def slider = new Circle( switchRadius )
+            slider.fill = Color.WHITE
+            
+            def switchPane = new StackPane( track, slider )
+            switchPane.setMinSize( width, height )
+            switchPane.setMaxSize( width, height )
+            switchPane.setPrefSize( width, height )
+            switchPane.setPadding( new Insets(0) )
+            
+            def updateVisual = {
+                boolean on = switchOn.get()
+                track.fill = on ? Color.web( onFill ) : Color.web( offFill )
+                slider.translateX = on ? (width/4) : -(width/4)
+            }
+            
+            switchPane.setOnMouseClicked {
+                switchOn.set( !switchOn.get() )
+            }
+            
+            switchOn.addListener { obs, oldV, newV ->
+                updateVisual()
+            }
+            
+            updateVisual()
+            
+            return [node: switchPane, status: switchOn]
+        }
         
-        def bottomRow = new HBox()
-        bottomRow.setPadding( new Insets( 20, 10, 0, 0 ) )
-        bottomRow.getChildren().addAll( bottomRowSpacer, checkingWorkCheckbox )
-        root.bottom = bottomRow
+        // A switch between working through new annotations and going back over finished ones. It always
+        // starts on new: the choice is never remembered
+        def checkingWorkSwitch = makeSwitch( false, 18, "#2f8fe6", "#2f8fe6" ) // one color: it's a choice of two, not on/off
+        def newWorkLabel = new Label( "Subclassify new" )
+        def checkWorkLabel = new Label( "Check existing" )
+        newWorkLabel.setOnMouseClicked { checkingWorkSwitch.status.set( false ) }
+        checkWorkLabel.setOnMouseClicked { checkingWorkSwitch.status.set( true ) }
+        def showWorkChoice = {
+            boolean checking = checkingWorkSwitch.status.get()
+            newWorkLabel.setOpacity( checking ? 0.5 : 1 )   // the side not chosen is faded
+            checkWorkLabel.setOpacity( checking ? 1 : 0.5 )
+        }
+        checkingWorkSwitch.status.addListener { obs, oldVal, newVal -> showWorkChoice() }
+        showWorkChoice()
+        def checkingWorkBox = new HBox( 6, newWorkLabel, checkingWorkSwitch.node, checkWorkLabel )
+        checkingWorkBox.setAlignment( Pos.CENTER )
+        setTT( [checkingWorkBox, newWorkLabel, checkWorkLabel, checkingWorkSwitch.node],
+               "New: work through annotations that still need doing.\nCheck existing: go back over the ones you've finished." )
+        
+        // It sits at the right of the top row, across from the mode buttons
+        topRow.setAlignment( Pos.CENTER_LEFT )
+        topRow.getChildren().addAll( topRowSpacer, checkingWorkBox )
+        
+        // What the two popouts are set to, so they rarely need opening just to check: one line each, named
+        // after the classifying name, with the button that changes it at the end. Filled in by
+        // refreshSettingsSummary, once the popouts' settings exist. The review line shows in reviewer mode only
+        def statesPrefix = new Label( "States:" )
+        def classesSummary = new FlowPane( 6, 2 ) // wraps onto more lines when the states don't fit on one
+        classesSummary.setAlignment( Pos.CENTER_LEFT )
+        classesSummary.setPadding( new Insets( 0, 0, 0, 14 ) )
+        classesSummary.setMinWidth( 0 )
+        classesSummary.setPrefWrapLength( 0 ) // never widens the dialog: fitPreviews gives it the height it needs instead
+        classesSummary.setPrefHeight( 18 )
+        
+        def reviewPrefix = new Label( "Reviewing:" )
+        // The lead-ins are sentences naming the annotation class and subclassification name. They take the width
+        // left of the button and wrap onto a second line when that isn't enough (fitPreviews sizes them)
+        [statesPrefix, reviewPrefix].each {
+            it.setMinWidth( 0 )
+            it.setPrefWidth( 0 ) // never widens the dialog
+            it.setMaxWidth( Double.MAX_VALUE )
+            it.setWrapText( true )
+            HBox.setHgrow( it, Priority.ALWAYS )
+        }
+        def reviewSummary = new Label( " " )
+        reviewSummary.setMaxWidth( Double.MAX_VALUE )
+        reviewSummary.setMinWidth( 0 )
+        reviewSummary.setPrefWidth( 0 ) // never widens the dialog: a long line wraps, and fitPreviews gives it the height it needs
+        reviewSummary.setWrapText( true )
+        reviewSummary.setPrefHeight( 18 )
+        reviewSummary.setPadding( new Insets( 0, 0, 0, 14 ) )
+        
+        // Whose subclassifications a review looks at, on a quieter line of its own under the criteria
+        def reviewWhose = new Label()
+        reviewWhose.setPadding( new Insets( 0, 0, 0, 14 ) )
+        reviewWhose.setOpacity( 0.7 )
+        reviewWhose.setMinWidth( 0 )
+        reviewWhose.setPrefWidth( 0 )
+        reviewWhose.setMaxWidth( Double.MAX_VALUE )
+        reviewWhose.setWrapText( true )
+        
+        [changeClassColorOrderBtn, specifyReviewAnnosBtn].each {
+            it.setMinWidth( Region.USE_PREF_SIZE )
+            it.setPrefWidth( 125 ) // same width, so the two line up
+        }
+        // Each block: the sentence with its button at the end, then what it is set to on a line of its own
+        // underneath, which has the whole width to itself
+        def statesHead = new HBox( 8, statesPrefix, changeClassColorOrderBtn )
+        statesHead.setAlignment( Pos.CENTER_LEFT )
+        def statesRow = new VBox( 3, statesHead, classesSummary )
+        def reviewHead = new HBox( 8, reviewPrefix, specifyReviewAnnosBtn )
+        reviewHead.setAlignment( Pos.CENTER_LEFT )
+        def reviewRow = new VBox( 3, reviewHead, reviewSummary, reviewWhose )
+        
+        def settingsBox = new VBox( 10, statesRow, reviewRow )
+        settingsBox.setPadding( new Insets( 10, 5, 0, 5 ) )
+        settingsBox.setStyle( "-fx-border-color: -fx-box-border transparent transparent transparent; -fx-border-width: 1 0 0 0;" )
+        VBox.setMargin( settingsBox, new Insets( 12, 0, 0, 0 ) )
+        
+        root.bottom = new VBox( settingsBox )
+        
+        // Closure: Give each preview the height its text needs at the width it has (one line, or more when it
+        // has to wrap), and make the window taller or shorter by the difference so nothing else is squeezed
+        boolean fittingPreviews = false
+        double previewsHeight = -1 // what the previews asked for at the last pass
+        def fitPreviews = {
+            if (fittingPreviews) { return }
+            fittingPreviews = true
+            Platform.runLater {
+                fittingPreviews = false
+                if (settingsBox.getWidth() <= 0) { return }
+                def pane = preferencesDialog.getDialogPane()
+                double before = previewsHeight >= 0 ? previewsHeight : settingsBox.prefHeight( settingsBox.getWidth() )
+                settingsBox.applyCss()
+                settingsBox.layout()
+                [statesPrefix, reviewPrefix, classesSummary, reviewSummary, reviewWhose].each { preview ->
+                    if (preview.getWidth() <= 0) { return }
+                    preview.setPrefHeight( Region.USE_COMPUTED_SIZE )
+                    double h = Math.ceil( preview.prefHeight( preview.getWidth() ) )
+                    preview.setMinHeight( h )
+                    preview.setPrefHeight( h )
+                    preview.setMaxHeight( h )
+                }
+                // The window is resized by exactly how much the height the previews ask for has changed since the
+                // last pass (a line wrapping, or the review line coming and going with the mode).
+                // Measuring against the height on screen instead goes wrong when two changes land before the
+                // window has caught up: the difference is then applied twice, and the spare height shows up as
+                // a gap under the buttons
+                def win = pane.getScene()?.getWindow()
+                previewsHeight = settingsBox.prefHeight( settingsBox.getWidth() )
+                double change = previewsHeight - before
+                if (win?.isShowing() && Math.abs( change ) >= 0.5) { win.setHeight( win.getHeight() + change ) }
+            }
+        }
+        [statesPrefix, reviewPrefix, classesSummary, reviewSummary, reviewWhose].each { it.widthProperty().addListener { obs, oldVal, newVal -> fitPreviews() } }
         
         // Changing applicable preferences live when switching between modes
         modeButtons.selectedToggleProperty().addListener { obs, oldToggle, newToggle ->
             boolean inClassifierMode = (newToggle == classifierModeBtn)
             
             gridSizeLabel.setVisible( inClassifierMode )
-            gridSizeField.setVisible( inClassifierMode )
-            specifyReviewAnnosBtn.setVisible( !inClassifierMode )
+            methodRow.setVisible( inClassifierMode )
+            reviewRow.setVisible( !inClassifierMode )
+            reviewRow.setManaged( !inClassifierMode ) // takes no space in classifier mode: the window follows (fitPreviews)
             
             def userOptions = inClassifierMode ? classifierOptions : reviewerOptions
             users.setItems( userOptions )
             
             users.getSelectionModel().selectFirst()
             
-            okBtn.setText( inClassifierMode ? "Begin classifying" : "Begin reviewing" )
+            okBtn.setText( inClassifierMode ? "Begin subclassifying" : "Begin reviewing" )
+            newWorkLabel.setText( inClassifierMode ? "Subclassify new" : "Review new" )
         }
         
         
@@ -2704,7 +3112,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         VBox.setVgrow( channelsScroll, Priority.ALWAYS )
 
         // Add tooltip to the channel list
-        def chBoxToolTipBaseText = "Select channels that will help classify objects."
+        def chBoxToolTipBaseText = "Select channels that will help subclassify objects."
         def chBoxToolTipText = chBoxToolTipBaseText
         setTT( channelsScroll, chBoxToolTipText )
         
@@ -2810,6 +3218,39 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         channelsScroll.setStyle( "-fx-background-color: transparent" )
         
         
+        // Closures the help lines and the settings summary share
+        def some    = { int n, String one, String many -> n == 1 ? "1 ${one}" : "${n} ${many}" }
+        def listOut = { List xs -> xs.size() < 2 ? xs.join() : xs[ 0..-2 ].join( ", " ) + " and " + xs[ -1 ] } // "a, b and c"
+        
+        // Closure: Show a popout over this dialog and wait for its answer. A popout blocks every other
+        // window, this dialog's help panel included, so that is put away while the popout is open
+        def showPopout = { Dialog popout ->
+            def mainWindow = preferencesDialog.getDialogPane().getScene().getWindow()
+            popout.initOwner( mainWindow )
+            def helpPanels = Window.getWindows().findAll { it instanceof Stage && it.isShowing() && it.getOwner().is( mainWindow ) }
+            helpPanels.each { it.hide() }
+            // Help was open, so the popout's own help opens with it
+            if (helpPanels) {
+                popout.setOnShown {
+                    Platform.runLater {
+                        def helpType = popout.getDialogPane().getButtonTypes().find { it.getButtonData() == ButtonData.HELP_2 }
+                        if (helpType != null) { popout.getDialogPane().lookupButton( helpType ).fire() }
+                    }
+                }
+            }
+            def result = popout.showAndWait()
+            helpPanels.each { it.show() }
+            return result
+        }
+        
+        // Closure: Refit a popout's window after rows are added or removed
+        def refitPopout = { Dialog popout ->
+            Platform.runLater {
+                def win = popout.getDialogPane().getScene()?.getWindow()
+                if (win instanceof Stage) { win.sizeToScene() }
+            }
+        }
+        
         // --- Creating popout to change class order and assigned colors ---
         def states = ["true", "false", "maybe", "other", "unknown"]
         
@@ -2829,9 +3270,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             "true" : Color.WHITE,
             "maybe": Color.GRAY
         ]
-        def defaultUnconfirmedColor = Color.web( "#FF69B4" )
-        
-        def automaticColorOptions = [Color.RED, Color.WHITE, Color.GRAY, Color.CYAN, Color.YELLOW, defaultUnconfirmedColor]
+        def automaticColorOptions = [Color.RED, Color.WHITE, Color.GRAY, Color.CYAN, Color.YELLOW, Color.web( "#FF69B4" )]
         
         // Stored output used elsewhere in the script
         def stateColorMap = []
@@ -2843,7 +3282,6 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         lockedStateOrder.each { stateName ->
             lockedConfirmedColors[ stateName ] = defaultStateOrderAndConfirmedColors[ stateName ] ?: Color.GRAY
         }
-        def lockedUnconfirmedColor = defaultUnconfirmedColor
         
         // Build/update stateColorMap to pass to the rest of the script
         def rebuildStateColorMap = {
@@ -2855,9 +3293,6 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                     color   : fXtoRGBInt( lockedConfirmedColors[ stateName ] as Color ),
                     revState: (stateName in lockedReviewerStates) as boolean
                 ]
-                if (idx == 0) {
-                    entry.colorU = fXtoRGBInt( lockedUnconfirmedColor as Color )
-                }
                 stateColorMap << entry
             }
         }
@@ -2889,13 +3324,9 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             def comboHeaderSpacer = new Region()
             comboHeaderSpacer.setPrefWidth( 160 )
             
-            def confirmedHeader = new Label( "Color (confirmed):" )
+            def confirmedHeader = new Label( "Color:" )
             confirmedHeader.setPadding( new Insets( 5, 0, 0, 0 ) )
-            confirmedHeader.setPrefWidth( 140 )
-            
-            def unconfirmedHeader = new Label( "Color (unconfirmed):" )
-            unconfirmedHeader.setPadding( new Insets( 5, 0, 0, 0 ) )
-            unconfirmedHeader.setPrefWidth( 140 )
+            confirmedHeader.setPrefWidth( 131 )
             
             def tempStateOrder = new ArrayList<>( lockedStateOrder )
             def tempRevStates = lockedReviewerStates
@@ -2903,14 +3334,10 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             lockedConfirmedColors.each { k, v ->
                 tempConfirmedColors[ k ] = v
             }
-            def tempUnconfirmedColor = lockedUnconfirmedColor
             
             def stateBoxes = tempStateOrder.collect { new ComboBox<String>() }
             def colorPickers = tempStateOrder.collect { new ColorPicker() }
             def reviewerCheckboxes = tempStateOrder.collect { new CheckBox() }
-            def colorPickerU = new ColorPicker()
-            colorPickerU.setValue( tempUnconfirmedColor )
-            colorPickerU.setPrefWidth( 140 )
             
             
             def reviewerClassHeader = new Label( "Reviewer classes (${minReviewerStates}-${maxReviewerStates}):" )
@@ -2918,18 +3345,17 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             reviewerClassHeader.setPrefWidth( 140 )
             reviewerClassHeader.setStyle( underlineRedStyle )
             
-            def unconfirmedTailSpacer = new Region()
-            unconfirmedTailSpacer.setPrefWidth( 65 )
-            HBox.setHgrow( unconfirmedTailSpacer, Priority.ALWAYS )
+            // Leaves room at the end of each row for its remove button
+            def headerTailSpacer = new Region()
+            headerTailSpacer.setPrefWidth( 40 )
             
             def draggableHeaderRow = new HBox( 6 )
             draggableHeaderRow.getChildren().addAll(
                 dragHeaderSpacer,
                 comboHeaderSpacer,
                 confirmedHeader,
-                unconfirmedHeader,
-                unconfirmedTailSpacer,
-                reviewerClassHeader
+                reviewerClassHeader,
+                headerTailSpacer
             )
              
             
@@ -2943,18 +3369,14 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             def colConfirmedHeader = new ColumnConstraints()
             colConfirmedHeader.setHgrow( Priority.NEVER )
             
-            def colUnconfirmedHeader = new ColumnConstraints()
-            colUnconfirmedHeader.setHgrow( Priority.NEVER )
-            
             classColorGrid.getColumnConstraints().addAll(
                 colLabels,
                 colDragArea,
-                colConfirmedHeader,
-                colUnconfirmedHeader
+                colConfirmedHeader
             )
             
             def restoreDefaultsBtn = new Button( " Restore defaults" )
-            setTT( restoreDefaultsBtn, "Restore classification order and colors to default." )
+            setTT( restoreDefaultsBtn, "Restore state order and colors to default." )
             addIcon( restoreDefaultsBtn, FontAwesome.Glyph.UNDO, 15 )
             
             def stateLabelBox = new VBox()
@@ -2972,6 +3394,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             classColorGrid.add( draggableHeaderRow, 1, 0 )
             classColorGrid.add( stateLabelBox, 0, 1 )
             classColorGrid.add( rowListView, 1, 1 )
+
             
             classColorDialog.getDialogPane().setContent( classColorGrid )
             
@@ -3004,7 +3427,6 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                         setTT( rCB, "Should reviewer be able to set objects to this class?" )
                         
                     }
-                    setTT( colorPickerU, "Select unconfirmed color for default state" )
                 } finally {
                     updatingSelections = false
                 }
@@ -3025,8 +3447,6 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                         def rCB = reviewerCheckboxes[ idx ]
                         rCB.setSelected( state in tempRevStates )
                     }
-                    
-                    colorPickerU.setValue( tempUnconfirmedColor )
                 } finally {
                     updatingSelections = false
                 }
@@ -3048,12 +3468,10 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                         }
                     }
                 }
-                
-                tempUnconfirmedColor = colorPickerU.getValue()
             }
             
             // Closure: Each reason the "OK" button can be disabled, with whether it applies right now
-            String wrongNumRevClassesReason = "Tick ${minReviewerStates}-${maxReviewerStates} reviewer classes"
+            String wrongNumRevClassesReason = "Select ${minReviewerStates}-${maxReviewerStates} reviewer classes"
             def okButtonBlockers = {
                 def rowN = stateBoxes.size()
                 def stateBoxValues = stateBoxes.collect { it.getValue() }
@@ -3129,7 +3547,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                     updatingSelections = true
                     
                     try {
-                        def restOfPickers = (colorPickers + colorPickerU).findAll { it != item }
+                        def restOfPickers = colorPickers.findAll { it != item }
                         def usedColors = restOfPickers.collect { it.getValue() }
                         
                         // Blocking new color if already being used
@@ -3169,8 +3587,6 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             colorPickers.each { cp ->
                 attachColorListener( cp )
             }
-            
-            attachColorListener( colorPickerU )
             
             reviewerCheckboxes.each { rCB ->
                 rCB.selectedProperty().addListener( RevCBListener )
@@ -3212,7 +3628,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 
                 tempStateOrder.add( insertIdx, firstUnusedState )
                 
-                def usedColors = colorPickers.collect { it.getValue() } + colorPickerU.getValue()
+                def usedColors = colorPickers.collect { it.getValue() }
                 def firstUnusedColor = automaticColorOptions.find { it !in usedColors }
                 
                 stateBoxes.add( insertIdx, createStateBox() )
@@ -3313,6 +3729,15 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 neighborCell?.setStyle( edgeStyle( !dropAbove, dropAbove, halfBorderWidth ) )
             }
             
+            // The add state button, under the "State" labels
+            def addBtn = new Button( " Add state" )
+            addIcon( addBtn, FontAwesome.Glyph.PLUS, 12 )
+            addBtn.setMaxWidth( Double.MAX_VALUE )
+            addBtn.setOnAction { addRow( tempStateOrder.size() ) }
+            setTT( addBtn, "Add another state (max ${maxClassifierStates})" )
+            explainWhenDisabled( addBtn ) { "Already at the most states (${maxClassifierStates})" }
+            classColorGrid.add( addBtn, 0, 2 )
+            
             // Closure: Update left hand box with "State" labels when class/color list changes
             refreshStateLabelBox = {
                 stateLabelBox.getChildren().clear()
@@ -3331,15 +3756,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                     stateLabelBox.getChildren().add( label )
                 }
                 
-                // Making, formatting and placing the add state button
-                def addBtn = new Button( " Add state" )
-                addIcon( addBtn, FontAwesome.Glyph.PLUS, 12 )
-                addBtn.setMaxWidth( Double.MAX_VALUE )
-                addBtn.setOnAction { addRow( tempStateOrder.size() ) }
                 addBtn.setDisable( tempStateOrder.size() >= maxClassifierStates )
-                setTT( addBtn, "Add another state (max ${maxClassifierStates})" )
-                explainWhenDisabled( addBtn ) { "Already at the most states (${maxClassifierStates})" }
-                stateLabelBox.getChildren().add( addBtn )
                 
                 // Resize list + label column
                 def listHeight = tempStateOrder.size() * (rowHeight - 1) + 8
@@ -3349,16 +3766,15 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 stateLabelBox.setMinHeight( listHeight )
                 
                 // Making sure overall window fits UI layout
-                Platform.runLater {
-                    def win = classColorDialog.getDialogPane().getScene()?.getWindow()
-                    if (win instanceof Stage) {
-                        win.sizeToScene()
-                    }
-                }
+                refitPopout( classColorDialog )
             }
             
             refreshStateLabelBox()
             
+            
+            // The add button and each row's remove button, for the help entry that covers them
+            def minusBtnByRow = [:]
+            def addRemoveBtns = [addBtn]
             
             // Setup row list of classes/colors and dragging behavior
             rowListView.setCellFactory { lv ->
@@ -3389,19 +3805,18 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                         minusBtn.setMinWidth( 28 )
                         minusBtn.setPrefWidth( 28 )
                         minusBtn.setOnAction { removeRow( idx ) }
+                        // Rows are rebuilt as they change, so the help entry's list is kept up to date here
+                        minusBtnByRow[ idx ] = minusBtn
+                        addRemoveBtns.clear()
+                        addRemoveBtns.add( addBtn )
+                        addRemoveBtns.addAll( minusBtnByRow.values() )
                         minusBtn.setDisable( tempStateOrder.size() <= minClassifierStates )
                         setTT( minusBtn, "Remove state (min ${minClassifierStates})" )
                         explainWhenDisabled( minusBtn ) { "Already at the fewest states (${minClassifierStates})" }
                         
-                        def unconfirmedCell = (idx == 0) ? colorPickerU : new Region()
-                        if (idx != 0) {
-                            unconfirmedCell.setMinWidth( 140 )
-                            unconfirmedCell.setPrefWidth( 140 )
-                        }
-                        
-                        def spacer1 = new Region()
-                        spacer1.setPrefWidth( 80 )
-                        
+                        // The remove button sits at the end of the row, clear of the settings
+                        def rowSpacer = new Region()
+                        HBox.setHgrow( rowSpacer, Priority.ALWAYS )
                         
                         def row = new HBox( 10 )
                         row.setPadding( new Insets( 2, 0, 2, 0 ) )
@@ -3409,10 +3824,9 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                             dragHandle,
                             stateBoxes[ idx ],
                             colorPickers[ idx ],
-                            unconfirmedCell,
-                            minusBtn,
-                            spacer1,
-                            reviewerCheckboxes[ idx ]
+                            reviewerCheckboxes[ idx ],
+                            rowSpacer,
+                            minusBtn
                         )
                         
                         setText( null )
@@ -3491,11 +3905,11 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 tempStateOrder       = new ArrayList<>( defaultStateOrderAndConfirmedColors.keySet() )
                 tempConfirmedColors  = new LinkedHashMap<>( defaultStateOrderAndConfirmedColors )
                 tempRevStates        = new ArrayList<>( defaultReviewerStates )
-                tempUnconfirmedColor = defaultUnconfirmedColor
                 
-                stateBoxes         = defaultStateOrderAndConfirmedColors.collect { createStateBox() }
-                colorPickers       = defaultStateOrderAndConfirmedColors.collect { createColorPicker() }
-                reviewerCheckboxes = defaultStateOrderAndConfirmedColors.collect { createRevCB() }
+                // Refilled, not replaced: the help entries point at these lists
+                stateBoxes.clear();         stateBoxes.addAll( defaultStateOrderAndConfirmedColors.collect { createStateBox() } )
+                colorPickers.clear();       colorPickers.addAll( defaultStateOrderAndConfirmedColors.collect { createColorPicker() } )
+                reviewerCheckboxes.clear(); reviewerCheckboxes.addAll( defaultStateOrderAndConfirmedColors.collect { createRevCB() } )
                 
                 formatControls()
                 syncControlsFromMaps()
@@ -3511,7 +3925,52 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             updateOkButton()
             
             
-            def classColorResult = classColorDialog.showAndWait()
+            // "?" button, as in the main window
+            addHelpButton( classColorDialog, "States & colors",
+                "The subclasses (states) that annotations can be assigned, the order they cycle through in Classifier mode, and the color each is drawn in. Changes are only kept if you press OK.",
+                [
+                    [ title: "States",
+                      nodes: stateBoxes,
+                      text : "The name of each state (up to 15 letters and numbers). Pick one from the dropdown or type your own." +
+                             "\nPicking a name another row already has swaps the two." +
+                             "\nReorder: drag a row by its ≡ handle. State 1 is the default that every annotation starts as.",
+                      now  : {
+                          List names = stateBoxes.collect { it.getValue() }.findAll()
+                          "${some( names.size(), 'state', 'states' )}: ${listOut( names )}. Annotations default to ${names[ 0 ]}."
+                      } ],
+                    [ title: "Color",
+                      nodes: colorPickers,
+                      text : "The color an annotation is drawn in once it is assigned that state. Each state needs its own color, so a color already in use can't be picked." ],
+                    [ title: "Reviewer classes",
+                      nodes: reviewerCheckboxes,
+                      text : "The states a reviewer can assign in Reviewer mode (${minReviewerStates} to ${maxReviewerStates}). Classifiers can always assign every state.",
+                      now  : {
+                          List chosen = (0..<stateBoxes.size()).findAll { reviewerCheckboxes[ it ].isSelected() }.collect { stateBoxes[ it ].getValue() }
+                          chosen.size() < minReviewerStates ? "Select at least ${minReviewerStates} (${chosen.size()} selected)." :
+                          chosen.size() > maxReviewerStates ? "Select no more than ${maxReviewerStates} (${chosen.size()} selected)." :
+                                                              "A reviewer can assign ${listOut( chosen )}."
+                      } ],
+                    [ title: "Add state, −",
+                      nodes: addRemoveBtns,
+                      text : "Add state: adds a state to the bottom of the list, with the first unused name and color." +
+                             "\n(−) button: removes that row's state." +
+                             "\n${minClassifierStates} to ${maxClassifierStates} states allowed.",
+                      now  : { "${some( stateBoxes.size(), 'state', 'states' )} in use (${maxClassifierStates} max)." } ],
+                    [ title: "Restore defaults",
+                      nodes: [restoreDefaultsBtn],
+                      text : "Resets the states, their order, colors and reviewer classes to the defaults (${listOut( defaultStateOrder )})." ],
+                    [ title: "OK, Cancel",
+                      nodes: [okButton, classColorDialog.getDialogPane().lookupButton( ButtonType.CANCEL )],
+                      text : "OK: keeps these settings for this session and the next." +
+                             "\nCancel: closes the window without changing anything." +
+                             "\nOK is greyed out while something needs fixing: hover over it to see what.",
+                      now  : {
+                          List missing = okButtonBlockers().findAll { it.value }.collect { it.key }
+                          missing ? "Not ready. ${missing.join( '. ' )}." : "Ready."
+                      } ]
+                ] )
+                
+            def classColorResult = showPopout( classColorDialog )
             
             // Only commit states/colors to map if OK is pressed in popout window
             if (classColorResult.get() == ButtonType.OK) {
@@ -3523,60 +3982,21 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 }
                 
                 lockedReviewerStates   = tempRevStates         
-                lockedUnconfirmedColor = tempUnconfirmedColor          
                 rebuildStateColorMap()
+                refreshSettingsSummary()
             }
         }
         
         
         // --- Creating popout to select specific annotations classification criteria to review ---
-        session.frequencies = ["different": "with differing classifications.", 
-                               "all": "classified by ALL as",
-                               "any": "classified by ANY as"]
+        session.frequencies = ["different": "with differing subclassifications.", 
+                               "all": "subclassified by ALL as",
+                               "any": "subclassified by ANY as"]
         
         int numRevRows = session.frequencies.size()
         
         def defaultReviewAnnoFreqs = [ "different", "any" ]
         def defaultReviewAnnos     = [ null, "maybe" ]
-        
-        // Closure: Make a simple switch
-        def makeSwitch = { boolean initialValue = false, double height = 18 ->
-            def switchOn = new SimpleBooleanProperty( initialValue )
-            
-            double width = height * 2
-            def track = new Rectangle( width, height )
-            track.arcWidth = height
-            track.arcHeight = height
-            track.fill = initialValue ? Color.web( "#4cd964" ) : Color.web( "#c7c7cc" )
-            
-            def switchRadius = height / 2.5
-            def slider = new Circle( switchRadius )
-            slider.fill = Color.WHITE
-            
-            def switchPane = new StackPane( track, slider )
-            switchPane.setMinSize( width, height )
-            switchPane.setMaxSize( width, height )
-            switchPane.setPrefSize( width, height )
-            switchPane.setPadding( new Insets(0) )
-            
-            def updateVisual = {
-                boolean on = switchOn.get()
-                track.fill = on ? Color.web( "#4cd964" ) : Color.web( "#c7c7cc" )
-                slider.translateX = on ? (width/4) : -(width/4)
-            }
-            
-            switchPane.setOnMouseClicked {
-                switchOn.set( !switchOn.get() )
-            }
-            
-            switchOn.addListener { obs, oldV, newV ->
-                updateVisual()
-            }
-            
-            updateVisual()
-            
-            return [node: switchPane, status: switchOn]
-        }
         
         def frequencySelectors = []
         def stateSelectors = []
@@ -3590,11 +4010,98 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             
             def newSwitch = makeSwitch( true )
             switches << newSwitch
-
-            // Say why on hover, while disabled
-            [fS, sS].each { explainWhenDisabled( it ) { "Switch this row on to use it" } }
-            explainWhenDisabled( newSwitch.node ) { "Switch on the row above first" }
         }
+        
+        // Closure: The conditions in use, in a few words each. committed reads what was last confirmed with
+        // OK, otherwise what the popout is showing right now
+        def reviewKinds = { boolean committed ->
+            (0..<numRevRows).findAll { committed ? switches[ it ].node.getUserData() : switches[ it ].status.get() }.collect { row ->
+                String how   = committed ? frequencySelectors[ row ].getUserData() : frequencySelectors[ row ].getValue()
+                String state = (committed ? stateSelectors[ row ].getUserData() : stateSelectors[ row ].getValue()) ?: states[ 0 ]
+                how == null                               ? null :
+                how == session.frequencies[ "different" ] ? "differing subclassifications" :
+                how == session.frequencies[ "all" ]       ? "ALL as ${state}" : "ANY as ${state}"
+            }.findAll()
+        }
+        
+        // Closure: Bring the preview lines at the bottom of the main window up to date
+        refreshSettingsSummary = {
+            // Classifiers can give every state, a reviewer only the ones ticked for reviewers
+            boolean reviewing = reviewerModeBtn.isSelected()
+            
+            // The lines read as plain sentences saying what will happen, with what it applies to underneath:
+            //   Classifier Mode:  Subclassify Vessel annotations for CAA into either:     ("each Vessel annotation" one at a time)
+            //                         [states, with arrows for the order a click moves through them]
+            //   Reviewer Mode:    Review Vessel annotations for CAA whose subclassifications:
+            //                         [criteria, joined with "or"]
+            //                         From: [classifiers]
+            //                     Then subclassify them into either:
+            //                         [reviewer states]
+            String name = classifyingNameSelection.getEditor().getText()?.trim()
+            String cls = annoClassField.getValue()?.name
+            String forName = name ? " for ${name}" : ""
+            String what = (cls ? "${cls} annotations" : "annotations") + forName
+            String eachOne = (cls ? "each ${cls} annotation" : "each annotation") + forName
+            
+            // A review looks at every classifier in the Classifier list. There can be any number of them, so
+            // they are only named when that stays short
+            List classifiers = (classifierOptions ?: []) as List
+            String whose = listOut( classifiers ).length() <= 40 ? listOut( classifiers ) :
+                                                                            "all ${classifiers.size()} classifiers"
+            
+            boolean oneByOne = methodChoice.getValue() == oneByOneMethod
+            statesPrefix.setText( reviewing ? "Then subclassify them into either:" : "Subclassify ${oneByOne ? eachOne : what} into either:" )
+            reviewPrefix.setText( "Review ${what} whose subclassifications:" )
+            reviewWhose.setText( "From: ${classifiers ? whose : 'no classifiers yet'}" )
+            List rowOrder = reviewing ? [reviewRow, statesRow] : [statesRow, reviewRow]
+            if (settingsBox.getChildren() as List != rowOrder) { settingsBox.getChildren().setAll( rowOrder ) }
+            
+            List shownStates = (lockedStateOrder as List).findAll { !reviewing || it in lockedReviewerStates }
+            // A classifier works through the states in order (each click moves an annotation on to the next), so
+            // there they are shown as a sequence, with an arrow from each to the one after it. A reviewer picks
+            // a state directly, so there they are just listed
+            classesSummary.setHgap( reviewing ? 14 : 6 )
+            List chips = []
+            shownStates.eachWithIndex { stateName, i ->
+                def swatch = new Rectangle( 10, 10, lockedConfirmedColors[ stateName ] as Color )
+                swatch.setStroke( Color.GRAY )
+                def chip = new Label( stateName as String, swatch )
+                chip.setMinWidth( Region.USE_PREF_SIZE )
+                if (!reviewing && i < shownStates.size() - 1) {
+                    def arrow = new Label( "→" )
+                    arrow.setOpacity( 0.6 )
+                    def step = new HBox( 6, chip, arrow ) // a state keeps its arrow when the line wraps
+                    step.setAlignment( Pos.CENTER_LEFT )
+                    chips << step
+                } else {
+                    chips << chip
+                }
+            }
+            classesSummary.getChildren().setAll( chips )
+            setTT( [statesPrefix, classesSummary], reviewing ?
+                "The states a reviewer can assign, out of ${listOut( lockedStateOrder as List )}. Set in States & colors." :
+                "The states a classifier can assign. Annotations start as ${(lockedStateOrder as List)[ 0 ]}, and each left-click moves one on to the next state, in the order of the arrows. Set in States & colors." )
+            // The criteria as plain phrases finishing that sentence, any one of which is enough
+            List phrases = (0..<numRevRows).findAll { switches[ it ].node.getUserData() }.collect { row ->
+                String freq  = frequencySelectors[ row ].getUserData()
+                String state = stateSelectors[ row ].getUserData() ?: states[ 0 ]
+                freq == null                               ? null :
+                freq == session.frequencies[ "different" ] ? "differ between classifiers" :
+                freq == session.frequencies[ "all" ]       ? "are all ${state}" : "include ${state}"
+            }.findAll()
+            String criteria = phrases.join( ", or " )
+            reviewSummary.setText( criteria )
+            setTT( [reviewPrefix, reviewSummary, reviewWhose], "Annotations are reviewed if their subclassifications ${criteria}. Set in Review criteria.\n" +
+                   (classifiers ? "Classifiers looked at: ${listOut( classifiers )} (everyone in the Classifier list)." :
+                                  "No classifiers in the Classifier list yet.") )
+            reviewRow.setVisible( reviewing )
+            reviewRow.setManaged( reviewing )
+            fitPreviews()
+        }
+        modeButtons.selectedToggleProperty().addListener { obs, oldToggle, newToggle -> refreshSettingsSummary() }
+        annoClassField.valueProperty().addListener { obs, oldVal, newVal -> refreshSettingsSummary() }
+        methodChoice.valueProperty().addListener { obs, oldVal, newVal -> refreshSettingsSummary() }
+        classifyingNameSelection.getEditor().textProperty().addListener { obs, oldVal, newVal -> refreshSettingsSummary() }
         
         specifyReviewAnnosBtn.setOnAction {
             def specifyAnnosDialog = new Dialog<ButtonType>()
@@ -3611,13 +4118,11 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             setTT( restoreReviewerAnnoDefaultsBtn, "Restore reviewer criteria to default." )
             addIcon( restoreReviewerAnnoDefaultsBtn, FontAwesome.Glyph.UNDO, 15 )
             
-            setTT( switches.node, "Add more criteria for annotations to review" )
-            
             def frequencySelectorLabel = new Label( "Frequency:" )
             frequencySelectorLabel.setPadding( new Insets( 5 ) )  
             frequencySelectors.each { it.getItems().setAll( session.frequencies.values() ) } // setAll: the selectors outlive the dialog, so reopening it must not add the options again
             frequencySelectors.each { it.setValue( it.getUserData() ) }
-            String freqSelectorTTtext = "Select the frequency of an annotation being classified a specific state."
+            String freqSelectorTTtext = "Select the frequency of an annotation being subclassified as a specific state."
             setTT( [frequencySelectorLabel] + frequencySelectors, freqSelectorTTtext )
             
             def stateSelectorLabel = new Label( "State:" )
@@ -3626,7 +4131,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             stateSelectors.each { it.setEditable( true ) }
             stateSelectors.each { it.setPromptText( "Type or select" ) }
             stateSelectors.each { it.setValue( it.getUserData() ) }
-            setTT( [stateSelectorLabel] + stateSelectors, "State classifications should have (select or type)" )
+            setTT( [stateSelectorLabel] + stateSelectors, "State the subclassifications should have (select or type)" )
             
             def leftSentences = []
             def andLabels = []
@@ -3674,46 +4179,85 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             }
             
             
+            // One row per condition: AND | Review annotations | frequency | state | remove. Rows that aren't
+            // in use are hidden, and conditions are added and removed with buttons, like the states
             def specifyAnnosGrid = new GridPane()
-            specifyAnnosGrid.add( restoreReviewerAnnoDefaultsBtn, 0, 0 )
+            specifyAnnosGrid.setHgap( 10 )
+            specifyAnnosGrid.setVgap( 6 )
+            specifyAnnosGrid.add( frequencySelectorLabel, 2, 0 )
+            specifyAnnosGrid.add( stateSelectorLabel,     3, 0 )
             def rowContainers = [:]
+            def minusBtns = []
             
+            def addConditionBtn = new Button( " Add condition" )
+            addIcon( addConditionBtn, FontAwesome.Glyph.PLUS, 12 )
+            setTT( addConditionBtn, "Add another kind of annotation to review (max ${numRevRows})" )
+            explainWhenDisabled( addConditionBtn ) { "Already at the most conditions (${numRevRows})" }
             
-            for (i in 0..numRevRows-1) {
-                
-                def rowGrid = new GridPane()
-                rowGrid.setHgap( 10 )
-                rowGrid.setVgap( 0 )
-                
-                def toggleRowItems = []
-                
-                rowGrid.add( switches[ i ].node,      0, 1 )
-                rowGrid.add( andLabels[ i ],          1, 0 )
-                rowGrid.add( leftSentences[ i ],      1, 1 )
-                rowGrid.add( frequencySelectors[ i ], 2, 1 )
-                rowGrid.add( stateSelectors[ i ],     3, 1 )
-                
-                toggleRowItems << andLabels[ i ]
-                toggleRowItems << leftSentences[ i ]
-                toggleRowItems << frequencySelectors[ i ]
-                toggleRowItems << stateSelectors[ i ]
-                
-                
-                if (i == 0) {              
-                    rowGrid.add( frequencySelectorLabel, 2, 0 )
-                    rowGrid.add( stateSelectorLabel,     3, 0 )
-                    
-                    andLabels[ i ].setVisible( false )
-                    switches[ i ].node.setVisible( false )
-                
-                } else {
-                    rowContainers[ switches[ i ].node ] = toggleRowItems
+            // Closure: Show the rows in use and hide the rest
+            def showRows = {
+                (0..<numRevRows).each { row ->
+                    boolean on = row == 0 || switches[ row ].status.get()
+                    ([andLabels[ row ], leftSentences[ row ], frequencySelectors[ row ], minusBtns[ row ]].findAll { it != null }).each { node ->
+                        node.setVisible( on && !node.is( andLabels[ 0 ] ) ) // the first condition has no AND
+                        node.setManaged( on )
+                    }
+                    stateSelectors[ row ].setManaged( on )
+                    stateSelectors[ row ].setVisible( on && frequencySelectors[ row ].getValue() != session.frequencies[ "different" ] )
                 }
-                
-                specifyAnnosGrid.add( rowGrid, 0, 2*i + 1, 4, 2 )
+                addConditionBtn.setDisable( (0..<numRevRows).every { switches[ it ].status.get() } )
+                refitPopout( specifyAnnosDialog )
             }
             
-            specifyAnnosDialog.getDialogPane().setContent( specifyAnnosGrid )
+            for (i in 0..numRevRows-1) {
+                int row = i // its own copy, for the remove button's action
+                
+                specifyAnnosGrid.add( andLabels[ row ],          0, row + 1 )
+                specifyAnnosGrid.add( leftSentences[ row ],      1, row + 1 )
+                specifyAnnosGrid.add( frequencySelectors[ row ], 2, row + 1 )
+                specifyAnnosGrid.add( stateSelectors[ row ],     3, row + 1 )
+                
+                if (row == 0) {
+                    minusBtns << null // the first condition can't be removed
+                    
+                } else {
+                    def minusBtn = new Button()
+                    addIcon( minusBtn, FontAwesome.Glyph.MINUS, 10 )
+                    minusBtn.setMinWidth( 28 )
+                    minusBtn.setPrefWidth( 28 )
+                    setTT( minusBtn, "Remove this condition" )
+                    minusBtn.setOnAction {
+                        // Later conditions move up a row, then the last one in use is taken off
+                        int lastOn = (0..<numRevRows).findAll { switches[ it ].status.get() }.max()
+                        (row..<lastOn).each { r ->
+                            frequencySelectors[ r ].setValue( frequencySelectors[ r + 1 ].getValue() )
+                            stateSelectors[ r ].setValue( stateSelectors[ r + 1 ].getValue() )
+                        }
+                        switches[ lastOn ].status.setValue( false )
+                        showRows()
+                    }
+                    minusBtns << minusBtn
+                    specifyAnnosGrid.add( minusBtn, 4, row + 1 )
+                    
+                    rowContainers[ switches[ row ].node ] = [andLabels[ row ], leftSentences[ row ], frequencySelectors[ row ], stateSelectors[ row ]]
+                }
+            }
+            
+            addConditionBtn.setOnAction {
+                int firstOff = switches.findIndexOf { !it.status.get() }
+                if (firstOff < 0) { return }
+                // A second "differing classifications" condition would add nothing, so the new row starts on another
+                def inUse = (0..<firstOff).collect { frequencySelectors[ it ].getValue() }
+                if (frequencySelectors[ firstOff ].getValue() == session.frequencies[ "different" ] && session.frequencies[ "different" ] in inUse) {
+                    frequencySelectors[ firstOff ].setValue( session.frequencies[ "any" ] )
+                }
+                switches[ firstOff ].status.setValue( true )
+                showRows()
+            }
+            
+            def specifyAnnosBox = new VBox( 10, restoreReviewerAnnoDefaultsBtn, specifyAnnosGrid, addConditionBtn )
+            specifyAnnosBox.setPadding( new Insets( 10 ) )
+            specifyAnnosDialog.getDialogPane().setContent( specifyAnnosBox )
             
             // Set initial switches based on previous settings
             switches.each { rowSwitch ->
@@ -3734,12 +4278,17 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 }
             }
             
+            // The state box comes and goes with the frequency, which also changes what's on show
+            def rowsFollowFrequency = { obs, oldVal, newVal -> showRows() } as javafx.beans.value.ChangeListener
+            frequencySelectors.each { it.valueProperty().addListener( rowsFollowFrequency ) }
+            showRows()
+            
             // Making sure there are no empty state names in the rows in use
             okButton.disableProperty().bind(
                 stateSelectors.collect { it.getEditor().textProperty().isEmpty().and( it.visibleProperty() ).and( it.disabledProperty().not() ) }
                     .inject { a, b -> a.or( b ) }
             )
-            explainWhenDisabled( okButton ) { "Choose a state for every row that's switched on" }
+            explainWhenDisabled( okButton ) { "Choose a state for every condition" }
             
             // When the restore defaults button is pressed
             restoreReviewerAnnoDefaultsBtn.setOnAction {     
@@ -3762,12 +4311,45 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 }
                 
                 updateReviewerAnnoRows()
+                showRows()
             }
             
             // Blocking nodes from becoming highlighted when clicked
             disableNonEditableFocusTraversal( specifyAnnosDialog.getDialogPane() )
             
-            def specifyAnnosResult = specifyAnnosDialog.showAndWait()
+            // "?" button, as in the main window
+            addHelpButton( specifyAnnosDialog, "Review criteria",
+                "Which annotations a reviewer will see, out of those every classifier has completed. Each row is one condition: an annotation that meets any of them is reviewed. Changes are only kept if you press OK.",
+                [
+                    [ title: "Frequency",
+                      nodes: [frequencySelectorLabel] + leftSentences + frequencySelectors,
+                      text : "How the classifiers' subclassifications must compare for an annotation to be reviewed." +
+                             "\n'with differing subclassifications': the classifiers disagree." +
+                             "\n'subclassified by ANY as': at least one classifier assigned the state." +
+                             "\n'subclassified by ALL as': every classifier assigned the state.",
+                      now  : { "Reviewing annotations with ${reviewKinds( false ).join( ', plus ' )}." } ],
+                    [ title: "State",
+                      nodes: [stateSelectorLabel] + stateSelectors,
+                      text : "The state the ANY and ALL conditions look for (up to 15 letters and numbers). Pick one from the dropdown or type your own." +
+                             "\nNot needed for differing subclassifications, so it's hidden." ],
+                    [ title: "Add condition, −",
+                      nodes: [addConditionBtn] + minusBtns.findAll(),
+                      text : "Add condition: adds a row (${numRevRows} max)." +
+                             "\n(−) button: removes that row's condition. The first row always stays.",
+                      now  : { "${some( (0..<numRevRows).count { switches[ it ].status.get() } as int, 'condition', 'conditions' )} in use (${numRevRows} max)." } ],
+                    [ title: "Restore defaults",
+                      nodes: [restoreReviewerAnnoDefaultsBtn],
+                      text : "Resets the conditions to the defaults: annotations with differing subclassifications, plus any that a classifier assigned ${defaultReviewAnnos[ 1 ]}." ],
+                    [ title: "OK, Cancel",
+                      nodes: [okButton, specifyAnnosDialog.getDialogPane().lookupButton( ButtonType.CANCEL )],
+                      text : "OK: keeps these conditions for this session and the next." +
+                             "\nCancel: closes the window without changing anything." +
+                             "\nOK is greyed out while a condition has no state.",
+                      now  : { okButton.isDisabled() ? "Not ready. Choose a state for every condition." : "Ready." } ]
+                ] )
+                
+            def specifyAnnosResult = showPopout( specifyAnnosDialog )
+            frequencySelectors.each { it.valueProperty().removeListener( rowsFollowFrequency ) }
             
             // Only commit states/colors to map if OK is pressed in popout window
             if (specifyAnnosResult.get() == ButtonType.OK) {
@@ -3775,6 +4357,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 frequencySelectors.each { it.setUserData( it.getValue() ) }
                 stateSelectors.each     { it.setUserData( it.getValue() ) }
                 switches.each           { it.node.setUserData( it.status.getValue() ) } 
+                refreshSettingsSummary()
             }
         }
         
@@ -3834,7 +4417,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 pMap.classifyingName instanceof String,
                 { classifyingNameSelection.setValue( pMap.classifyingName.toString() ) },
                 { classifyingNameSelection.setValue( "" ) },
-                "Classifying name"
+                "Subclassification name"
             )
             
             updatePrefsOrLog(
@@ -3842,7 +4425,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 { classifyingNameOptions = FXCollections.observableArrayList( pMap.recentClassifyingNames?.unique() );
                   classifyingNameSelection.setItems( classifyingNameOptions ) },
                 { classifyingNameOptions = classifyingNameOptions ?: FXCollections.observableArrayList() },
-                "Classifying name options"
+                "Subclassification name options"
             )
             
             updatePrefsOrLog(
@@ -3851,6 +4434,8 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 { gridSizeField.setText( "500" ) },
                 "Grid size"
             )
+            // Settings saved before there was a choice of method have none: they mean the grid
+            methodChoice.setValue( pMap.singleObjects == true ? oneByOneMethod : byGridMethod )
             
             updatePrefsOrLog(
                 pMap.selectedChannels instanceof List && channelCheckboxes.collect { it.getText() }.containsAll( pMap.selectedChannels ),
@@ -3900,11 +4485,8 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                         (defaultStateOrderAndConfirmedColors[ stateName ] ?: Color.GRAY)
             }
             
-            def savedUnconfirmed = pMap.statesAndColors?[0]?.colorU
-            lockedUnconfirmedColor = savedUnconfirmed instanceof Number ? intToFx( savedUnconfirmed as int ) : defaultUnconfirmedColor
-            
-            if (!savedStates || savedUnconfirmed !instanceof Number) {
-                nonUpdatedPrefs << "Classification states/order/colors"
+            if (!savedStates) {
+                nonUpdatedPrefs << "Subclassification states/order/colors"
             }
             
             // Setting reviewer-available states
@@ -3912,11 +4494,12 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             lockedReviewerStates = savedReviewerStates ? savedReviewerStates.unique() : defaultReviewerStates
             
             if (!savedReviewerStates ) {
-                nonUpdatedPrefs << "Reviewer classification states"
+                nonUpdatedPrefs << "Reviewer subclassification states"
             }
             
             
             rebuildStateColorMap()
+            refreshSettingsSummary()
             
             if (firstPrompt) {
                 if (pMap.size() > 1L) {
@@ -3939,7 +4522,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         def collectCurrentPrefs = {
             def userName          = users.getValue().capitalize()
             def mode              = session.classifierMode ? ActionStrings.CLASSIFIER_MODE : ActionStrings.REVIEWER_MODE
-            def checkingWork      = checkingWorkCheckbox.isSelected()
+            def checkingWork      = checkingWorkSwitch.status.get()
             def selectedChannels  = channelCheckboxes.findAll { it.isSelected() }
                                         .collect { it.getText() }
             
@@ -3947,7 +4530,8 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             def classifyingName         = classifyingNameSelection.getValue()?.trim()
             List recentClassifyingNames = ([classifyingName] + classifyingNameOptions).unique().take( 5 ) // a copy: Export reads this too, and the dropdown keeps all its names
             def gridSizeText            = gridSizeField.getText().trim()
-            def gridSize                = Integer.parseInt( gridSizeText )
+            boolean singleObjects       = methodChoice.getValue() == oneByOneMethod
+            def gridSize                = gridSizeText ? Integer.parseInt( gridSizeText ) : 500 // can be blank when one at a time
             boolean instructions        = prePrefsMap.instructions != null ? prePrefsMap.instructions : true
             
             // Reviewer annotation preferences
@@ -3972,6 +4556,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
                 "classifyingName"        : classifyingName,
                 "recentClassifyingNames" : recentClassifyingNames,
                 "gridSize"               : gridSize,
+                "singleObjects"          : singleObjects,
                 "statesAndColors"        : stateColorMap,
                 "reviewStateFreqs"       : reviewStateFreqs,
                 "reviewStates"           : reviewStates,
@@ -3988,7 +4573,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
             def fileChooser = new FileChooser()
             fileChooser.setTitle( "Export preferences file" )
             fileChooser.setInitialDirectory( projectDirectory )
-            fileChooser.setInitialFileName( "classify-preferences.json" )
+            fileChooser.setInitialFileName( "subclassify-preferences.json" )
             fileChooser.getExtensionFilters().add(
                 new FileChooser.ExtensionFilter( "JSON files", "*.json" )
             )
@@ -4041,7 +4626,7 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         okBtn.disableProperty().bind(
             classifyingNameSelection.getEditor().textProperty().isEmpty()
             .or( users.valueProperty().isNull() )
-            .or( gridSizeField.textProperty().isEmpty() )
+            .or( gridSizeField.textProperty().isEmpty().and( gridSizeField.disabledProperty().not() ) )
             .or( anySelectedChannel.not() )
             .or( annoClassField.valueProperty().isNull() )
         )
@@ -4056,10 +4641,120 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         explainWhenDisabled( okBtn ) { [
             ("Select a ${classifierModeBtn.isSelected() ? 'classifier' : 'reviewer'}" as String): users.getValue() == null,
             "Select an annotation class"  : annoClassField.getValue() == null,
-            "Enter a classifying name"    : !classifyingNameSelection.getEditor().getText(),
-            "Enter a grid size"           : !gridSizeField.getText(),
+            "Enter a subclassification name"    : !classifyingNameSelection.getEditor().getText(),
+            "Enter a grid size"           : !gridSizeField.getText() && !gridSizeField.isDisabled(),
             "Select at least one channel" : !anySelectedChannel.get()
         ] }
+
+        // "?" button: what each input does. Each entry's now: says how that input stands at the moment, read
+        // from the dialog every time the help panel refreshes
+        def modeWord = { classifierModeBtn.isSelected() ? "classifier" : "reviewer" }
+
+        addHelpButton( preferencesDialog, "Manual subclassification",
+            "Lets one or more people subclassify annotations by eye. A reviewer can then make a final call on the ones they disagree on. Each person's subclassifications are saved separately in the annotations' metadata, which can be saved outside of the project.",
+            [
+                [ title: "Mode selection",
+                  nodes: [classifierModeBtn, reviewerModeBtn],
+                  text : "Classifier mode: subclassify ALL annotations of desired class. " +
+                         "\nReviewer mode: subclassify SELECT annotations of a class based on previous user subclassifications.",
+                  now  : { classifierModeBtn.isSelected() ? "Classifier Mode is selected." : "Reviewer Mode is selected." } ],
+                [ title: "User selection",
+                  nodes: [userLabel, userRow],
+                  oneBox: true,
+                  text : "Add user: (+) button > type name > press Enter." +
+                         "\nRemove user: (-) button > select user. " +
+                         "\nSearch button: fills user list with names used on annotations in the project (will be outlined in green).",
+                  now  : { users.getValue() ? "${users.getValue()} is selected as the ${modeWord()}." :
+                           !users.getItems()  ? "No ${modeWord()}s available yet. Add one with the (+) button, or use the search button to find names already used in the project." :
+                                                "No ${modeWord()} selected yet." } ],
+                [ title: "Annotation class",
+                  nodes: [annoClassLabel, annoClassField],
+                  oneBox: true,
+                  text : "The class of annotation to subclassify. The numbers indicate how many annotations of the class are in the image (if open) and the project." + 
+                         "\n\nSelect from classes of existing annotations in the project in the dropdown.",
+                  now  : {
+                      def clsOpts = annoClassField.getItems()
+                      def cls = annoClassField.getValue()                      
+                      !clsOpts ? "No annotations in the project yet, so there are no classes to choose from. Draw or import annotations first." :
+                          cls ? "Annotations of class '${cls.name}' will be subclassified " +
+                                (currentImageName ? "(${cls.imageNum} in image, " : "(") +
+                                "${cls.num as int} in project)" :
+                                "No class selected yet."
+                  } ],
+                [ title: "Subclassification name",
+                  nodes: [classifyingNameLabel, classifyingNameRow],
+                  oneBox: true,
+                  text : "A short name for what is being judged, such as CAA (up to 15 characters). The subclassifications are saved in the annotation's metadata under a key referencing the mode, user, and subclassification name (such as ${session.toolKeyPrefix}_classifier_User1_CAA)." + 
+                         "\n\nType a name or pick a recent one from the dropdown." + 
+                         "\nSearch button: fills the list with subclassification names in the metadata of existing annotations in the project.",
+                  now  : {
+                      String name = classifyingNameSelection.getEditor().getText()
+                      name ? "Subclassifications will be saved under ${session.toolKeyPrefix}_${modeWord()}_${users.getValue() ?:'(name)'}_${name}." :
+                         !classifyingNameSelection.getItems() ? "No name entered yet, and there are no recent ones available. Type a new one, or use the search button to find names already used in the project." :
+                         "No name entered yet. Type one or pick a recent one from the dropdown."
+                  } ],
+                [ title: "Subclassification method",
+                  nodes: [gridSizeLabel, methodRow],
+                  oneBox: true,
+                  text : "Classifier mode only. Choose how you would like to subclassify your objects." +
+                         "\n\n'Grid squares': batch processing. Work through your images along a grid one square at a time. All objects of the selected class that fall within the current square can be subclassified simultaneously. The size of the grid squares can be modified: a bigger grid means fewer squares, with more annotations in each. Left-click on an annotation to cycle its subclassification. Right-click on an annotation to zoom in/out." + 
+                         "\n'One at a time': shows a single annotation at a time, zoomed in on it. Left-click to cycle its subclassification.",
+                  now  : {
+                      if (!classifierModeBtn.isSelected()) { return "Not used in Reviewer Mode." }
+                      if (methodChoice.getValue() == oneByOneMethod) { return "Process objects one at a time." }
+                      gridSizeField.getText() ? "Process objects in ${gridSizeField.getText()} µm squares." : "No grid size entered yet."
+                  } ],
+                [ title: "Subclassify new / Check existing",
+                  nodes: [checkingWorkBox],
+                  text : "Subclassify new: work through objects not yet subclassified." + 
+                         "\nCheck existing: go over objects you have already subclassified.",
+                  now  : { checkingWorkSwitch.status.get() ? "Set to Check existing, so you'll go back over objects you've completed." :
+                                                             "Set to ${newWorkLabel.getText()}, so you'll move through objects you have not yet subclassified." } ],
+                [ title: "Reference channels",
+                  nodes: [fullChannelsBox],
+                  text : "The channels that will help you subclassify your objects (${maxChannels} max). These can be toggled and their brightness changed while you work. Only channels available in all project images are shown.",
+                  now  : {
+                      List names = channelCheckboxes.findAll { it.isSelected() }*.getText()
+                      !channelCheckboxes ? "No channels are shared by every image in the project, so there are none to choose from." :
+                      names ? "${listOut( names )} selected (${names.size()} of ${maxChannels} max)." : "No channels selected yet."
+                  } ],
+                [ title: "Review criteria",
+                  nodes: [reviewRow],
+                  text : "Reviewer mode only. Review SELECT annotations based on their subclassification(s) from all 'Classifier' users. Here, you can specify which annotations to review based on what those subclassifications should be. For example, you can review annotations with subclassifications that differ, or those that have a specific subclassification (such as 'maybe'). The annotations must have the same Annotation class and Subclassification name." + 
+                         "\n\nThe left shows a preview of WHICH annotations will be reviewed. The 'Review criteria' button opens a window to customize that.",
+                  now  : {
+                      if (classifierModeBtn.isSelected()) { return "Not used in Classifier Mode." }
+                      if (!classifierOptions) { return "No classifiers available yet, so there is nothing to review. Subclassify in Classifier Mode first, or use the search button by the Classifier list to find classifiers already in the project." }
+                      List kinds = reviewKinds( true )
+                      kinds ? "You'll review: ${kinds.join( ', plus ' )}." : null
+                  } ],
+                [ title: "Subclassification states & colors",
+                  nodes: [statesRow],
+                  text : "The name, color, and order (classifier mode) of subclasses that you can assign to the chosen objects. They are previewed and can be customized using the 'States & colors' button (${minClassifierStates} to ${maxClassifierStates} states).",
+                  now  : {
+                      List order = lockedStateOrder as List
+                      classifierModeBtn.isSelected() ?
+                          "A classifier can assign ${listOut( order )}, and default to ${order[ 0 ]}." :
+                          "A reviewer can assign ${listOut( order.findAll { it in lockedReviewerStates } )}, out of ${listOut( order )}."
+                  } ],
+                [ title: "Export / Import preferences",
+                  nodes: [exportPrefsBtn, importPrefsBtn],
+                  text : "Helpful for multiple users to have the same settings." ],
+                [ title: "Launch",
+                  nodes: [okBtn],
+                  text : "Starts the session. Works through the project's images with annotations of the chosen class in random order, starting with the open image if it still needs subclassifying. Images you have completed are skipped, so you can stop and pick up later." +
+                         "\n\nPress I during the session to show or hide the controls." +
+                         "\nGreyed out until everything above is filled in: hover over it to see what's missing.",
+                  now  : {
+                      List missing = [ users.getValue() ? null : "a ${modeWord()}".toString(),
+                                       annoClassField.getValue() ? null : "an annotation class",
+                                       classifyingNameSelection.getEditor().getText() ? null : "a subclassification name",
+                                       gridSizeField.getText() || gridSizeField.isDisabled() ? null : "a grid size",
+                                       channelCheckboxes.any { it.isSelected() } ? null : "a channel" ].findAll()
+                      missing ? "Not ready. Still needs ${listOut( missing )}." :
+                                "Ready to ${classifierModeBtn.isSelected() ? 'subclassify' : 'review'} '${annoClassField.getValue().name}' annotations as ${users.getValue()}."
+                  } ]
+            ] )
 
         // Making sure to bring the selection back to the ok button after re-enable first time
         long scriptStart = System.currentTimeMillis()
@@ -4077,6 +4772,11 @@ def getCodePreferences( ViewerSessionVars session, boolean firstPrompt ) {
         
         
         // -- Waiting for output and passing preferences to rest of code --
+        // The "?" button goes at the far left, ahead of Export and Import: the button row lays its buttons out
+        // by kind, with the left-hand kind (L) first, so the help kind (E) is moved in front of it
+        def buttonRow = preferencesDialog.getDialogPane().lookup( ".button-bar" )
+        if (buttonRow instanceof ButtonBar) { buttonRow.setButtonOrder( "E" + buttonRow.getButtonOrder().replace( "E", "" ) ) }
+        
         def dlgResult = preferencesDialog.showAndWait()        
         return dlgResult.get() == ButtonType.OK ? collectCurrentPrefs() : null
     }
@@ -4113,6 +4813,7 @@ while (true) {
     session.toggleChannels      = codePreferences.selectedChannels // Channels to toggle for analysis (keep number of channels low)
     session.annoClass           = codePreferences.annoClass // Class of annotations to review
     session.gridSize            = codePreferences.gridSize // µm bins size for group review (will automatically add grid)
+    session.singleObjects       = session.classifierMode && codePreferences.singleObjects == true // One annotation at a time, not a grid square of them
     session.statesAndColors     = codePreferences.statesAndColors // Map with the order of classes (to change) and respective colors
     session.reviewStateFreqs    = codePreferences.reviewStateFreqs // Frequencies of states to review
     session.reviewStates        = codePreferences.reviewStates // Which states to review
@@ -4284,7 +4985,7 @@ while (true) {
     
     List generalCriteria = ["User: ${session.userName}", 
                             "Object class: ${session.annoClass}", 
-                            "Classifying name: ${session.classifyingName}"]
+                            "Subclassification name: ${session.classifyingName}"]
     
     // Ordering problem image lists to reflect or of images in project
     def orderByName = [:]
@@ -4310,7 +5011,7 @@ while (true) {
         "${userIncompleteImages.size()} image(s) have not been completed by user and cannot be checked.",
         "User Completion", userIncompleteImages )
     addWarningCheck( [session.classifierMode, !session.checkingWork, userIncompleteImages.isEmpty()],
-        "User has classified all viable images.",
+        "User has subclassified all viable images.",
         "User Completion", generalCriteria )
     addWarningCheck( [session.reviewerMode, !session.checkingWork, userIncompleteImages.isEmpty()],
         "User has reviewed all viable images.",
@@ -4318,11 +5019,11 @@ while (true) {
     
     // Classification & Review warnings
     addWarningCheck( [session.reviewerMode, !session.checkingWork, (notFullyClassifiedImages.size() == imageList.size())],
-        "No images have complete classifications to review from ${usersWithIncompleteClassifications}.",
-        "Classification & Review", generalCriteria )
+        "No images have complete subclassifications to review from ${usersWithIncompleteClassifications}.",
+        "Subclassification & Review", generalCriteria )
     addWarningCheck( [session.reviewerMode, !session.checkingWork, (notFullyClassifiedImages.size() !in [0, imageList.size()])],
-        "${notFullyClassifiedImages.size()} image(s) have incomplete classifications to review from ${usersWithIncompleteClassifications}.",
-        "Classification & Review", notFullyClassifiedImages )
+        "${notFullyClassifiedImages.size()} image(s) have incomplete subclassifications to review from ${usersWithIncompleteClassifications}.",
+        "Subclassification & Review", notFullyClassifiedImages )
     
     // Annotation issues warnings
     addWarningCheck( [!imagesWithoutAnnos.isEmpty()],
@@ -4459,7 +5160,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
     Platform.runLater {
         ViewerPlusDisplayOptions.getSharedInstance().setShowOverview( false )
         PathPrefs.annotationStrokeThicknessProperty().set( 1 )
-        changeGrid( viewerSettings, true, session.gridSize, session.gridSize )
+        changeGrid( viewerSettings, !session.singleObjects, session.gridSize, session.gridSize ) // no grid when going one at a time
         viewerSettings.overlayOptions.setShowDetections( true )
         viewerSettings.overlayOptions.setFillDetections( true )
         viewerSettings.overlayOptions.setShowAnnotations( true )
@@ -4628,6 +5329,20 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
             }
             sortedBins = binMap.keySet().sort { a, b -> a[1] <=> b[1] ?: a[0] <=> b[0] }
             
+            // One at a time: every annotation becomes a group of its own. They keep the grid's order (square
+            // by square, then top to bottom and left to right inside a square), so the view moves across the
+            // image steadily instead of jumping about. Everything below then works on groups of one
+            if (session.singleObjects) {
+                def singles = [:]
+                sortedBins.each { key ->
+                    binMap[ key ].sort( false ) { a, b ->
+                        a.getROI().getCentroidY() <=> b.getROI().getCentroidY() ?: a.getROI().getCentroidX() <=> b.getROI().getCentroidX()
+                    }.eachWithIndex { anno, k -> singles[ [key[0], key[1], k] ] = [anno] }
+                }
+                binMap = singles
+                sortedBins = singles.keySet() as List
+            }
+            
             // Storing classification data
             for (anno : annotations) {
                 def value = anno.getMetadata().get( session.userKey )
@@ -4640,6 +5355,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 def binKey = sortedBins[ binIndex ]
                 def group = binMap[ binKey ]
                 session.hoverAnnos = group
+                session.currentGroup = group
                 
                 // Checking if annotations need classification (skipping if they do not)
                 session.groupDone = group.every { containsUserKey( it, session ) }
@@ -4660,7 +5376,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                     def id = anno.getID().toString()
                     
                     if (mdValue)            { anno.setColor( session.statesAndColors.find { it.state == mdValue }?.color ?: BLACK ) }
-                    else if (anno in group) { anno.setColor( session.statesAndColors[0].colorU ) }
+                    else if (anno in group) { anno.setColor( session.statesAndColors[0].color ) }
                     else                    { anno.setColor( BLACK ) }
                     
                     // If wanted, classifed annos out of view will be filled (using detections)
@@ -4691,9 +5407,19 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                 double binY = (session.gridSize / session.pixelSize) * (binKey[1] + 0.5)            
                 double adjustedX = adjustX( session, session.gridSize, session.gridSize, binX )
                 
-                // Focus viewer on group
-                changeViewer( adjustedX, binY, session.gridSize, session.gridSize, true, session, null ) {
-                    nonFreeViewerState = saveViewerState(session)
+                // Focus viewer on group, or on the one annotation (with as much again around it, as in reviewer mode)
+                if (session.singleObjects) {
+                    def roi = group[ 0 ].getROI()
+                    double roiW = roi.getBoundsWidth() * session.pixelSize
+                    double roiH = roi.getBoundsHeight() * session.pixelSize
+                    double roiX = adjustX( session, roiW * 2, roiH * 2, roi.getCentroidX() )
+                    changeViewer( roiX, roi.getCentroidY(), roiW * 2, roiH * 2, true, session, null ) {
+                        nonFreeViewerState = saveViewerState(session)
+                    }
+                } else {
+                    changeViewer( adjustedX, binY, session.gridSize, session.gridSize, true, session, null ) {
+                        nonFreeViewerState = saveViewerState(session)
+                    }
                 }
                 
                 // Remember current viewer state for changes
@@ -4708,7 +5434,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                     // Updating control panel
                     Platform.runLater {
                         alert.setTitle(!session.freeView ?
-                            "Classify group ${binIndex + 1}/${sortedBins.size()} — ${session.userName}" :
+                            "Classify ${session.singleObjects ? 'anno' : 'group'} ${binIndex + 1}/${sortedBins.size()} — ${session.userName}" :
                             "Free View")
                             
                             updateControlPanel( alert, session, uiElements, viewerSettings, queue )
@@ -4736,18 +5462,20 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                 binIndex -= 2
                                 break annoGroupLoop
                             } else {
-                                session.message = "Already at first group."
+                                session.message = session.singleObjects ? "Already at first annotation." : "Already at first group."
                                 conditionallyFireMessage( session )
                             }
                             break
                             
                         case (ActionStrings.TOGGLE_FOCUS): // Looking for annotation mouse is over
-                            toggleFocus( session )  
+                            if (!session.singleObjects || session.freeView) { toggleFocus( session ) } // one at a time, only free view has it
                             break
                             
                         case (ActionStrings.TOGGLE_CLASS):
-                            if (session.hoveredAnno) {
-                                changeClassification( session.hoveredAnno, session )
+                            // One at a time, there is only one annotation it could mean, so the pointer needn't be on it
+                            def toChange = session.hoveredAnno ?: (session.singleObjects && !session.freeView ? group[ 0 ] : null)
+                            if (toChange) {
+                                changeClassification( toChange, session )
                             }
                             break
                             
@@ -4789,7 +5517,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                             for (anno in group) {
                                 anno.getMetadata().remove( session.userKey )
                                 session.annoStateMap.put( anno, session.statesAndColors[0].state )
-                                anno.setColor ( session.statesAndColors[0].colorU )
+                                anno.setColor ( session.statesAndColors[0].color )
                             }
                             Platform.runLater { session.viewer.repaintEntireImage() }
                             
@@ -4835,7 +5563,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
                                     viewerSettings.overlayOptions.setShowDetections( true )
                                     viewerSettings.overlayOptions.setShowAnnotations( true )
                                         
-                                    changeGrid( viewerSettings, true )
+                                    changeGrid( viewerSettings, !session.singleObjects )
                                     
                                     session.freeViewMode = session.freeViewModes[0]
                                     session.allClassAnnos.each { it.setColor( session.currentAnnoColorsMap[ it ] ?: BLACK ) }
@@ -5052,7 +5780,7 @@ for (int imageIndex = 0; imageIndex < session.imagesToProcess.size(); imageIndex
             alert = new Alert( Alert.AlertType.NONE )
             alert.setTitle( "Image complete! (${imagesToDo} images left)" )
             alert.setHeaderText( null )
-            alert.setContentText( "Save classifications and move to next image?" )
+            alert.setContentText( "Save subclassifications and move to next image?" )
             
             // Customize buttons to based on if user inupt
             boolean anyFinishedImageAnnos = session.allClassAnnos.any { anno ->
